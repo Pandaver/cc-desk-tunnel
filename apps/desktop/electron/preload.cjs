@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('desktop', {
   chooseFiles: () => ipcRenderer.invoke('files:choose'),
   pathForFile: (file) => webUtils.getPathForFile(file),
   saveFile: (name, text) => ipcRenderer.invoke('file:save', name, text),
+  saveImage: (type, bytes) => ipcRenderer.invoke('image:save', type, bytes),
   openFolder: (directory) => ipcRenderer.invoke('folder:open', directory),
   openLogs: () => ipcRenderer.invoke('log:open'),
   gitBranch: (directory) => ipcRenderer.invoke('git:branch', directory),

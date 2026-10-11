@@ -32,7 +32,7 @@ const { openLog } = require('./client-log.cjs');
 const { hostname, tmpdir } = require('node:os');
 const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
-const { mkdir, rmdir } = require('node:fs/promises');
+const { mkdir, readdir, rmdir, unlink } = require('node:fs/promises');
 const { pathToFileURL } = require('node:url');
 let bridge;
 // The last connection, kept for its installer download after a service refused this client's version.
@@ -107,6 +107,33 @@ handle('files:choose', async (event) => {
   });
   return result.canceled ? [] : result.filePaths;
 });
+// A picture that is only on the clipboard has no file Claude could be pointed at. It is written into the
+// profile, from where Claude reads it like any other attached file; a week later it is removed at start.
+const pastedDirectory = () => path.join(app.getPath('userData'), 'pasted');
+const pictureTypes = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/bmp': 'bmp',
+};
+handle('image:save', async (_event, type, bytes) => {
+  const extension = pictureTypes[String(type)];
+  if (!extension || !(bytes instanceof Uint8Array) || !bytes.length || bytes.length > 20 << 20)
+    throw new Error('只能粘贴不超过 20 MB 的图片。');
+  await mkdir(pastedDirectory(), { recursive: true });
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+  const target = path.join(pastedDirectory(), `${stamp}-${randomUUID().slice(0, 6)}.${extension}`);
+  await writeFile(target, bytes);
+  return target;
+});
+async function clearPastedPictures() {
+  for (const name of await readdir(pastedDirectory()).catch(() => [])) {
+    const file = path.join(pastedDirectory(), name);
+    const age = Date.now() - (await stat(file).catch(() => ({ mtimeMs: Date.now() }))).mtimeMs;
+    if (age > 7 * 24 * 3600 * 1000) await unlink(file).catch(() => {});
+  }
+}
 // Writes text the page produced (an exported session) where the user chooses.
 handle('file:save', async (event, name, text) => {
   const result = await dialog.showSaveDialog(BrowserWindow.fromWebContents(event.sender), {
@@ -422,6 +449,7 @@ if (process.platform === 'win32')
   app.setAppUserModelId(app.isPackaged ? 'io.github.ccdesktunnel.desktop' : process.execPath);
 app.whenReady().then(() => {
   log(`Client ${app.getVersion()} started.`);
+  void clearPastedPictures();
   if (!ownsInstance) return;
   // Shortcuts are the page's, where the user can change them or turn them off; Electron's default menu would
   // add its own on top (zoom, reload, close). A run from source keeps reload and the developer tools.

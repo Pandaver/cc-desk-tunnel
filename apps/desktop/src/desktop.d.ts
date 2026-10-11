@@ -12,6 +12,7 @@ declare global {
       saveFile: (name: string, text: string) => Promise<boolean>;
       openFolder: (path: string) => Promise<void>;
       openLogs: () => Promise<void>;
+      saveImage: (type: string, bytes: Uint8Array) => Promise<string>;
       // The branch a project's working tree is on, or null outside a repository.
       gitBranch: (path: string) => Promise<string | null>;
       copyText: (text: string) => Promise<void>;
