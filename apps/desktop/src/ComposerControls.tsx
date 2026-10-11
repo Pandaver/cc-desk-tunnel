@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
-import { ArrowLeft, ChevronDown, ChevronRight, CircleGauge, Check, RotateCcw } from 'lucide-react';
+import { ArrowLeft, ChevronDown, ChevronRight, Check, RotateCcw } from 'lucide-react';
 import type {
   Effort,
   NativeCapabilities,
@@ -75,6 +75,15 @@ export default function ComposerControls({
   const shownEffort = preview ?? effort ?? actual;
   const label = chosen?.displayName ?? model ?? '原生默认';
   const context = metrics?.context;
+  // How full the window is, drawn as a ring that changes colour as it runs out.
+  const contextUsed = context ? Math.min(100, Math.max(0, context.percentage)) : 0;
+  const contextLevel = !context
+    ? 'unknown'
+    : contextUsed >= 90
+      ? 'full'
+      : contextUsed >= 70
+        ? 'high'
+        : 'ok';
   async function saveEffort() {
     dragging.current = false;
     if (!commitPending.current || disabled) return;
@@ -108,9 +117,17 @@ export default function ComposerControls({
           onBlur={() => setContextOpen(false)}
           onClick={() => setContextOpen(true)}
         >
-          <CircleGauge
-            style={{ color: context && context.percentage > 80 ? '#b68022' : undefined }}
-          />
+          <svg className={`context-ring ${contextLevel}`} viewBox="0 0 20 20" aria-hidden="true">
+            <circle cx="10" cy="10" r="7.5" pathLength={100} />
+            <circle
+              className="context-ring-used"
+              cx="10"
+              cy="10"
+              r="7.5"
+              pathLength={100}
+              strokeDasharray={`${contextUsed} 100`}
+            />
+          </svg>
         </button>
         {contextOpen && (
           <div className="context-tooltip" role="tooltip">
