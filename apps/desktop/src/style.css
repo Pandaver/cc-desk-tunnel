@@ -1523,6 +1523,10 @@ kbd {
 .tool > summary:hover {
   color: #2f3742;
 }
+.turn-process > .message {
+  font-size: 14px;
+  color: var(--text);
+}
 .turn-process svg,
 .work svg {
   width: 13px;
