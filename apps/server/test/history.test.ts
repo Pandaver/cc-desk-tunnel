@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionStore } from '../src/store.ts';
@@ -10,44 +11,64 @@ import type { EventPayload } from '@cc-desk-tunnel/protocol';
 
 function fixture(t: TestContext) {
   const directory = mkdtempSync(join(tmpdir(), 'cc-desk-tunnel-history-'));
-  const store = new SessionStore(directory);
+  const made = { store: new SessionStore(directory), directory };
   t.after(() => {
-    store.close();
+    made.store.close();
     rmSync(directory, { recursive: true, force: true });
   });
-  const session = store.create(randomUUID(), '长会话', 'D:\\中文 项目', {
+  const session = made.store.create(randomUUID(), '长会话', 'D:\\中文 项目', {
     id: randomUUID(),
     name: '台式机',
   });
-  return { store, directory, session };
+  return { ...made, session, made };
 }
 
-test('history pages retain complete runs and batch deltas without losing content or cursors', (t) => {
-  const { store, session } = fixture(t);
+// A library as versions before 0.2.12 left it: every piece of output a record of its own.
+function reopenAsOld(made: { store: SessionStore; directory: string }) {
+  made.store.database.exec("DELETE FROM migrations WHERE name = 'merged-fragments'");
+  made.store.close();
+  return (made.store = new SessionStore(made.directory));
+}
+const texts = (events: { payload: EventPayload }[]) =>
+  events.map(({ payload }) => (payload.type === 'text.delta' ? payload.text : '')).join('');
+
+test('history pages retain complete runs of a merged library without losing content or cursors', (t) => {
+  const f = fixture(t);
+  const { session } = f;
   const connectionId = randomUUID();
   for (let turn = 0; turn < 20; turn++) {
     const runId = randomUUID(),
       messageId = randomUUID();
-    store.append(session.id, runId, {
+    f.store.append(session.id, runId, {
       type: 'message.user',
       messageId: randomUUID(),
       text: `turn-${turn}`,
       scenario: 'chat',
     });
-    store.append(session.id, runId, { type: 'run.status', status: 'running', connectionId });
+    f.store.append(session.id, runId, { type: 'run.status', status: 'running', connectionId });
     for (let index = 0; index < 100; index++)
-      store.append(session.id, runId, {
+      f.store.append(session.id, runId, {
         type: 'text.delta',
         messageId,
         text: `中文-${turn}-${index};`,
       });
-    store.append(session.id, runId, { type: 'run.status', status: 'completed', connectionId });
+    f.store.append(session.id, runId, { type: 'run.status', status: 'completed', connectionId });
   }
+  const before = f.store.snapshot(session.id).events;
+  const store = reopenAsOld(f.made);
   const all = store.snapshot(session.id).events;
+  assert.equal(all.length, 20 * 4);
+  assert.equal(all.at(-1)!.sequence, before.at(-1)!.sequence);
+  assert.equal(texts(all), texts(before));
   let page = store.history(session.id, randomUUID());
   assert.equal(page.mode, 'replace');
-  assert.equal(page.hasEarlier, true);
   assert.equal(page.lastSequence, all.at(-1)!.sequence);
+  // A cursor from before the merge still says where to go on from.
+  const cursor = before.at(-3)!.sequence;
+  assert.deepEqual(
+    store.history(session.id, randomUUID(), cursor).events.map((event) => event.sequence),
+    all.slice(-2).map((event) => event.sequence),
+  );
   const seen = new Set<string>();
   let text = '';
   for (;;) {
@@ -59,30 +80,17 @@ test('history pages retain complete runs and batch deltas without losing content
         seen.add(event.runId);
       }
     }
-    text =
-      page.events
-        .filter((event) => event.payload.type === 'text.delta')
-        .map((event) => (event.payload.type === 'text.delta' ? event.payload.text : ''))
-        .join('') + text;
-    assert.ok(page.events.length < 100, 'Historical deltas should be batched');
+    text = texts(page.events) + text;
     if (!page.hasEarlier) break;
     page = store.history(session.id, randomUUID(), 0, page.firstSequence);
     assert.equal(page.mode, 'prepend');
   }
   assert.equal(seen.size, 20);
-  assert.equal(
-    text,
-    all
-      .filter((event) => event.payload.type === 'text.delta')
-      .map((event) => (event.payload.type === 'text.delta' ? event.payload.text : ''))
-      .join(''),
-  );
+  assert.equal(text, texts(before));
   assert.equal(store.history(session.id, randomUUID(), all.at(-1)!.sequence).events.length, 0);
-  assert.equal(
-    store.history(session.id, randomUUID(), 1).mode,
-    'replace',
-    'Large reconnect gaps reload a bounded recent page',
-  );
+  // New events go on from the last number.
+  const next = store.append(session.id, randomUUID(), { type: 'native.notice', text: 'next' });
+  assert.equal(next.sequence, before.at(-1)!.sequence + 1);
 });
 
 test('small reconnect gaps only return unseen events and invalid page cursors are rejected', (t) => {
@@ -100,14 +108,14 @@ test('small reconnect gaps only return unseen events and invalid page cursors ar
   const page = store.history(session.id, randomUUID(), 2);
   assert.equal(page.mode, 'append');
   assert.equal(page.lastSequence, 4);
-  assert.equal(page.events.length, 1);
-  assert.equal(page.events[0].payload.type === 'text.delta' && page.events[0].payload.text, 'bc');
+  assert.equal(texts(page.events), 'bc');
   assert.throws(() => store.history(session.id, randomUUID(), 5), /游标/);
   assert.throws(() => store.history(session.id, randomUUID(), 0, 6), /游标/);
 });
 
-test('historical batching keeps tool identities, stream distinctions and message boundaries', (t) => {
-  const { store, session } = fixture(t);
+test('merging an old library keeps tool identities, stream distinctions and message boundaries, and leaves a copy with a note', (t) => {
+  const f = fixture(t);
+  const { session } = f;
   const runId = randomUUID(),
     messageId = randomUUID();
   const payloads: EventPayload[] = [
@@ -122,18 +130,37 @@ test('historical batching keeps tool identities, stream distinctions and message
     { type: 'tool.output', toolId: 'one', stream: 'stdout', text: 'out' },
     { type: 'tool.output', toolId: 'one', stream: 'stderr', text: 'err' },
   ];
-  for (const payload of payloads) store.append(session.id, runId, payload);
-  const events = store.history(session.id, randomUUID()).events;
-  assert.equal(events.length, 7);
+  for (const payload of payloads) f.store.append(session.id, runId, payload);
+  // A new library has nothing to merge and nothing to set aside.
+  assert.deepEqual(readdirSync(f.directory).includes('backups'), false);
+  const store = reopenAsOld(f.made);
+  const events = store.snapshot(session.id).events;
+  assert.deepEqual(
+    events.map((event) => event.sequence),
+    [2, 3, 5, 7, 8, 9, 10],
+  );
   assert.equal(events[0].payload.type === 'text.delta' && events[0].payload.text, 'ab');
   assert.equal(events[2].payload.type === 'thinking.delta' && events[2].payload.text, '思考内容');
   assert.equal(events[3].payload.type === 'tool.input.delta' && events[3].payload.text, '{}');
-  assert.equal(events.at(-1)?.sequence, payloads.length);
-  assert.equal(
-    store.snapshot(session.id).events.length,
-    payloads.length,
-    'Native event records are not rewritten',
+  assert.equal(store.history(session.id, randomUUID()).hasEarlier, false);
+
+  const [backup, ...others] = readdirSync(join(f.directory, 'backups'));
+  assert.equal(others.length, 0);
+  const files = readdirSync(join(f.directory, 'backups', backup));
+  const copy = files.find((file) => file.endsWith('.sqlite'))!;
+  assert.deepEqual(files.sort(), ['README.txt', copy].sort());
+  assert.ok(
+    readFileSync(join(f.directory, 'backups', backup, 'README.txt'), 'utf8').includes(copy),
   );
+  const original = new DatabaseSync(join(f.directory, 'backups', backup, copy));
+  assert.equal(original.prepare('SELECT COUNT(*) AS count FROM events').get()!.count, 10);
+  original.close();
+
+  // It is done once.
+  store.close();
+  const again = (f.made.store = new SessionStore(f.directory));
+  assert.equal(readdirSync(join(f.directory, 'backups')).length, 1);
+  assert.equal(again.snapshot(session.id).events.length, 7);
 });
 
 test('legacy UTF-8 JSON is imported exactly once, kept intact and not resurrected after deletion', (t) => {

@@ -15,7 +15,9 @@ import {
 import {
   authSchema,
   commandSchema,
+  continues,
   deviceIdentitySchema,
+  isFragment,
   leaveSchema,
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
@@ -29,6 +31,7 @@ import type {
   Command,
   Device,
   EventPayload,
+  Fragment,
   ServerMessage,
   Session,
   TerminalControl,
@@ -83,6 +86,8 @@ export type Run = {
   decide?: (allowed: boolean, answers?: Record<string, string>) => void;
   approvals: Map<string, (allowed: boolean, answers?: Record<string, string>) => void>;
   cancelReason?: string;
+  // Output still arriving in pieces: sent on as it comes, recorded once it is whole.
+  open?: Fragment;
   input?: NativeInput;
   controls: { refresh?: () => Promise<void>; stopTask?: (taskId: string) => Promise<void> };
 };
@@ -122,6 +127,8 @@ export type ServerOptions = {
 
 // How many answered requests a connection remembers, to answer a resend of one the same way.
 const REMEMBERED = 256;
+// How much unfinished output a run holds before recording it, in characters.
+const OPEN_LIMIT = 64 * 1024;
 // What the "continue" button sends in the user's place. The turn before it was stopped or cut off, and a
 // command that was under way then may or may not have taken effect.
 const CONTINUE =
@@ -287,7 +294,26 @@ export function createProxyServer(options: ServerOptions) {
     broadcast({ type: 'session.event', event }, sessionId);
     return event;
   }
+  // Records what has arrived of the output the run is in the middle of.
+  function settle(run: Run) {
+    const open = run.open;
+    if (!open) return;
+    run.open = undefined;
+    record(run.sessionId, run.id, open);
+  }
   function emit(run: Run, payload: EventPayload) {
+    if (isFragment(payload)) {
+      if (run.open && !continues(run.open, payload)) settle(run);
+      run.open = run.open ? { ...run.open, text: run.open.text + payload.text } : payload;
+      broadcast(
+        { type: 'session.fragment', sessionId: run.sessionId, runId: run.id, payload },
+        run.sessionId,
+      );
+      // Very long output is recorded a part at a time, so that what is held here stays small.
+      if (run.open.text.length >= OPEN_LIMIT) settle(run);
+      return;
+    }
+    settle(run);
     record(run.sessionId, run.id, payload);
     if (payload.type === 'native.title' && store.get(run.sessionId).session.autoTitle)
       broadcast({
@@ -875,6 +901,17 @@ export function createProxyServer(options: ServerOptions) {
           type: 'session.snapshot',
           ...store.history(command.sessionId, command.requestId, command.afterSequence),
         });
+        // The history ends where the run's unfinished output begins.
+        {
+          const run = runs.get(command.sessionId);
+          if (run?.open)
+            send(peer, {
+              type: 'session.fragment',
+              sessionId: run.sessionId,
+              runId: run.id,
+              payload: run.open,
+            });
+        }
         return command.sessionId;
       case 'session.history':
         send(peer, {

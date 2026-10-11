@@ -1,4 +1,9 @@
-import { PROTOCOL_VERSION, serverMessageSchema } from '@cc-desk-tunnel/protocol';
+import {
+  continues,
+  isFragment,
+  PROTOCOL_VERSION,
+  serverMessageSchema,
+} from '@cc-desk-tunnel/protocol';
 import type {
   AccountState,
   Command,
@@ -47,6 +52,9 @@ export type ClientState = {
   device: Device | null;
   sessions: Session[];
   events: Record<string, SessionEvent[]>;
+  // Output a run is in the middle of, as far as it has arrived. It has no place in the history yet: the
+  // event that records it takes its place.
+  live: Record<string, SessionEvent>;
   history: Record<string, HistoryState>;
   selectedId: string | null;
   error: string | null;
@@ -78,6 +86,7 @@ export class ProxyClient {
     device: null,
     sessions: [],
     events: {},
+    live: {},
     history: {},
     selectedId: null,
     error: null,
@@ -112,9 +121,10 @@ export class ProxyClient {
   private established = false;
   // Tells the answer of the bridge asked for last from those of earlier attempts.
   private turn = 0;
-  // Streamed events are merged in batches so a fast reply does not re-render per fragment.
+  // Streamed events and fragments are taken in batches, in the order they came, so a fast reply does not
+  // re-render per fragment.
   streamTimer: ReturnType<typeof setTimeout> | undefined;
-  streamEvents: SessionEvent[] = [];
+  streamEvents: (SessionEvent | Extract<ServerMessage, { type: 'session.fragment' }>)[] = [];
   // Event history is kept for the most recently viewed sessions only.
   cacheOrder: string[] = [];
   pending = new Map<
@@ -173,6 +183,7 @@ export class ProxyClient {
       preparing: null,
       sessions: [],
       events: {},
+      live: {},
       history: {},
       selectedId: null,
       capabilities: null,
@@ -322,8 +333,10 @@ export class ProxyClient {
         for (const listener of this.terminalListeners) listener(message);
       } else if (message.type === 'session.deleted') {
         const events = { ...this.state.events };
+        const live = { ...this.state.live };
         const history = { ...this.state.history };
         delete events[message.sessionId];
+        delete live[message.sessionId];
         delete history[message.sessionId];
         this.streamEvents = this.streamEvents.filter(
           (event) => event.sessionId !== message.sessionId,
@@ -332,7 +345,7 @@ export class ProxyClient {
         const sessions = this.state.sessions.filter((session) => session.id !== message.sessionId);
         const selectedId =
           this.state.selectedId === message.sessionId ? null : this.state.selectedId;
-        this.update({ sessions, events, history, selectedId });
+        this.update({ sessions, events, live, history, selectedId });
       } else if (message.type === 'session.snapshot') {
         this.flushStream();
         if (
@@ -343,6 +356,11 @@ export class ProxyClient {
           return;
         this.upsert(message.session);
         const id = message.session.id;
+        // History up to now ends where unfinished output begins; the service sends that again, whole.
+        if (message.mode !== 'prepend' && this.state.live[id]) {
+          const { [id]: _stale, ...live } = this.state.live;
+          this.update({ live });
+        }
         const previous = this.state.history[id];
         const history = {
           firstSequence:
@@ -365,6 +383,10 @@ export class ProxyClient {
         if (payload.type === 'native.metrics') this.update({ metrics: payload });
         if (!this.cacheOrder.includes(message.event.sessionId)) return;
         this.streamEvents.push(message.event);
+        this.streamTimer ??= setTimeout(() => this.flushStream(), 32);
+      } else if (message.type === 'session.fragment') {
+        if (!this.cacheOrder.includes(message.sessionId)) return;
+        this.streamEvents.push(message);
         this.streamTimer ??= setTimeout(() => this.flushStream(), 32);
       }
     };
@@ -441,12 +463,32 @@ export class ProxyClient {
     clearTimeout(this.streamTimer);
     this.streamTimer = undefined;
     const grouped = new Map<string, SessionEvent[]>();
-    for (const event of this.streamEvents) {
-      const events = grouped.get(event.sessionId) ?? [];
-      events.push(event);
-      grouped.set(event.sessionId, events);
+    const live = { ...this.state.live };
+    let moved = false;
+    for (const item of this.streamEvents) {
+      const open = live[item.sessionId];
+      if ('type' in item) {
+        const { sessionId, runId, payload } = item;
+        if (!isFragment(payload)) continue;
+        const last = open?.runId === runId ? open.payload : undefined;
+        live[sessionId] =
+          open && last && isFragment(last) && continues(last, payload)
+            ? { ...open, payload: { ...payload, text: last.text + payload.text } }
+            : { sessionId, runId, sequence: 0, createdAt: new Date().toISOString(), payload };
+        moved = true;
+        continue;
+      }
+      // Whatever the run records next comes after its unfinished output, which is recorded first.
+      if (open?.runId === item.runId) {
+        delete live[item.sessionId];
+        moved = true;
+      }
+      const events = grouped.get(item.sessionId) ?? [];
+      events.push(item);
+      grouped.set(item.sessionId, events);
     }
     this.streamEvents = [];
+    if (moved) this.update({ live });
     for (const [id, events] of grouped) this.merge(id, events);
   }
   private merge(
@@ -535,13 +577,15 @@ export class ProxyClient {
     this.flushStream();
     this.cacheOrder = [...this.cacheOrder.filter((id) => id !== sessionId), sessionId];
     const events = { ...this.state.events };
+    const live = { ...this.state.live };
     const history = { ...this.state.history };
     while (this.cacheOrder.length > 4) {
       const evicted = this.cacheOrder.shift()!;
       delete events[evicted];
+      delete live[evicted];
       delete history[evicted];
     }
-    this.update({ selectedId: sessionId, events, history });
+    this.update({ selectedId: sessionId, events, live, history });
     if (this.state.status === 'connected') this.load(sessionId);
   }
   // Terminal output bypasses the state store; xterm consumes it directly.

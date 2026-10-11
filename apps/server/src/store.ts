@@ -1,8 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import { chmodSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { snapshotSchema, sessionSchema, terminalStatuses } from '@cc-desk-tunnel/protocol';
+import {
+  continues,
+  isFragment,
+  snapshotSchema,
+  sessionSchema,
+  terminalStatuses,
+} from '@cc-desk-tunnel/protocol';
 import { DomainError } from './errors.ts';
 import type {
   Device,
@@ -19,38 +25,37 @@ type StoredSession = SessionSnapshot & { createRequestId: string };
 const pageEvents = 1000;
 const pageBytes = 512 * 1024;
 
-function batchHistory(events: SessionEvent[]) {
-  const result: SessionEvent[] = [];
-  for (const event of events) {
-    const previous = result.at(-1);
-    const current = event.payload;
-    const last = previous?.payload;
-    if (
-      previous &&
-      last &&
-      event.runId === previous.runId &&
-      ((current.type === 'text.delta' &&
-        last.type === 'text.delta' &&
-        current.messageId === last.messageId) ||
-        (current.type === 'thinking.delta' &&
-          last.type === 'thinking.delta' &&
-          current.messageId === last.messageId) ||
-        (current.type === 'tool.input.delta' &&
-          last.type === 'tool.input.delta' &&
-          current.toolId === last.toolId) ||
-        (current.type === 'tool.output' &&
-          last.type === 'tool.output' &&
-          current.toolId === last.toolId &&
-          current.stream === last.stream))
-    ) {
-      result[result.length - 1] = {
-        ...event,
-        payload: { ...current, text: (last as typeof current).text + current.text },
-      };
-    } else result.push(event);
-  }
-  return result;
-}
+// What goes beside the copy of the history made before it is rewritten.
+const backupNote = (file: string) => `CC Desk Tunnel：会话历史备份
+
+${file} 是升级前的会话库（sessions.sqlite）的完整副本，在服务端第一次以新版本启动、整理会话历史之前生成。
+
+为什么会有它
+  旧版本把 Claude 输出的每一小段文字各存为一条记录。新版本改为一段输出只存一条，并在升级时把已有的
+  记录按同样的方式合并。合并不改变任何会话的内容，只减少记录的条数和文件的大小。这份副本是合并之前的原样。
+
+什么时候用得上
+  正常情况下用不上。合并后的会话库旧版本也能直接读取，退回旧版本不需要这份副本。
+  只有在升级后发现某个会话的历史内容不对时，才需要用它恢复。
+
+如何恢复
+  1. 停止服务。
+  2. 在数据目录里删除 sessions.sqlite、sessions.sqlite-wal、sessions.sqlite-shm（后两个可能不存在）。
+  3. 把 ${file} 复制到数据目录，改名为 sessions.sqlite。
+  4. 启动服务。服务会重新备份并再次合并。
+  注意：恢复之后，升级以来新产生的会话和消息不在其中。
+
+确认一切正常后，这个目录可以整个删除。
+
+---
+
+${file} is a full copy of the session library (sessions.sqlite) as it was before the service, started in a new
+version for the first time, merged the records of streamed output: one record for a stretch of output where
+there was one for each piece. No content changes. Older versions read the merged library as it is. To go back
+to the copy: stop the service, delete sessions.sqlite, sessions.sqlite-wal and sessions.sqlite-shm from the
+data directory, copy ${file} there as sessions.sqlite and start the service; what was added since the upgrade
+is not in it. Once all is well this directory can be deleted.
+`;
 
 // Reading a session's native state when it is opened is not use of it: these do not move it up the list.
 const stateReadings = new Set<EventPayload['type']>(['native.capabilities', 'native.metrics']);
@@ -58,6 +63,8 @@ const stateReadings = new Set<EventPayload['type']>(['native.capabilities', 'nat
 export class SessionStore {
   directory: string;
   database: DatabaseSync;
+  // Sessions as last read or written: an event is recorded without reading its session back.
+  private known = new Map<string, { record: string; createRequestId: string }>();
 
   constructor(directory: string) {
     this.directory = directory;
@@ -81,6 +88,7 @@ export class SessionStore {
     try {
       this.importJson();
       this.restoreUpdatedAt();
+      this.mergeFragments();
       for (const session of this.list()) {
         if (!session.activeRun) continue;
         const { id: runId, connectionId } = session.activeRun;
@@ -201,6 +209,89 @@ export class SessionStore {
     }
   }
 
+  // Output used to be stored a piece at a time and put together when read. It is stored whole now, and what
+  // is already there is put together once, after a copy of the library has been set aside. An event that
+  // takes in the ones before it keeps its own number, so the numbers clients hold stay good.
+  private mergeFragments() {
+    if (this.database.prepare("SELECT 1 FROM migrations WHERE name = 'merged-fragments'").get())
+      return;
+    const before = Number(
+      this.database.prepare('SELECT COUNT(*) AS count FROM events').get()!.count,
+    );
+    if (!before) {
+      this.database.prepare("INSERT INTO migrations VALUES ('merged-fragments')").run();
+      return;
+    }
+    const stamp = new Date().toISOString().replace(/\D/g, '').slice(0, 14);
+    const backups = join(this.directory, 'backups', `history-${stamp}`);
+    const file = `sessions-${stamp}.sqlite`;
+    mkdirSync(backups, { recursive: true, mode: 0o700 });
+    this.database.exec(`VACUUM INTO '${join(backups, file).replaceAll("'", "''")}'`);
+    if (process.platform !== 'win32') chmodSync(join(backups, file), 0o600);
+    writeFileSync(join(backups, 'README.txt'), backupNote(file), { mode: 0o600 });
+    const rows = this.database.prepare(
+      'SELECT sequence, data FROM events WHERE session_id = ? ORDER BY sequence',
+    );
+    const rewrite = this.database.prepare(
+      'UPDATE events SET data = ? WHERE session_id = ? AND sequence = ?',
+    );
+    const remove = this.database.prepare(
+      'DELETE FROM events WHERE session_id = ? AND sequence >= ? AND sequence < ?',
+    );
+    this.database.exec('BEGIN');
+    try {
+      for (const session of this.database.prepare('SELECT id FROM sessions').all()) {
+        const id = String(session.id);
+        // The stretch being put together: its first number, and its last event holding all of the text.
+        let open: { first: number; event: SessionEvent; merged: boolean } | undefined;
+        const close = () => {
+          if (open?.merged) {
+            remove.run(id, open.first, open.event.sequence);
+            rewrite.run(JSON.stringify(open.event), id, open.event.sequence);
+          }
+          open = undefined;
+        };
+        for (const row of rows.all(id)) {
+          const event = JSON.parse(String(row.data)) as SessionEvent;
+          const payload = event.payload;
+          const last = open?.event.payload;
+          if (
+            open &&
+            last &&
+            isFragment(payload) &&
+            isFragment(last) &&
+            event.runId === open.event.runId &&
+            continues(last, payload)
+          ) {
+            open.event = { ...event, payload: { ...payload, text: last.text + payload.text } };
+            open.merged = true;
+            continue;
+          }
+          close();
+          if (isFragment(payload)) open = { first: event.sequence, event, merged: false };
+        }
+        close();
+      }
+      this.database.prepare("INSERT INTO migrations VALUES ('merged-fragments')").run();
+      this.database.exec('COMMIT');
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
+    const after = Number(
+      this.database.prepare('SELECT COUNT(*) AS count FROM events').get()!.count,
+    );
+    // Giving the space back is worth having and nothing depends on it.
+    try {
+      this.database.exec(
+        'PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);',
+      );
+    } catch {}
+    console.log(
+      `Session history merged: ${before} records are now ${after}. The library as it was is kept in ${backups}`,
+    );
+  }
+
   list(): Session[] {
     return this.database
       .prepare('SELECT metadata FROM sessions')
@@ -209,15 +300,28 @@ export class SessionStore {
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
+  private entry(sessionId: string) {
+    let entry = this.known.get(sessionId);
+    if (!entry) {
+      const row = this.database
+        .prepare('SELECT metadata, create_request_id FROM sessions WHERE id = ?')
+        .get(sessionId);
+      if (!row) throw new DomainError('not_found', '会话不存在。');
+      entry = {
+        record: JSON.stringify(sessionSchema.parse(JSON.parse(String(row.metadata)))),
+        createRequestId: String(row.create_request_id),
+      };
+      this.known.set(sessionId, entry);
+    }
+    return entry;
+  }
+  // The caller gets its own copy: what it changes counts once it is saved.
   get(sessionId: string): StoredSession {
-    const row = this.database
-      .prepare('SELECT metadata, create_request_id FROM sessions WHERE id = ?')
-      .get(sessionId);
-    if (!row) throw new DomainError('not_found', '会话不存在。');
+    const entry = this.entry(sessionId);
     const store = this;
     return {
-      session: sessionSchema.parse(JSON.parse(String(row.metadata))),
-      createRequestId: String(row.create_request_id),
+      session: JSON.parse(entry.record) as Session,
+      createRequestId: entry.createRequestId,
       get events() {
         return store.events(sessionId);
       },
@@ -390,7 +494,7 @@ export class SessionStore {
           session,
           requestId,
           mode: 'append',
-          events: batchHistory(events),
+          events,
           firstSequence: events[0]?.sequence ?? 0,
           lastSequence: last,
           hasEarlier: false,
@@ -424,10 +528,15 @@ export class SessionStore {
       session,
       requestId,
       mode: beforeSequence === undefined ? 'replace' : 'prepend',
-      events: batchHistory(events),
+      events,
       firstSequence: first,
       lastSequence: events.at(-1)?.sequence ?? 0,
-      hasEarlier: first > 1,
+      // Numbers are not consecutive in history that was merged, so the first of a session need not be 1.
+      hasEarlier:
+        !!first &&
+        !!this.database
+          .prepare('SELECT 1 FROM events WHERE session_id = ? AND sequence < ? LIMIT 1')
+          .get(sessionId, first),
     };
   }
 
@@ -460,6 +569,7 @@ export class SessionStore {
       this.database.exec('COMMIT');
     } catch (error) {
       this.database.exec('ROLLBACK');
+      this.known.delete(sessionId);
       throw error;
     }
     return event;
@@ -469,6 +579,7 @@ export class SessionStore {
     const { session } = this.get(sessionId);
     if (session.activeRun) throw new DomainError('run_active', '请先停止运行再删除会话。');
     this.database.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+    this.known.delete(sessionId);
   }
   configure(
     sessionId: string,
@@ -571,9 +682,10 @@ export class SessionStore {
     return session;
   }
   private save(session: Session) {
-    this.database
-      .prepare('UPDATE sessions SET metadata = ? WHERE id = ?')
-      .run(JSON.stringify(session), session.id);
+    const record = JSON.stringify(session);
+    this.database.prepare('UPDATE sessions SET metadata = ? WHERE id = ?').run(record, session.id);
+    const entry = this.known.get(session.id);
+    if (entry) entry.record = record;
   }
   close() {
     this.database.close();

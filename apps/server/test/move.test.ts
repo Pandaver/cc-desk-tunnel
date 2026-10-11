@@ -10,12 +10,20 @@ import { SessionStore } from '../src/store.ts';
 const device = { id: randomUUID(), name: '台式机' };
 function fixture(t: TestContext) {
   const directory = mkdtempSync(join(tmpdir(), 'cc-desk-tunnel-move-'));
-  const store = new SessionStore(directory);
+  let store = new SessionStore(directory);
   t.after(() => {
     store.close();
     rmSync(directory, { recursive: true, force: true });
   });
-  return { store, session: store.create(randomUUID(), '会话', 'D:\\项目 甲', device) };
+  return {
+    store,
+    session: store.create(randomUUID(), '会话', 'D:\\项目 甲', device),
+    // The library as a service that starts on it finds it.
+    reopen() {
+      store.close();
+      return (store = new SessionStore(directory));
+    },
+  };
 }
 // What a first native run leaves behind: the prompt it was given and a native session to resume.
 function ran(store: SessionStore, sessionId: string) {
@@ -100,11 +108,13 @@ test('a session taken to another computer tells Claude of the computer and its d
 });
 
 test('a session from before computers were told apart becomes that of the first to use it, unannounced', (t) => {
-  const { store, session } = fixture(t);
-  ran(store, session.id);
-  store.database.exec(
+  const made = fixture(t);
+  const { session } = made;
+  ran(made.store, session.id);
+  made.store.database.exec(
     "UPDATE sessions SET metadata = json_remove(metadata, '$.device', '$.prompt.device')",
   );
+  const store = made.reopen();
   assert.equal(store.get(session.id).session.device, undefined);
   assert.deepEqual(store.claim(session.id, device).device, device);
   assert.equal(store.notice(session.id), '');

@@ -281,6 +281,26 @@ export type NativeSession = Payload<'native.session'>;
 export type NativeContext = Payload<'native.context'>;
 export type NativeCapabilities = Payload<'native.capabilities'>;
 export type NativeMetrics = Payload<'native.metrics'>;
+// Output that arrives in pieces. While it arrives, each piece goes to those watching as a `session.fragment`,
+// which is neither stored nor numbered; once the stretch is over it is recorded as one event of the same
+// type holding all of its text.
+export const fragmentTypes = [
+  'text.delta',
+  'thinking.delta',
+  'tool.input.delta',
+  'tool.output',
+] as const;
+export type Fragment = Payload<(typeof fragmentTypes)[number]>;
+export function isFragment(payload: EventPayload): payload is Fragment {
+  return (fragmentTypes as readonly string[]).includes(payload.type);
+}
+// Whether `next` goes on where `open` stopped: the same message, or the same tool and stream.
+export function continues(open: Fragment, next: Fragment) {
+  if (open.type !== next.type) return false;
+  if ('messageId' in open) return open.messageId === (next as typeof open).messageId;
+  if (open.toolId !== (next as typeof open).toolId) return false;
+  return open.type !== 'tool.output' || open.stream === (next as typeof open).stream;
+}
 export const eventSchema = z.object({
   sessionId: id,
   runId: id,
@@ -584,6 +604,12 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('session.updated'), session: sessionSchema }),
   z.object({ type: z.literal('session.deleted'), sessionId: id }),
   z.object({ type: z.literal('session.event'), event: eventSchema }),
+  z.object({
+    type: z.literal('session.fragment'),
+    sessionId: id,
+    runId: id,
+    payload: eventPayloadSchema,
+  }),
   z.object({ type: z.literal('account.state'), ...accountStateSchema.shape }),
   z.object({ type: z.literal('settings.state'), requestId: id, values: nativeSettingsSchema }),
   z.object({ type: z.literal('usage.summary'), requestId: id, ...usageSummarySchema.shape }),

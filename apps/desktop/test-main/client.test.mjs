@@ -128,6 +128,47 @@ test('stream notifications are batched and pending events cannot cross a disconn
   assert.equal(client.state.events[session.id], undefined);
 });
 
+test('output still arriving is kept apart from the history until the event that records it', async (t) => {
+  const { client, socket, sessions, snapshot } = fixture(t);
+  const session = sessions[0];
+  client.select(session.id);
+  snapshot(session, [event(session.id, 1)]);
+  const runId = randomUUID(),
+    messageId = randomUUID();
+  const piece = (text, id = messageId) =>
+    socket.message({
+      type: 'session.fragment',
+      sessionId: session.id,
+      runId,
+      payload: { type: 'text.delta', messageId: id, text },
+    });
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+  piece('你');
+  piece('好');
+  await settle();
+  assert.equal(client.state.live[session.id].payload.text, '你好');
+  assert.equal(client.state.events[session.id].length, 1);
+  assert.equal(client.state.history[session.id].lastSequence, 1);
+
+  // The recorded event takes its place; what comes after it starts anew.
+  const recorded = { ...event(session.id, 2, '你好'), runId };
+  socket.message({ type: 'session.event', event: recorded });
+  piece('下一段', randomUUID());
+  await settle();
+  assert.equal(client.state.events[session.id].length, 2);
+  assert.equal(client.state.live[session.id].payload.text, '下一段');
+
+  // After a reconnect the history says where it ends and the service sends the rest again, whole.
+  client.select(session.id);
+  snapshot(session, [], { mode: 'append', lastSequence: 2 });
+  assert.equal(client.state.live[session.id], undefined);
+  piece('下一段，接着', randomUUID());
+  await settle();
+  assert.equal(client.state.live[session.id].payload.text, '下一段，接着');
+  socket.message({ type: 'session.deleted', sessionId: session.id });
+  assert.equal(client.state.live[session.id], undefined);
+});
+
 test('earlier pages prepend in one batch while preserving the newest reconnect cursor', async (t) => {
   const { client, socket, sessions, snapshot } = fixture(t);
   const session = sessions[0];

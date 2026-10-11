@@ -3,6 +3,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -177,7 +178,16 @@ export function App() {
   const sessions = state.sessions.filter((session) => isHere(session, state.device));
   const elsewhere = state.sessions.filter((session) => !isHere(session, state.device));
   const away = !!selected && !isHere(selected, state.device);
-  const events = selected ? (state.events[selected.id] ?? []) : [];
+  const recorded = selected ? state.events[selected.id] : undefined;
+  const unfinished = selected ? state.live[selected.id] : undefined;
+  // Output still arriving is shown where the event that records it will be.
+  const events = useMemo(
+    () =>
+      unfinished
+        ? [...(recorded ?? []), { ...unfinished, sequence: (recorded?.at(-1)?.sequence ?? 0) + 1 }]
+        : (recorded ?? []),
+    [recorded, unfinished],
+  );
   const history = selected ? state.history[selected.id] : undefined;
   const nativeSession = latest(events, 'native.session');
   const capabilities = latest(events, 'native.capabilities') ?? state.capabilities;

@@ -192,6 +192,43 @@ test('streams ordered multi-turn UTF-8 events and persists without credentials',
   restored.close();
 });
 
+test('output goes out in fragments and is recorded once it is whole', async (t) => {
+  const f = await fixture(t, 20);
+  const client = await f.connect();
+  const sessionId = await f.create(client);
+  const text = '一段足够长的话，分成许多片送出。'.repeat(4);
+  await client.request({ type: 'message.send', sessionId, text, scenario: 'chat' });
+  const pieces: string[] = [];
+  const fragment = async (from: Client) => {
+    const message = await from.wait((message) => message.type === 'session.fragment');
+    assert.ok(message.type === 'session.fragment' && message.payload.type === 'text.delta');
+    return message.payload.text;
+  };
+  pieces.push(await fragment(client));
+  pieces.push(await fragment(client));
+  // Nothing of it is in the history yet; a window that opens the session now is sent what there is so far.
+  assert.ok(
+    !f.server.store.snapshot(sessionId).events.some((e) => e.payload.type === 'text.delta'),
+  );
+  const other = await f.connect();
+  await other.request({ type: 'session.subscribe', sessionId, afterSequence: 0 });
+  const caught = await fragment(other);
+  assert.ok(caught.startsWith(pieces.join('')));
+  await client.wait(
+    (message) =>
+      message.type === 'session.event' &&
+      message.event.payload.type === 'run.status' &&
+      message.event.payload.status === 'completed',
+  );
+  const recorded = f.server.store
+    .snapshot(sessionId)
+    .events.flatMap((event) => (event.payload.type === 'text.delta' ? [event.payload.text] : []));
+  // One event for each of the two messages of the simulated reply, however many pieces they came in.
+  assert.equal(recorded.length, 2);
+  assert.ok(recorded[0].startsWith(pieces.join('')));
+  assert.ok(recorded[1].includes('离线模拟回复'));
+});
+
 for (const allowed of [true, false]) {
   test(`approval ${allowed ? 'allow' : 'deny'} produces a single simulated tool result`, async (t) => {
     const f = await fixture(t);
