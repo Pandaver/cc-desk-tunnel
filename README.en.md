@@ -136,7 +136,11 @@ That describes the structure. **It is not a guarantee about your account.** Keep
 
 ### When a working connection drops
 
-The client checks every 15 seconds that the service is still there and, after about 45 seconds without any answer, treats the connection as lost and returns to the sign-in page; the service does the same for the client. A task that was running is ended by the service; after reconnecting, the session shows where it stopped.
+Nothing needs doing when the connection drops: the client stays where it is and reconnects by itself, for as long as it takes, then catches up on what happened meanwhile. A task that was running goes on in the service; only the command that was executing on the computer at that moment fails, which Claude sees and deals with, and later commands wait for the computer to come back.
+
+A task stops only after the computer has been away for more than 5 minutes (`PROXY_GRACE_SECONDS` on the server changes this). Back in the session, the "continue" button at the lower right of the message box takes it up again without writing anything; the same goes for a task stopped by hand. Choosing "Disconnect" or quitting the client ends a task at once.
+
+The client checks every 15 seconds that the service is still there and, after about 45 seconds without any answer, treats the connection as lost; the service does the same for the client. It returns to the sign-in page only when the service refuses it outright (wrong token, another version).
 
 To find which part of the way failed, compare both records:
 

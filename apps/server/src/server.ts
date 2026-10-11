@@ -1298,7 +1298,7 @@ export function createProxyServer(options: ServerOptions) {
       release(peer);
       if (peer.authenticated && !closing)
         console.log(
-          `Connection ${peer.id.slice(0, 8)} closed after ${Math.round((Date.now() - opened) / 1000)} s: ${peer.left ? 'the client left' : timedOut ? 'no heartbeat answer for 45s' : `code ${code}`}; runs of its device: ${before}${device && seats.get(device)?.away ? `, kept for ${Math.round(graceMs / 1000)} s` : before ? ', going on or ended' : ''}`,
+          `Connection ${peer.id.slice(0, 8)} closed after ${Math.round((Date.now() - opened) / 1000)} s: ${peer.left ? 'the client left' : timedOut ? 'no heartbeat answer for 45s' : `code ${code}`}; runs of its device: ${before}${!before ? '' : device && seats.get(device)?.away ? `, kept for ${Math.round(graceMs / 1000)} s` : count() ? ', going on over another connection' : ', ended'}`,
         );
     });
   });
