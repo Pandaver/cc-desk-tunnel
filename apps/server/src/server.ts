@@ -1335,12 +1335,14 @@ export function createProxyServer(options: ServerOptions) {
       if (!signedIn) throttle.leave(address);
       // Why a connection ended is the first thing needed when a run was cut short.
       const device = peer.device?.id;
-      const count = () => [...runs.values()].filter((run) => run.device === device).length;
-      const before = count();
+      const before = [...runs.values()].filter((run) => run.device === device).length;
       release(peer);
+      // A native run that is being ended takes a moment to go: what became of the runs is told by whether the
+      // computer still has a place here.
+      const seat = device ? seats.get(device) : undefined;
       if (peer.authenticated && !closing)
         console.log(
-          `Connection ${peer.id.slice(0, 8)} closed after ${Math.round((Date.now() - opened) / 1000)} s: ${peer.left ? 'the client left' : timedOut ? 'no heartbeat answer for 45s' : `code ${code}`}; runs of its device: ${before}${!before ? '' : device && seats.get(device)?.away ? `, kept for ${Math.round(graceMs / 1000)} s` : count() ? ', going on over another connection' : ', ended'}`,
+          `Connection ${peer.id.slice(0, 8)} closed after ${Math.round((Date.now() - opened) / 1000)} s: ${peer.left ? 'the client left' : timedOut ? 'no heartbeat answer for 45s' : `code ${code}`}; runs of its device: ${before}${!before ? '' : !seat ? ', ended' : seat.away ? `, kept for ${Math.round(graceMs / 1000)} s` : ', going on over another connection'}`,
         );
     });
   });
