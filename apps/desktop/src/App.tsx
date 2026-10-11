@@ -180,13 +180,10 @@ export function App() {
   const away = !!selected && !isHere(selected, state.device);
   const recorded = selected ? state.events[selected.id] : undefined;
   const unfinished = selected ? state.live[selected.id] : undefined;
-  // Output still arriving is shown where the event that records it will be.
   const events = useMemo(
-    () =>
-      unfinished
-        ? [...(recorded ?? []), { ...unfinished, sequence: (recorded?.at(-1)?.sequence ?? 0) + 1 }]
-        : (recorded ?? []),
-    [recorded, unfinished],
+    () => (selected ? client.shown(selected.id) : []),
+    // What is shown changes with these two.
+    [selected?.id, recorded, unfinished],
   );
   const history = selected ? state.history[selected.id] : undefined;
   const nativeSession = latest(events, 'native.session');

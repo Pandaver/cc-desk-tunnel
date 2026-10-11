@@ -524,6 +524,15 @@ export class ProxyClient {
       },
     });
   }
+  // A session's events as they are shown: what is recorded, then the output still arriving, where the event
+  // that records it will be.
+  shown(sessionId: string): SessionEvent[] {
+    const recorded = this.state.events[sessionId] ?? [];
+    const unfinished = this.state.live[sessionId];
+    return unfinished
+      ? [...recorded, { ...unfinished, sequence: (recorded.at(-1)?.sequence ?? 0) + 1 }]
+      : recorded;
+  }
   private load(sessionId: string) {
     const previous = this.state.history[sessionId];
     const afterSequence = previous?.lastSequence ?? 0;
