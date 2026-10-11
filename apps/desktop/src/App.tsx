@@ -681,7 +681,8 @@ export function App() {
             {
               label: '原生终端',
               icon: <SquareTerminal />,
-              disabled: !idle || anyRun,
+              // A terminal takes only its own session; others may be running.
+              disabled: !idle || !!session.activeRun,
               run: () => {
                 show(session.id);
                 setTerminalSessionId(session.id);
