@@ -13,6 +13,7 @@ import {
   FileDown,
   FolderInput,
   FolderOpen,
+  FolderSymlink,
   GitFork,
   Laptop,
   LogOut,
@@ -676,6 +677,19 @@ export function App() {
           });
         },
       },
+      // A session on another computer is taken over first, with a directory here.
+      ...(isHere(session, state.device)
+        ? [
+            {
+              label: '移到其他项目…',
+              icon: <FolderSymlink />,
+              disabled: !idle || !!session.activeRun,
+              run: () => {
+                if (menu) setMenu({ ...menu, kind: 'move', sessionId: session.id });
+              },
+            },
+          ]
+        : []),
       ...(nativeMode
         ? [
             {
@@ -1331,6 +1345,8 @@ export function App() {
       )}
       {menu && openMenu && (
         <Menu
+          // One menu may give way to another in the same place, which is then laid out anew.
+          key={menu.kind}
           label={openMenu.label}
           heading={'heading' in openMenu ? openMenu.heading : undefined}
           x={menu.x}

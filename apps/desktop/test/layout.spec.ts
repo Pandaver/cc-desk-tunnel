@@ -219,6 +219,17 @@ test('a question is answered with its choices, and a session or a whole project 
   await page.getByRole('button', { name: '添加', exact: true }).click();
   const chip = page.getByRole('button', { name: '会话所在的项目', exact: true });
   await expect(chip).toContainText('中文项目');
+  // The session's own menu leads to the same choice.
+  const row = page.locator('.session-row.selected');
+  await row.hover();
+  await row.getByRole('button', { name: '会话操作', exact: true }).click();
+  await page.getByRole('menuitem', { name: '移到其他项目…', exact: true }).click();
+  await expect(page.getByRole('menu', { name: '会话所在的项目', exact: true })).toBeVisible();
+  await page.getByRole('menuitemradio', { name: '另一个项目', exact: true }).click();
+  await expect(chip).toContainText('另一个项目');
+  await chip.click();
+  await page.getByRole('menuitemradio', { name: '中文项目', exact: true }).click();
+  await expect(chip).toContainText('中文项目');
   await chip.click();
   await shot(page, '18-更换项目');
   await page.getByRole('menuitemradio', { name: '另一个项目', exact: true }).click();
