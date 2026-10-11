@@ -27,6 +27,8 @@ export type UpdateOptions = {
   api?: string;
   // The program directory was switched: end the process so that the supervisor starts the new one.
   restart: () => void;
+  // The installer for clients has arrived in `clientDir`.
+  installed?: () => void;
   // How a download is paced, in milliseconds; the defaults unless a test shortens them.
   download?: Partial<typeof downloadPace>;
 };
@@ -262,6 +264,7 @@ export class ServiceUpdates {
     await this.download(manifest, name, target, (received) => {
       this.preparing = { version: manifest.version, received, size };
     });
+    this.options.installed?.();
   }
   private runtimeLevel() {
     try {

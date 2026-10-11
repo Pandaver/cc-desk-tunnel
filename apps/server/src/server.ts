@@ -141,8 +141,10 @@ export function createProxyServer(options: ServerOptions) {
   const releases = new ClientReleases(clientDir);
   const version = serviceVersion();
   const updates = options.updates
-    ? new ServiceUpdates({ ...options.updates, clientDir }, (state) =>
-        broadcast({ type: 'service.update', ...state }),
+    ? new ServiceUpdates(
+        // The next client of another version is offered the installer the moment it is here.
+        { ...options.updates, clientDir, installed: () => void releases.refresh() },
+        (state) => broadcast({ type: 'service.update', ...state }),
       )
     : undefined;
   const throttle = new Throttle();

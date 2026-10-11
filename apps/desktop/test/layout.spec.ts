@@ -230,6 +230,12 @@ test('a question is answered with its choices, and a session or a whole project 
   await chip.click();
   await page.getByRole('menuitemradio', { name: '中文项目', exact: true }).click();
   await expect(chip).toContainText('中文项目');
+  // A folder that is no project yet is chosen in the same menu, and becomes one.
+  await chip.click();
+  page.once('dialog', (dialog) => void dialog.accept('F:\\全新\\没加过的文件夹'));
+  await page.getByRole('menuitem', { name: '选择其他文件夹…', exact: true }).click();
+  await expect(chip).toContainText('没加过的文件夹');
+  await expect(page.locator('.project-group').filter({ hasText: '没加过的文件夹' })).toHaveCount(1);
   await chip.click();
   await shot(page, '18-更换项目');
   await page.getByRole('menuitemradio', { name: '另一个项目', exact: true }).click();

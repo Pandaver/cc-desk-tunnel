@@ -175,12 +175,14 @@ test('an installer download that slows to a halt is continued on new connections
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const directory = mkdtempSync(join(tmpdir(), 'cc-desk-tunnel-updates-'));
+  let arrived = 0;
   const updates = new ServiceUpdates(
     {
       repository: 'owner/name',
       api: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
       clientDir: join(directory, 'client'),
       restart: () => undefined,
+      installed: () => arrived++,
       download: { stretch: 2000, stall: 60, attempts: 3, retry: 50 },
     },
     () => undefined,
@@ -212,6 +214,7 @@ test('an installer download that slows to a halt is continued on new connections
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(updates.preparing, undefined);
   assert.equal(existsSync(`${target}.part`), false);
+  assert.equal(arrived, 1);
 });
 
 test('a download whose connections keep delivering nothing is given up, and one that is not the announced file is discarded', async (t) => {

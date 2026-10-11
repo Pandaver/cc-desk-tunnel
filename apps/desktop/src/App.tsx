@@ -575,8 +575,8 @@ export function App() {
       : window.prompt('这台电脑上的项目目录', session.projectPath);
     return path?.trim() || null;
   }
-  // Takes a session over from the computer it was on: from the next message Claude works in the directory
-  // chosen here, on this computer.
+  // Moves a session to a directory chosen here, on this computer, which also takes it over from the computer
+  // it was on: from the next message Claude works there.
   async function takeOver(session: Session) {
     await act(async () => {
       const projectPath = await placeHere(session);
@@ -781,21 +781,32 @@ export function App() {
         !paths.some((path) => pathKey(path) === pathKey(item.projectPath))
       )
         paths.push(item.projectPath);
-    return paths.map((path) => ({
-      label: projectLabel(path),
-      detail: path,
-      checked: pathKey(path) === pathKey(session.projectPath),
-      run: () => {
-        if (pathKey(path) !== pathKey(session.projectPath))
-          void act(async () => {
-            await client.request({
-              type: 'session.move',
-              sessionId: session.id,
-              projectPath: path,
+    return [
+      ...paths.map((path) => ({
+        label: projectLabel(path),
+        detail: path,
+        checked: pathKey(path) === pathKey(session.projectPath),
+        run: () => {
+          if (pathKey(path) !== pathKey(session.projectPath))
+            void act(async () => {
+              await client.request({
+                type: 'session.move',
+                sessionId: session.id,
+                projectPath: path,
+              });
             });
-          });
+        },
+      })),
+      // A folder that is no project yet becomes one with the move.
+      {
+        label: '选择其他文件夹…',
+        icon: <FolderOpen />,
+        separated: true,
+        run: () => {
+          void takeOver(session);
+        },
       },
-    }));
+    ];
   }
   // Points a project at another folder: its sessions move there, and what this computer keeps about the
   // project (its place in the list, its name, its pin) follows.
