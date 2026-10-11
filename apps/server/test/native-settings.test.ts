@@ -47,6 +47,26 @@ test('native settings edit only the listed keys of the CLI user settings file', 
     fallbackModel: ['sonnet'],
     bashOutputMaxChars: 60_000,
   });
+  // A setting the CLI takes as an environment variable lives under `env`, beside whatever else is there.
+  writeFileSync(path, JSON.stringify({ env: { KEEP: '1' }, showThinkingSummaries: false }));
+  assert.equal(readNativeSettings(path).toolSearch, null);
+  assert.equal(readNativeSettings(path).showThinkingSummaries, false);
+  assert.equal(updateNativeSettings({ toolSearch: true }, path).toolSearch, true);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), {
+    env: { KEEP: '1', ENABLE_TOOL_SEARCH: 'true' },
+    showThinkingSummaries: false,
+  });
+  assert.equal(updateNativeSettings({ toolSearch: false }, path).toolSearch, false);
+  updateNativeSettings({ toolSearch: null, showThinkingSummaries: null }, path);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { env: { KEEP: '1' } });
+  writeFileSync(path, JSON.stringify({ env: { ENABLE_TOOL_SEARCH: 'auto:20' } }));
+  assert.equal(
+    readNativeSettings(path).toolSearch,
+    null,
+    'Another form of the value shows as unset',
+  );
+  updateNativeSettings({ toolSearch: null }, path);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), {});
   writeFileSync(path, '{ broken');
   assert.throws(() => updateNativeSettings({ fastMode: true }, path));
   assert.equal(readFileSync(path, 'utf8'), '{ broken', 'An unreadable file is never overwritten');

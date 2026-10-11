@@ -5,7 +5,9 @@ contextBridge.exposeInMainWorld('desktop', {
   chooseFiles: () => ipcRenderer.invoke('files:choose'),
   pathForFile: (file) => webUtils.getPathForFile(file),
   saveFile: (name, text) => ipcRenderer.invoke('file:save', name, text),
+  saveImage: (type, bytes) => ipcRenderer.invoke('image:save', type, bytes),
   openFolder: (directory) => ipcRenderer.invoke('folder:open', directory),
+  openLogs: () => ipcRenderer.invoke('log:open'),
   gitBranch: (directory) => ipcRenderer.invoke('git:branch', directory),
   copyText: (text) => ipcRenderer.invoke('clipboard:write', text),
   openExternal: (url) => ipcRenderer.invoke('external:open', url),
@@ -36,7 +38,13 @@ contextBridge.exposeInMainWorld('desktop', {
     webFrame.setZoomLevel(direction ? webFrame.getZoomLevel() + Math.sign(direction) * 0.5 : 0),
   quit: () => ipcRenderer.invoke('app:quit'),
   version: () => ipcRenderer.invoke('app:version'),
-  installUpdate: () => ipcRenderer.invoke('update:install'),
+  device: () => ipcRenderer.invoke('device:get'),
+  installUpdate: (version) => ipcRenderer.invoke('update:install', version),
+  onUpdateProgress: (callback) => {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on('update:progress', listener);
+    return () => ipcRenderer.removeListener('update:progress', listener);
+  },
   connectProxy: (config) => ipcRenderer.invoke('proxy:connect', config),
   disconnectProxy: () => ipcRenderer.invoke('proxy:disconnect'),
   onProxyClosed: (callback) => {

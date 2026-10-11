@@ -42,8 +42,17 @@ async function connectService(address, config, resolveProxy, route) {
   const port = Number(address.port || 443);
   const proxy = httpProxy(await resolveProxy?.(`https://${address.hostname}:${port}`));
   if (route) route.proxy = proxy;
+  const socket = await openSocket(
+    proxy,
+    address.hostname,
+    port,
+    connectionWaits(config.waits).connect,
+  );
+  // Lets the system notice a path that has gone, where something on the way would otherwise drop a quiet
+  // connection without a word.
+  socket.setKeepAlive(true, 30000);
   return connect({
-    socket: await openSocket(proxy, address.hostname, port, connectionWaits(config.waits).connect),
+    socket,
     servername: isIP(address.hostname) ? undefined : address.hostname,
     ...controlTlsOptions(config),
   });
@@ -96,6 +105,8 @@ export async function openProxyBridge(
   // A malformed pin is refused here, before anything listens or connects.
   controlTlsOptions(config);
   const waits = connectionWaits(config.waits);
+  const log = binaries.log ?? (() => {});
+  const heartbeatMs = binaries.heartbeatMs ?? 15000;
   const nonce = randomBytes(32).toString('hex');
   const server = createServer();
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
@@ -143,6 +154,16 @@ export async function openProxyBridge(
     let nativeReady;
     let offerReceived = false;
     const target = `${address.hostname}:${address.port || 443}`;
+    const began = Date.now();
+    log(`Connecting to ${target}.`);
+    // The service asks for a sign of life every 15 seconds and gives up after two without an answer. A path
+    // that stops delivering without closing would leave this side waiting for good: the page shows a run that
+    // the service has long ended. So this side asks as well, and counts whatever arrives from the service.
+    let heard = Date.now();
+    let heartbeat;
+    const alive = () => (heard = Date.now());
+    remote.on('ping', alive);
+    remote.on('pong', alive);
     const timer = setTimeout(
       () =>
         fail(
@@ -193,6 +214,7 @@ export async function openProxyBridge(
       });
     }
     function fail(message) {
+      if (!closed) log(`Connection given up: ${message}`);
       if (local.readyState === WebSocket.OPEN)
         local.send(JSON.stringify({ type: 'connection.error', code: 'tunnel_failed', message }));
       clearTimeout(timer);
@@ -209,8 +231,21 @@ export async function openProxyBridge(
         return;
       }
       verified = true;
+      log(`Reached ${target}${route.proxy ? ' through the system proxy' : ''}.`);
       for (const message of queue) remote.send(message);
       queue.length = 0;
+      alive();
+      heartbeat = setInterval(() => {
+        const silent = Date.now() - heard;
+        // Its own question is answered within moments, so the third one unanswered falls just short of three
+        // periods of silence.
+        if (silent > heartbeatMs * 2.5)
+          fail(
+            `已有 ${Math.round(silent / 1000)} 秒没有收到服务端的任何数据，连接已经断开。\n途中的网络、代理或反向代理中断了这条连接而没有通知本机。请重新连接；正在进行的任务可能已被服务端结束，重新连接后可以在会话里看到它停在哪里。`,
+          );
+        else if (remote.readyState === WebSocket.OPEN) remote.ping();
+      }, heartbeatMs);
+      current.controller.signal.addEventListener('abort', () => clearInterval(heartbeat));
     });
     local.on('message', (raw) => {
       try {
@@ -227,6 +262,7 @@ export async function openProxyBridge(
       }
     });
     remote.on('message', (raw) => {
+      alive();
       let message;
       try {
         message = serverMessageSchema.parse(JSON.parse(raw.toString('utf8')));
@@ -236,6 +272,8 @@ export async function openProxyBridge(
       }
       // A service of another version refuses the connection but may still offer the installer for its own.
       if (message.type === 'connection.error' && message.client) release = message.client;
+      if (message.type === 'connection.error')
+        log(`The service refused or ended the connection: ${message.code}.`);
       if (message.type === 'tunnel.offer') {
         if (offerReceived || !nativeReady || nativeReady.connectionId !== message.connectionId) {
           fail('隧道连接标识不匹配。');
@@ -269,6 +307,9 @@ export async function openProxyBridge(
           return;
         }
         clearTimeout(timer);
+        log(
+          `Connected as ${message.connectionId.slice(0, 8)} to service ${nativeReady.version ?? 'of unknown version'}; commands can run.`,
+        );
         if (local.readyState === WebSocket.OPEN) local.send(JSON.stringify(nativeReady));
       } else if (local.readyState === WebSocket.OPEN) {
         if (message.type === 'ready') clearTimeout(timer);
@@ -276,8 +317,13 @@ export async function openProxyBridge(
       }
     });
     for (const socket of [local, remote]) {
-      socket.on('close', () => {
+      socket.on('close', (code) => {
         clearTimeout(timer);
+        // Who ended it first is what tells a fault on the way from a decision of this program or the service.
+        if (!closed)
+          log(
+            `${socket === remote ? 'The service side' : 'The window'} closed the connection first, code ${code}, after ${Math.round((Date.now() - began) / 1000)} s.`,
+          );
         void close(true);
       });
       socket.on('error', (error) =>
@@ -293,6 +339,7 @@ export async function openProxyBridge(
   });
   async function close(notify = false) {
     if (closing) return closing;
+    if (pair && !notify) log('Connection closed from this client.');
     closed = true;
     closing = (async () => {
       pair?.controller.abort();
@@ -339,5 +386,7 @@ export async function openProxyBridge(
     url: `ws://127.0.0.1:${server.address().port}/bridge/${nonce}`,
     close,
     downloadInstaller,
+    // The installer the service last announced, if any.
+    release: () => release,
   };
 }

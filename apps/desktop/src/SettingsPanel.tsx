@@ -87,6 +87,13 @@ const groups = (values: NativeSettings): { name: string; fields: Field[] }[] => 
         detail: '关闭后模型不再进行扩展思考',
       },
       {
+        key: 'showThinkingSummaries',
+        kind: 'toggle',
+        title: '显示思考过程',
+        detail:
+          '向 Claude 索取思考的摘要并显示在对话里，默认开启；关闭后不再索取，模型照常思考。第三方模型自己输出的思考不受这一项影响',
+      },
+      {
         key: 'fastMode',
         kind: 'toggle',
         title: '快速模式',
@@ -175,6 +182,13 @@ const groups = (values: NativeSettings): { name: string; fields: Field[] }[] => 
           (value) => `${value / 1000}K 字符`,
         ),
         read: Number,
+      },
+      {
+        key: 'toolSearch',
+        kind: 'toggle',
+        title: '工具搜索',
+        detail:
+          '工具的说明不再随每次请求全部发出，Claude 用到时再查找，工具多（例如接了 MCP）时能明显减少上下文占用。默认：官方账号开启，第三方接口关闭；第三方接口要能转发 tool_reference 才能开启',
       },
     ],
   },

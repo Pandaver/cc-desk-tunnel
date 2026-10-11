@@ -1,5 +1,5 @@
 import { test, expect, _electron } from '@playwright/test';
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
@@ -196,6 +196,15 @@ test('Electron copies text and supplies the native editing context menu', async 
       BrowserWindow.getAllWindows()[0].webContents.paste(),
     );
     await expect(input).toHaveValue('复制粘贴测试');
+    // A picture that is only on the clipboard is saved in the profile, and only a picture is.
+    const saved = await page.evaluate(() =>
+      window.desktop!.saveImage('image/png', new Uint8Array([137, 80, 78, 71])),
+    );
+    expect(saved.startsWith(resolve(profile, 'pasted'))).toBe(true);
+    expect(readFileSync(saved)).toEqual(Buffer.from([137, 80, 78, 71]));
+    await expect(
+      page.evaluate(() => window.desktop!.saveImage('text/plain', new Uint8Array([1]))),
+    ).rejects.toThrow(/图片/);
     const roles = await application.evaluate(({ BrowserWindow, Menu }) => {
       const build = Menu.buildFromTemplate;
       let items: unknown[] = [];

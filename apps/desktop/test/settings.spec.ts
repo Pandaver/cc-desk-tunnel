@@ -11,6 +11,7 @@ test('Claude Code settings load from the service and save each change at once', 
     autoCompactEnabled: null,
     autoCompactWindow: 250_000,
     alwaysThinkingEnabled: null,
+    showThinkingSummaries: null,
     fastMode: false,
     autoContinueAtUsageLimit: null,
     switchModelsOnFlag: null,
@@ -26,12 +27,14 @@ test('Claude Code settings load from the service and save each change at once', 
     bashOutputMaxChars: 45_000,
     attribution: null,
     includeGitInstructions: null,
+    toolSearch: null,
   };
   const updates: unknown[] = [];
   await page.routeWebSocket('ws://127.0.0.1:18889/ws', (route) => {
     const send = (value: unknown) => route.send(JSON.stringify(value));
     route.onMessage((raw) => {
       const message = JSON.parse(String(raw));
+      if (message.type === 'device') return;
       if (message.type === 'auth') {
         send({
           type: 'ready',

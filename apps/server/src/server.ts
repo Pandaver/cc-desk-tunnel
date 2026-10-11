@@ -1,6 +1,7 @@
 import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { createReadStream, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { totalmem } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage, RequestListener } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
@@ -14,6 +15,7 @@ import {
 import {
   authSchema,
   commandSchema,
+  deviceIdentitySchema,
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
   TUNNEL_CLOSE,
@@ -24,6 +26,7 @@ import {
 import type {
   AccountState,
   Command,
+  Device,
   EventPayload,
   ServerMessage,
   Session,
@@ -53,6 +56,9 @@ type Peer = {
   id: string;
   address: string;
   authenticated: boolean;
+  // The computer it is from: the name it signed in with, and the identity that follows in a frame of its own.
+  name: string;
+  device?: Device;
   tunnel?: Tunnel;
   registering: boolean;
   subscriptions: Set<string>;
@@ -88,6 +94,9 @@ export type ServerOptions = {
   host?: string;
   // Where an administrator puts the Windows installer offered to clients; defaults to <dataDir>/client.
   clientDir?: string;
+  // How many native runs and terminals may be going at once, over all connections; by default what the
+  // memory of this machine holds.
+  maxRuns?: number;
   // Following the published releases; absent, the service neither looks for nor installs newer versions.
   updates?: Omit<UpdateOptions, 'clientDir'>;
 };
@@ -103,13 +112,17 @@ export function createProxyServer(options: ServerOptions) {
   const usage = new UsageLog(store.database);
   const usageReceiver = options.claude ? createUsageReceiver(usage) : undefined;
   const peers = new Set<Peer>();
-  // One run per session; the native CLI state is shared, so native work is further limited to one thing at a time:
-  // a run, a status read or session change (`mutations`), the terminal, or an account change.
+  // One run or one terminal per session, each a CLI process of its own in the session's directory. What reads
+  // or changes the state the CLI keeps for all of them — a status read or session change (`mutations`), an
+  // account change — waits until none is going.
   const runs = new Map<string, Run>();
   const mutations = new Set<string>();
-  let terminal: Terminal | undefined;
+  const terminals = new Map<string, Terminal>();
   let login: Login | undefined;
-  let tunnelOwner: Peer | undefined;
+  // Each run or terminal is a CLI process that keeps some 250 MB; more of them than the memory holds would
+  // take the machine down, and every one of them with it.
+  const capacity =
+    options.maxRuns ?? Math.max(1, Math.floor((totalmem() - 300 * 2 ** 20) / (300 * 2 ** 20)));
   // Background work that close() waits for.
   const tasks = new Set<Promise<unknown>>();
   const tunnelTasks = new Set<Promise<unknown>>();
@@ -206,6 +219,28 @@ export function createProxyServer(options: ServerOptions) {
         send(peer, message);
     }
   }
+  function deviceOf(peer: Peer) {
+    if (!peer.device) throw new DomainError('device_unknown', '客户端没有报告设备标识。');
+    return peer.device;
+  }
+  // A session is worked on from the computer its project directory is on. One from before computers were
+  // told apart becomes that of the first to use it.
+  function onDevice(peer: Peer, session: Session) {
+    const device = deviceOf(peer);
+    if (!session.device) updated(store.claim(session.id, device).id);
+    else if (session.device.id !== device.id)
+      throw new DomainError(
+        'other_device',
+        `此会话在设备“${session.device.name}”上。要在本机接着做，请先为它选择本机的项目目录，或把它分叉到本机。`,
+      );
+  }
+  function room() {
+    if (options.claude && runs.size + terminals.size >= capacity)
+      throw new DomainError(
+        'capacity',
+        `服务端同时最多进行 ${capacity} 个运行或终端（按服务器内存估算，可用 PROXY_MAX_RUNS 调整）。请等其他任务结束后再试。`,
+      );
+  }
   function track(task: Promise<unknown>, group = tasks) {
     group.add(task);
     void task.finally(() => group.delete(task));
@@ -270,7 +305,7 @@ export function createProxyServer(options: ServerOptions) {
     try {
       const { session } = store.get(run.sessionId);
       const ssh = run.owner.tunnel!.ssh!;
-      const said = store.promptValues(run.sessionId, ssh.powershellPath);
+      const said = store.promptValues(run.sessionId);
       const status = await runClaude(options.claude!, {
         sessionId: run.sessionId,
         nativeRoot: session.nativeRoot ?? session.id,
@@ -290,10 +325,7 @@ export function createProxyServer(options: ServerOptions) {
         dataDir: store.directory,
         resume: store.hasNativeContext(run.sessionId),
         signal: run.controller.signal,
-        ssh: {
-          ...sessionSsh(store.directory, run.sessionId, ssh),
-          powershellPath: said.powershellPath,
-        },
+        ssh: sessionSsh(store.directory, run.sessionId, ssh),
         emit: (event) => emit(run, event),
         approve: (toolId, waiting) => {
           if (run.controller.signal.aborted) return Promise.resolve({ allowed: false });
@@ -349,7 +381,7 @@ export function createProxyServer(options: ServerOptions) {
       login?.process.cancel();
       return;
     }
-    if (terminal || runs.size || mutations.size)
+    if (terminals.size || runs.size || mutations.size)
       throw new DomainError('native_busy', '请先结束原生运行或终端，再管理账号。');
     const { NativeLogin, accountLogout } = await import('./native-account.ts');
     if (command.type === 'account.logout') {
@@ -402,11 +434,11 @@ export function createProxyServer(options: ServerOptions) {
     // During a run its own CLI answers, so quota can be reread without waiting for the turn to end.
     const active =
       runs.get(command.sessionId) ?? [...runs.values()].find((run) => run.controls.refresh);
-    if (active?.controls.refresh && !terminal && !mutations.size) {
+    if (active?.controls.refresh && !mutations.size) {
       await active.controls.refresh();
       return;
     }
-    if (terminal || runs.size || mutations.size)
+    if (terminals.size || runs.size || mutations.size)
       throw new DomainError('native_busy', '运行结束后再刷新原生状态。');
     mutations.add(command.sessionId);
     const controller = new AbortController();
@@ -432,7 +464,8 @@ export function createProxyServer(options: ServerOptions) {
     }
   }
   async function closeTerminal(peer: Peer, command: CommandOf<'terminal.close'>) {
-    if (!terminal || terminal.id !== command.terminalId || terminal.sessionId !== command.sessionId)
+    const terminal = terminals.get(command.sessionId);
+    if (!terminal || terminal.id !== command.terminalId)
       throw new DomainError('terminal_inactive', '原生终端已结束。');
     if (terminal.owner !== peer) throw new DomainError('not_owner', '原生终端属于另一连接。');
     await terminal.process?.close();
@@ -440,11 +473,13 @@ export function createProxyServer(options: ServerOptions) {
   // The terminal occupies its session like a run does, so other connections see it as busy.
   async function openTerminal(peer: Peer, command: CommandOf<'terminal.open'>, session: Session) {
     if (!options.claude) throw new DomainError('native_unavailable', '离线模拟不启动原生终端。');
-    if (terminal || runs.size || mutations.size)
-      throw new DomainError('native_busy', '请先结束原生运行或会话管理，再打开终端。');
+    if (terminals.has(command.sessionId) || runs.has(command.sessionId) || mutations.size)
+      throw new DomainError('native_busy', '请先结束这个会话的运行或会话管理，再打开终端。');
     if (!peer.tunnel?.ssh) throw new DomainError('execution_offline', 'Windows SSH 尚未就绪。');
+    onDevice(peer, session);
+    room();
     const current: Terminal = { id: randomUUID(), sessionId: command.sessionId, owner: peer };
-    terminal = current;
+    terminals.set(current.sessionId, current);
     try {
       const { NativeTerminal, terminalArguments, terminalEnvironment } =
         await import('./native-terminal.ts');
@@ -473,7 +508,7 @@ export function createProxyServer(options: ServerOptions) {
             bytes,
           }),
         (exitCode) => {
-          if (terminal !== current) return;
+          if (terminals.get(current.sessionId) !== current) return;
           store.append(current.sessionId, current.id, {
             type: 'run.status',
             status: 'completed',
@@ -487,7 +522,7 @@ export function createProxyServer(options: ServerOptions) {
             terminalId: current.id,
             exitCode,
           });
-          terminal = undefined;
+          terminals.delete(current.sessionId);
         },
       );
       store.append(command.sessionId, current.id, {
@@ -500,7 +535,7 @@ export function createProxyServer(options: ServerOptions) {
       send(peer, { type: 'terminal.opened', sessionId: command.sessionId, terminalId: current.id });
     } catch {
       await current.process?.close();
-      if (terminal === current) terminal = undefined;
+      if (terminals.get(current.sessionId) === current) terminals.delete(current.sessionId);
       throw new DomainError('terminal_failed', '原生终端启动失败，请检查 Linux PTY 组件与 CLI。');
     }
   }
@@ -544,8 +579,9 @@ export function createProxyServer(options: ServerOptions) {
   // A fork is the native session copied under a new ID, together with the proxy's record of it. The SDK cuts
   // a copy after a message and only knows the source's message IDs, so stopping before a message takes two
   // copies: one through that message, then one of it up to the entry before its last.
-  async function fork(command: CommandOf<'session.fork'>, session: Session) {
+  async function fork(peer: Peer, command: CommandOf<'session.fork'>, session: Session) {
     if (session.activeRun) throw new DomainError('run_active', '请先结束当前运行再分叉会话。');
+    const place = { device: deviceOf(peer), projectPath: command.projectPath };
     const existing = store.created(command.requestId);
     if (existing) return existing.id;
     const before = command.beforeMessageId
@@ -585,6 +621,7 @@ export function createProxyServer(options: ServerOptions) {
         id,
         title,
         resumable,
+        place,
         before,
       );
       broadcast({ type: 'session.updated', session: created });
@@ -629,10 +666,7 @@ export function createProxyServer(options: ServerOptions) {
       active.input.assertWritable();
       peer.subscriptions.add(command.sessionId);
       emit(active, { type: 'message.user', messageId: command.requestId, text, scenario });
-      active.input.submit(
-        command.requestId,
-        store.notice(command.sessionId, peer.tunnel?.ssh?.powershellPath) + text,
-      );
+      active.input.submit(command.requestId, store.notice(command.sessionId) + text);
       return;
     }
     if (options.claude && mutations.size)
@@ -642,6 +676,8 @@ export function createProxyServer(options: ServerOptions) {
         'execution_offline',
         'Windows SSH 尚未就绪，请通过桌面客户端重新建立连接。',
       );
+    onDevice(peer, session);
+    room();
     peer.subscriptions.add(command.sessionId);
     const run: Run = {
       id: randomUUID(),
@@ -663,10 +699,7 @@ export function createProxyServer(options: ServerOptions) {
     emit(run, { type: 'run.status', status: 'running', connectionId: run.owner.id });
     // What Claude's system prompt no longer has right is told to it with this message; the transcript shows the
     // user's own text.
-    run.input?.submit(
-      command.requestId,
-      store.notice(command.sessionId, peer.tunnel?.ssh?.powershellPath) + text,
-    );
+    run.input?.submit(command.requestId, store.notice(command.sessionId) + text);
     track(
       options.claude
         ? native(run)
@@ -754,7 +787,7 @@ export function createProxyServer(options: ServerOptions) {
       case 'service.update.install':
         if (!updates) throw new DomainError('updates_unavailable', '此服务未启用版本跟踪。');
         // The restart at the end would cut these off.
-        if (terminal || runs.size || mutations.size || login)
+        if (terminals.size || runs.size || mutations.size || login)
           throw new DomainError('native_busy', '请先结束运行、终端或登录流程，再升级服务端。');
         try {
           updates.install(command.version);
@@ -772,7 +805,12 @@ export function createProxyServer(options: ServerOptions) {
         return undefined;
       }
       case 'session.create': {
-        const session = store.create(command.requestId, command.title, command.projectPath);
+        const session = store.create(
+          command.requestId,
+          command.title,
+          command.projectPath,
+          deviceOf(peer),
+        );
         peer.subscriptions.clear();
         peer.subscriptions.add(session.id);
         broadcast({ type: 'session.updated', session });
@@ -812,8 +850,8 @@ export function createProxyServer(options: ServerOptions) {
         controlRun(peer, command);
         return command.sessionId;
     }
-    if (terminal)
-      throw new DomainError('native_busy', '原生终端打开期间，请先关闭终端再操作图形会话。');
+    if (terminals.has(command.sessionId))
+      throw new DomainError('native_busy', '这个会话的原生终端开着，请先关闭终端再操作它。');
     if (
       updates?.installing &&
       (command.type === 'message.send' || command.type === 'session.compact')
@@ -834,7 +872,7 @@ export function createProxyServer(options: ServerOptions) {
       case 'session.move':
         broadcast({
           type: 'session.updated',
-          session: store.move(command.sessionId, command.projectPath),
+          session: store.move(command.sessionId, command.projectPath, deviceOf(peer)),
         });
         break;
       case 'session.delete':
@@ -842,7 +880,7 @@ export function createProxyServer(options: ServerOptions) {
         await manageSession(command, session);
         break;
       case 'session.fork':
-        return fork(command, session);
+        return fork(peer, command, session);
       case 'message.send':
       case 'session.compact':
         submit(peer, command, session);
@@ -874,17 +912,25 @@ export function createProxyServer(options: ServerOptions) {
     }
     // A client of another version is told which version runs here and, if held, the installer to fetch.
     if (auth.data.protocolVersion !== PROTOCOL_VERSION) {
+      // The installer of this version may still be on its way here, or its download may have failed: the
+      // client is told how far it is and the download is started again if it is not running.
+      const held = installer();
+      if (held?.version !== version) updates?.prepareInstaller();
       send(peer, {
         type: 'connection.error',
         code: 'version_mismatch',
         message: `客户端与服务端（${version}）的版本不一致，需要升级其中一方。`,
         service: version,
-        client: installer(),
+        client: held,
+        ...(held?.version !== version && updates?.preparing
+          ? { preparing: updates.preparing }
+          : {}),
       });
       peer.socket.close(4002, 'Version mismatch');
       return false;
     }
     peer.authenticated = true;
+    peer.name = auth.data.deviceName;
     send(peer, {
       type: 'ready',
       protocolVersion: PROTOCOL_VERSION,
@@ -896,18 +942,8 @@ export function createProxyServer(options: ServerOptions) {
       client: installer(),
       sessions: store.list(),
     });
+    // Every connection that asks has an execution channel of its own, to the computer it comes from.
     if (auth.data.tunnel && options.tunnel) {
-      if (tunnelOwner) {
-        send(peer, {
-          type: 'connection.error',
-          code: 'device_busy',
-          message:
-            '服务端已有一台 Windows 设备在线，或上一次连接还在清理。\n同一时间只支持一台设备：请先断开另一台，或等几秒后重试。',
-        });
-        peer.socket.close(4003, 'Device busy');
-        return true;
-      }
-      tunnelOwner = peer;
       peer.tunnel = new Tunnel(
         options.tunnel,
         store.directory,
@@ -989,13 +1025,8 @@ export function createProxyServer(options: ServerOptions) {
   }
   // Keystrokes, resizes and flow-control acknowledgments carry no request ID and get no response.
   function controlTerminal(peer: Peer, control: TerminalControl) {
-    const current = terminal;
-    if (
-      !current ||
-      current.owner !== peer ||
-      current.id !== control.terminalId ||
-      current.sessionId !== control.sessionId
-    ) {
+    const current = terminals.get(control.sessionId);
+    if (!current || current.owner !== peer || current.id !== control.terminalId) {
       send(peer, {
         type: 'connection.error',
         code: 'terminal_inactive',
@@ -1052,10 +1083,11 @@ export function createProxyServer(options: ServerOptions) {
   function release(peer: Peer) {
     peers.delete(peer);
     if (login?.owner === peer) login.process.cancel();
-    if (terminal?.owner === peer) {
-      const task = terminal.process?.close();
-      if (task) track(task);
-    }
+    for (const terminal of terminals.values())
+      if (terminal.owner === peer) {
+        const task = terminal.process?.close();
+        if (task) track(task);
+      }
     for (const run of runs.values())
       if (run.owner === peer)
         cancel(
@@ -1064,13 +1096,7 @@ export function createProxyServer(options: ServerOptions) {
             ? '连接断开，运行未重放；在途命令结果可能未知。'
             : '连接断开，运行未重放。',
         );
-    if (peer.tunnel)
-      track(
-        peer.tunnel.close().finally(() => {
-          if (tunnelOwner === peer) tunnelOwner = undefined;
-        }),
-        tunnelTasks,
-      );
+    if (peer.tunnel) track(peer.tunnel.close(), tunnelTasks);
   }
 
   wss.on('connection', (socket: WebSocket, address: string) => {
@@ -1080,11 +1106,13 @@ export function createProxyServer(options: ServerOptions) {
       id: randomUUID(),
       address,
       authenticated: false,
+      name: '',
       registering: false,
       subscriptions: new Set(),
       responses: new Map(),
     };
     peers.add(peer);
+    const opened = Date.now();
     const authTimer = setTimeout(() => socket.close(4001, 'Authentication timeout'), 5000);
     // A long unattended run should survive a brief network stall: only two pings in a row without an answer,
     // about 45 seconds of silence, end the connection.
@@ -1092,6 +1120,7 @@ export function createProxyServer(options: ServerOptions) {
     let timedOut = false;
     // Whether this connection still holds one of the places for those that have not signed in.
     let signedIn = false;
+    let greeted = false;
     socket.on('pong', () => {
       missed = 0;
     });
@@ -1120,6 +1149,9 @@ export function createProxyServer(options: ServerOptions) {
         return;
       }
       if (!peer.authenticated) {
+        // Only the first frame signs in. What a refused client sent after it is not another attempt.
+        if (greeted) return;
+        greeted = true;
         const channel = (value as { type?: unknown } | null)?.type === 'tunnel.attach';
         if (channel ? attachChannel(peer, value) : authenticate(peer, value)) {
           clearTimeout(authTimer);
@@ -1131,6 +1163,18 @@ export function createProxyServer(options: ServerOptions) {
       const credentials = tunnelCredentialsSchema.safeParse(value);
       if (credentials.success) {
         registerTunnel(peer, credentials.data);
+        return;
+      }
+      const identity = deviceIdentitySchema.safeParse(value);
+      if (identity.success) {
+        peer.device = { id: identity.data.id, name: peer.name };
+        // With the line written when it closes, this tells which computer a connection was and how long it held.
+        if (!closing)
+          console.log(
+            `Connection ${peer.id.slice(0, 8)} opened: device "${peer.name}" (${identity.data.id.slice(0, 8)}) from ${address}`,
+          );
+        for (const session of store.named(peer.device))
+          broadcast({ type: 'session.updated', session });
         return;
       }
       const control = terminalControlSchema.safeParse(value);
@@ -1157,7 +1201,7 @@ export function createProxyServer(options: ServerOptions) {
       const owned = [...runs.values()].filter((run) => run.owner === peer).length;
       if (peer.authenticated && !closing)
         console.log(
-          `Connection ${peer.id.slice(0, 8)} closed: ${timedOut ? 'no heartbeat answer for 45s' : `code ${code}`}; runs ended with it: ${owned}`,
+          `Connection ${peer.id.slice(0, 8)} closed after ${Math.round((Date.now() - opened) / 1000)} s: ${timedOut ? 'no heartbeat answer for 45s' : `code ${code}`}; runs ended with it: ${owned}`,
         );
       release(peer);
     });
@@ -1184,7 +1228,9 @@ export function createProxyServer(options: ServerOptions) {
       closing = true;
       updates?.stop();
       login?.process.cancel();
-      const terminalCleanup = terminal?.process?.close();
+      const terminalCleanup = Promise.all(
+        [...terminals.values()].map((terminal) => terminal.process?.close()),
+      );
       for (const run of runs.values()) cancel(run, '服务停止，运行未重放。');
       const cleanup = [...peers].map((peer) => peer.tunnel?.close());
       for (const peer of peers) peer.socket.terminate();

@@ -11,6 +11,8 @@ declare global {
       // Asks where to save and writes the text there; false when the dialog was cancelled.
       saveFile: (name: string, text: string) => Promise<boolean>;
       openFolder: (path: string) => Promise<void>;
+      openLogs: () => Promise<void>;
+      saveImage: (type: string, bytes: Uint8Array) => Promise<string>;
       // The branch a project's working tree is on, or null outside a repository.
       gitBranch: (path: string) => Promise<string | null>;
       copyText: (text: string) => Promise<void>;
@@ -43,7 +45,14 @@ declare global {
       zoom: (direction: number) => void;
       quit: () => Promise<void>;
       version: () => Promise<string>;
-      installUpdate: () => Promise<void>;
+      // This computer as the service knows it.
+      device: () => Promise<import('@cc-desk-tunnel/protocol').Device>;
+      // Fetches and runs an installer: the one the connected service holds, or, given a version, that
+      // version's from the release page.
+      installUpdate: (version?: string) => Promise<void>;
+      onUpdateProgress: (
+        callback: (progress: { received: number; size: number }) => void,
+      ) => () => void;
       connectProxy: (config: {
         url: string;
         fingerprint: string;

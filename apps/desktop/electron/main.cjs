@@ -12,6 +12,7 @@ const {
   dialog,
   shell,
   clipboard,
+  net,
 } = require('electron');
 const path = require('node:path');
 const {
@@ -27,9 +28,11 @@ const {
 } = require('node:fs');
 const { mkdtemp, stat, writeFile } = require('node:fs/promises');
 const { gitBranch } = require('./git-branch.cjs');
-const { tmpdir } = require('node:os');
+const { openLog } = require('./client-log.cjs');
+const { hostname, tmpdir } = require('node:os');
+const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
-const { mkdir, rmdir } = require('node:fs/promises');
+const { mkdir, readdir, rmdir, unlink } = require('node:fs/promises');
 const { pathToFileURL } = require('node:url');
 let bridge;
 // The last connection, kept for its installer download after a service refused this client's version.
@@ -59,6 +62,14 @@ function writeSettings(values) {
   const settings = { ...readSettings(), ...values };
   writeFileSync(settingsPath(), JSON.stringify(settings, null, 2));
   return settings;
+}
+
+// See client-log.cjs. Opened on first use, once the profile directory is known.
+let record;
+function log(text) {
+  record ??= openLog(path.join(app.getPath('userData'), 'logs'));
+  record.write(text);
+  return record.directory;
 }
 
 // A remote connection carries long unattended runs; the computer must not go to sleep underneath it.
@@ -96,6 +107,33 @@ handle('files:choose', async (event) => {
   });
   return result.canceled ? [] : result.filePaths;
 });
+// A picture that is only on the clipboard has no file Claude could be pointed at. It is written into the
+// profile, from where Claude reads it like any other attached file; a week later it is removed at start.
+const pastedDirectory = () => path.join(app.getPath('userData'), 'pasted');
+const pictureTypes = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/bmp': 'bmp',
+};
+handle('image:save', async (_event, type, bytes) => {
+  const extension = pictureTypes[String(type)];
+  if (!extension || !(bytes instanceof Uint8Array) || !bytes.length || bytes.length > 20 << 20)
+    throw new Error('只能粘贴不超过 20 MB 的图片。');
+  await mkdir(pastedDirectory(), { recursive: true });
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+  const target = path.join(pastedDirectory(), `${stamp}-${randomUUID().slice(0, 6)}.${extension}`);
+  await writeFile(target, bytes);
+  return target;
+});
+async function clearPastedPictures() {
+  for (const name of await readdir(pastedDirectory()).catch(() => [])) {
+    const file = path.join(pastedDirectory(), name);
+    const age = Date.now() - (await stat(file).catch(() => ({ mtimeMs: Date.now() }))).mtimeMs;
+    if (age > 7 * 24 * 3600 * 1000) await unlink(file).catch(() => {});
+  }
+}
 // Writes text the page produced (an exported session) where the user chooses.
 handle('file:save', async (event, name, text) => {
   const result = await dialog.showSaveDialog(BrowserWindow.fromWebContents(event.sender), {
@@ -111,6 +149,10 @@ handle('folder:open', async (_event, directory) => {
   const target = path.resolve(String(directory));
   if (!(await stat(target)).isDirectory()) throw new Error('不是文件夹。');
   const failure = await shell.openPath(target);
+  if (failure) throw new Error(failure);
+});
+handle('log:open', async () => {
+  const failure = await shell.openPath(log('The log folder was opened.'));
   if (failure) throw new Error(failure);
 });
 handle('git:branch', (_event, directory) => gitBranch(directory));
@@ -215,6 +257,9 @@ handle('proxy:connect', async (event, config) => {
       scriptDirectory: app.isPackaged
         ? path.join(process.resourcesPath, 'app.asar.unpacked/electron')
         : undefined,
+      // Where Claude finds the scheduled tasks to edit; the service names the variable, not the path.
+      environment: { CC_DESK_TUNNEL_SCHEDULES: schedulesPath() },
+      log,
       // The Windows proxy settings (manual, script or automatic detection) as Chromium reads them.
       resolveProxy: (url) => session.defaultSession.resolveProxy(url),
     },
@@ -322,6 +367,11 @@ handle('schedules:save', (_event, text) => {
   replaceFile(schedulesPath(), schedules);
 });
 handle('app:version', () => app.getVersion());
+// Which of the user's computers this is to the service: an ID made once and kept, under the computer's name.
+handle('device:get', () => ({
+  id: readSettings().deviceId ?? writeSettings({ deviceId: randomUUID() }).deviceId,
+  name: hostname(),
+}));
 handle('app:quit', () => app.quit());
 let refreshTray = () => {};
 handle('window:settings', () => ({ closeToTray: readSettings().closeToTray !== false }));
@@ -358,14 +408,31 @@ handle('notify:show', (event, notice) => {
     window.once('focus', () => window.flashFrame(false));
   }
 });
-// Upgrades in place: the installer comes from the connected service, runs silently over the current install
-// and starts the new version.
-handle('update:install', async () => {
-  if (!lastBridge) throw new Error('请先连接服务。');
+// Upgrades in place: the installer runs silently over the current install and starts the new version. It
+// comes from the connected service, or, when the user chooses so, straight from the release page: `version`
+// is then the one to fetch, which the service's refusal of this client named.
+handle('update:install', async (event, version) => {
   if (!app.isPackaged) throw new Error('源码运行不支持自升级；请重新打包安装。');
-  const installer = await lastBridge.downloadInstaller(
-    await mkdtemp(path.join(tmpdir(), 'cc-desk-tunnel-update-')),
-  );
+  const directory = await mkdtemp(path.join(tmpdir(), 'cc-desk-tunnel-update-'));
+  let installer;
+  if (version === undefined) {
+    if (!lastBridge) throw new Error('请先连接服务。');
+    installer = await lastBridge.downloadInstaller(directory);
+  } else {
+    const { downloadRelease } = await import(
+      pathToFileURL(path.join(__dirname, 'release-download.mjs')).href
+    );
+    let told = 0;
+    // Chromium's network stack: the Windows proxy settings apply, as they do to the connection itself.
+    installer = await downloadRelease((url, init) => net.fetch(url, init), version, directory, {
+      announced: lastBridge?.release(),
+      progress(received, size) {
+        if (Date.now() - told < 500 && received < size) return;
+        told = Date.now();
+        if (!event.sender.isDestroyed()) event.sender.send('update:progress', { received, size });
+      },
+    });
+  }
   spawn(installer, ['/S', '--force-run'], { detached: true, stdio: 'ignore' }).unref();
   app.quit();
 });
@@ -381,6 +448,8 @@ ipcMain.handle('proxy:disconnect', async () => {
 if (process.platform === 'win32')
   app.setAppUserModelId(app.isPackaged ? 'io.github.ccdesktunnel.desktop' : process.execPath);
 app.whenReady().then(() => {
+  log(`Client ${app.getVersion()} started.`);
+  void clearPastedPictures();
   if (!ownsInstance) return;
   // Shortcuts are the page's, where the user can change them or turn them off; Electron's default menu would
   // add its own on top (zoom, reload, close). A run from source keeps reload and the developer tools.
