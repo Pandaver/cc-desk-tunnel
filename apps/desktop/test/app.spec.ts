@@ -65,6 +65,12 @@ test('desktop login, chat, allow/deny, stop, errors and delete', async ({ page }
   await page.getByRole('button', { name: '停止运行', exact: true }).click();
   await expect(page.getByText('用户停止', { exact: true })).toBeVisible();
   await settled(page);
+  // The stopped turn is taken up again from the message box, with nothing written.
+  const resume = page.getByRole('button', { name: '接着上一轮继续', exact: true });
+  await resume.click();
+  await expect(page.locator('.run-notice').filter({ hasText: /^继续$/ })).toBeVisible();
+  await settled(page);
+  await expect(resume).toHaveCount(0);
   await send(page, '错误测试', 'error');
   await expect(
     page.getByText('模拟上游连接失败；没有执行本机命令。', { exact: true }),

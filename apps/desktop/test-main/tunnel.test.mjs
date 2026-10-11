@@ -467,7 +467,8 @@ test(
     });
     t.after(() => dev.close());
     const failure = await dev.next('connection.error');
-    assert.equal(failure.code, 'tunnel_failed');
+    // Not a fault that another attempt would get past.
+    assert.equal(failure.code, 'client_failed');
     assert.match(failure.message, /指纹不匹配；未发送任何凭据/);
     await until(() => dev.closedByBridge(), 20, 'the bridge to close');
     assert.deepEqual(heard, []);

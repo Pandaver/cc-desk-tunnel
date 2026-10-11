@@ -4,6 +4,31 @@
 const securityHint =
   '请查看杀毒软件 / Windows 安全中心的“保护历史记录”：核对文件来源后，可以还原被隔离的文件并只为它设置例外，再重新连接。详见项目主页的“杀毒软件与 SmartScreen”。';
 
+// Whether a failed connection is the kind that a later attempt may get past: the way to the service was not
+// there or broke. A certificate that is not the service's, or an address that is something else, is not.
+export function passing(error) {
+  const code = String(error?.code ?? '');
+  const text = String(error?.message ?? '');
+  return (
+    [
+      'ENOTFOUND',
+      'EAI_AGAIN',
+      'ECONNREFUSED',
+      'ECONNRESET',
+      'ECONNABORTED',
+      'EPIPE',
+      'ETIMEDOUT',
+      'EHOSTUNREACH',
+      'EHOSTDOWN',
+      'ENETUNREACH',
+      'ENETDOWN',
+      'EADDRNOTAVAIL',
+    ].includes(code) ||
+    /timed out|socket hang up|^Proxy (refused|answer)|Unexpected server response: 50[234]/i.test(
+      text,
+    )
+  );
+}
 // The control connection to `target` (host:port) failed with `error`; `proxy` is the system proxy it went through.
 export function controlFailure(error, target, proxy) {
   const code = String(error?.code ?? '');

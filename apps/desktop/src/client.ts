@@ -69,7 +69,8 @@ export type ClientState = {
 };
 
 // The renderer's single connection and its state store: components read `state` through subscribe / getSnapshot
-// and send commands with request(). Nothing is resent automatically after a disconnect.
+// and send commands with request(). A connection that breaks is made again, for as long as it takes, and what
+// was missed is read from the service's record; nothing is resent automatically.
 export class ProxyClient {
   state: ClientState = {
     status: 'disconnected',
@@ -95,9 +96,22 @@ export class ProxyClient {
   listeners = new Set<() => void>();
   terminalListeners = new Set<(message: TerminalMessage) => void>();
   socket: WebSocket | null = null;
-  credentials: { url: string; token: string; device: Device; reconnect: boolean } | null = null;
+  credentials: {
+    url: string;
+    token: string;
+    device: Device;
+    reconnect: boolean;
+    // Remote mode: opens the bridge in the main process and resolves to its address. A bridge serves one
+    // connection, so every attempt asks for a new one.
+    bridge?: () => Promise<string>;
+  } | null = null;
   retryTimer: ReturnType<typeof setTimeout> | undefined;
   retryAttempt = 0;
+  // Whether this sign-in has stood once. Until then a failure is the user's to look at; after it, a fault on
+  // the way is tried again.
+  private established = false;
+  // Tells the answer of the bridge asked for last from those of earlier attempts.
+  private turn = 0;
   // Streamed events are merged in batches so a fast reply does not re-render per fragment.
   streamTimer: ReturnType<typeof setTimeout> | undefined;
   streamEvents: SessionEvent[] = [];
@@ -122,7 +136,13 @@ export class ProxyClient {
     this.state = { ...this.state, ...values };
     for (const listener of this.listeners) listener();
   }
-  connect(url: string, token: string, device: Device, reconnect = true) {
+  connect(
+    url: string,
+    token: string,
+    device: Device,
+    reconnect = true,
+    bridge?: () => Promise<string>,
+  ) {
     const address = new URL(url);
     if (
       !['ws:', 'wss:'].includes(address.protocol) ||
@@ -139,7 +159,8 @@ export class ProxyClient {
       throw new Error('当前离线原型仅连接本机环回服务。');
     if (token.trim().length < 24) throw new Error('服务凭据至少 24 个字符。');
     this.disconnect();
-    this.credentials = { url: address.toString(), token: token.trim(), device, reconnect };
+    this.credentials = { url: address.toString(), token: token.trim(), device, reconnect, bridge };
+    this.established = false;
     this.cacheOrder = [];
     this.update({
       status: 'connecting',
@@ -161,8 +182,33 @@ export class ProxyClient {
     this.open();
   }
   private open() {
-    if (!this.credentials) return;
     const credentials = this.credentials;
+    if (!credentials) return;
+    if (!credentials.bridge) {
+      this.attach(credentials);
+      return;
+    }
+    const turn = ++this.turn;
+    const current = () => this.credentials === credentials && this.turn === turn;
+    credentials.bridge().then(
+      (url) => {
+        if (!current()) return;
+        credentials.url = url;
+        this.attach(credentials);
+      },
+      // The bridge could not even be set up on this computer: nothing a later attempt would change.
+      (error) => {
+        if (!current()) return;
+        this.credentials = null;
+        this.update({
+          status: 'disconnected',
+          connectionId: null,
+          error: error instanceof Error ? error.message : '本机连接准备失败。',
+        });
+      },
+    );
+  }
+  private attach(credentials: NonNullable<ProxyClient['credentials']>) {
     const socket = new WebSocket(credentials.url);
     this.socket = socket;
     const timeout = setTimeout(() => socket.close(), 50000);
@@ -189,7 +235,8 @@ export class ProxyClient {
         return;
       }
       if (message.type === 'ready') {
-        if (message.adapter === 'claude-code') credentials.reconnect = false;
+        if (message.adapter === 'claude-code' && !credentials.bridge) credentials.reconnect = false;
+        this.established = true;
         clearTimeout(timeout);
         this.retryAttempt = 0;
         const selectedId = message.sessions.some((session) => session.id === this.state.selectedId)
@@ -229,9 +276,21 @@ export class ProxyClient {
               : null,
           });
         if (
-          ['unauthorized', 'version_mismatch', 'tunnel_failed', 'ssh_failed'].includes(message.code)
+          [
+            'unauthorized',
+            'version_mismatch',
+            'tunnel_failed',
+            'ssh_failed',
+            'connection_lost',
+            'client_failed',
+          ].includes(message.code)
         ) {
-          this.credentials = null;
+          // The way to the service broke, or the service could not reach back: the next attempt may do.
+          const passing =
+            this.established &&
+            credentials.reconnect &&
+            ['tunnel_failed', 'ssh_failed', 'connection_lost'].includes(message.code);
+          if (!passing) this.credentials = null;
           socket.close();
         }
       } else if (
@@ -315,7 +374,11 @@ export class ProxyClient {
       this.socket = null;
       this.flushStream();
       this.rejectPending();
-      if (!this.credentials || !this.credentials.reconnect) {
+      if (
+        !this.credentials ||
+        !this.credentials.reconnect ||
+        (this.credentials.bridge && !this.established)
+      ) {
         const nativeClosed = !!this.credentials;
         this.credentials = null;
         this.update({
@@ -327,20 +390,34 @@ export class ProxyClient {
       }
       this.update({ status: 'reconnecting', connectionId: null });
       this.retryTimer = setTimeout(
-        () => this.open(),
-        Math.min(1000 * 2 ** this.retryAttempt++, 5000),
+        () => {
+          this.retryTimer = undefined;
+          this.open();
+        },
+        Math.min(1000 * 2 ** this.retryAttempt++, credentials.bridge ? 30000 : 5000),
       );
     };
     socket.onerror = () => {
       /* onclose owns reconnect and pending request cleanup. */
     };
   }
+  // Makes the attempt that is waiting for its turn now: the network just came back.
+  retryNow() {
+    if (this.state.status !== 'reconnecting' || this.retryTimer === undefined) return;
+    clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+    this.open();
+  }
   disconnect() {
     this.flushStream();
     this.credentials = null;
+    this.turn++;
     clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
     const socket = this.socket;
     this.socket = null;
+    // Said before closing, so that the service does not keep this computer's runs for it to come back to.
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'leave' }));
     socket?.close();
     this.rejectPending();
     this.retryAttempt = 0;

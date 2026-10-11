@@ -27,7 +27,8 @@ export function markdown(session: Session, events: SessionEvent[]) {
     );
   };
   for (const turn of conversation(events)) {
-    if (turn.question)
+    if (turn.question?.continued) parts.push('> 继续');
+    else if (turn.question)
       parts.push(
         `## 你 · ${new Date(turn.question.at).toLocaleString('zh-CN')}`,
         turn.question.text,

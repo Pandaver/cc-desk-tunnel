@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { ArrowUp, Folder, GitBranch, Plus, RefreshCw, Shrink, Square } from 'lucide-react';
+import { ArrowUp, Folder, GitBranch, Play, Plus, RefreshCw, Shrink, Square } from 'lucide-react';
 import type {
   Effort,
   NativeCapabilities,
@@ -63,6 +63,7 @@ export default function Composer({
   nativeSession,
   metrics,
   send,
+  resume,
   compact,
   refresh,
   configure,
@@ -92,6 +93,8 @@ export default function Composer({
   nativeSession: NativeSession | null;
   metrics: NativeMetrics | null;
   send: () => void;
+  // Present when the session's last turn was stopped or cut off: takes it up again without a message.
+  resume?: () => void;
   compact: () => void;
   refresh: () => void;
   configure: (values: {
@@ -321,16 +324,22 @@ export default function Composer({
               <Square />
             </IconButton>
           )}
-          {(!session.activeRun || native) && (
-            <button
-              type="submit"
-              className="icon-button send-button"
-              aria-label="发送消息"
-              title="发送消息"
-              disabled={!draft.trim() || inputDisabled}
-            >
-              <ArrowUp />
-            </button>
+          {resume && !draft.trim() ? (
+            <IconButton title="接着上一轮继续" className="send-button" onClick={resume}>
+              <Play />
+            </IconButton>
+          ) : (
+            (!session.activeRun || native) && (
+              <button
+                type="submit"
+                className="icon-button send-button"
+                aria-label="发送消息"
+                title="发送消息"
+                disabled={!draft.trim() || inputDisabled}
+              >
+                <ArrowUp />
+              </button>
+            )
           )}
         </div>
       </form>
