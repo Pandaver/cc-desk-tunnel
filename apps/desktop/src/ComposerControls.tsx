@@ -218,6 +218,27 @@ export default function ComposerControls({
                   }}
                 />
               )}
+              {levels.length > 0 && (
+                <div className="effort-ticks">
+                  {levels.map((level, index) => (
+                    <button
+                      key={level}
+                      type="button"
+                      tabIndex={-1}
+                      disabled={disabled}
+                      className={level === shownEffort ? 'current' : undefined}
+                      style={
+                        {
+                          '--at': index / Math.max(1, levels.length - 1),
+                        } as CSSProperties
+                      }
+                      onClick={() => void configure({ effort: level })}
+                    >
+                      {effortNames[level]}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             {choosing && (
               <>

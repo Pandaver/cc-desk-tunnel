@@ -1909,6 +1909,29 @@ details[open] > summary > .fold-chevron {
 .model-menu input[type='range']:disabled {
   opacity: 0.6;
 }
+/* Level names under the track, centred on the handle's positions: the handle is 30px, so its centre runs
+   from 15px to 15px short of the other end. */
+.effort-ticks {
+  position: relative;
+  height: 26px;
+  margin-top: 4px;
+}
+.effort-ticks button {
+  position: absolute;
+  left: calc(15px + (100% - 30px) * var(--at));
+  transform: translateX(-50%);
+  padding: 4px 6px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.effort-ticks button.current {
+  color: var(--text);
+  font-weight: 600;
+}
 .model-options {
   max-height: min(320px, 40dvh);
   overflow-y: auto;
