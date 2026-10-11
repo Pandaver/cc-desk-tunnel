@@ -11,7 +11,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { TestContext } from 'node:test';
-import { remotePrompt } from '../src/claude.ts';
+import { remotePrompt, REMOTE_SCRIPT_COMMAND } from '../src/claude.ts';
 
 // A tunnel whose device is this test: each request for a channel is recorded, and `device.open` answers one
 // with a real WebSocket pair, handing the service's end to the tunnel as the service would.
@@ -103,10 +103,11 @@ test('context references native SSH configuration without inventing execution to
     '0d0c6a0e-6a53-4a0c-9d3a-2f6f5f3f7b11',
   );
   assert.match(prompt, /ssh -F "\/private\/ssh_config" device /);
-  assert.match(
-    prompt,
-    /"%CC_DESK_TUNNEL_PWSH%" -NoLogo -NoProfile -NonInteractive -EncodedCommand/,
-  );
+  // Scripts travel on standard input to one fixed command, never as Base64 on the command line.
+  assert.match(prompt, /"%CC_DESK_TUNNEL_PWSH%" -NoLogo -NoProfile -NonInteractive -Command /);
+  assert.match(prompt, /<<'PS'/);
+  assert.doesNotMatch(prompt, /EncodedCommand/);
+  assert.match(prompt, /scp or sftp, write Windows paths with forward slashes/);
   assert.match(prompt, /CC_DESK_TUNNEL_SCHEDULES/);
   // Nothing of the device's own layout: where its programs and the client's files are is the device's to know.
   assert.doesNotMatch(prompt, /pwsh\.exe|APPDATA/);
@@ -115,6 +116,12 @@ test('context references native SSH configuration without inventing execution to
   assert.match(prompt, /ssh -F/);
   assert.match(prompt, /it''s/);
   assert.doesNotMatch(prompt, /mcp__/);
+});
+test('the fixed script command survives Bash single quotes and cmd.exe double quotes', () => {
+  // What follows -Command is wrapped in double quotes and holds neither kind of quote itself.
+  const body = REMOTE_SCRIPT_COMMAND.slice(REMOTE_SCRIPT_COMMAND.indexOf('-Command "') + 10, -1);
+  assert.doesNotMatch(body, /["']/);
+  assert.match(body, /ReadToEnd\(\)/);
 });
 test('a session keeps one SSH path, and so one system prompt, across reconnects', (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'claude-session-ssh-'));
@@ -367,4 +374,9 @@ test('a device keeps one door: commands begun while it is away wait for its next
   const began = Date.now();
   await closed(lost);
   assert.ok(Date.now() - began >= 300);
+});
+test('the prompt lets the model look at a picture of the device by copying that one file here', () => {
+  const prompt = remotePrompt('D:\\work', { configPath: '/private/ssh_config' }, 'session');
+  assert.match(prompt, /copy that one file with scp to a temporary file on this host/);
+  assert.match(prompt, /Do not use this host's Read\/Edit tools on project files/);
 });

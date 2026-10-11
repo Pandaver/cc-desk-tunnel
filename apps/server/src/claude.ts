@@ -52,14 +52,25 @@ export type ClaudeRun = {
   // one of its background tasks.
   controls: { refresh?: () => Promise<void>; stopTask?: (taskId: string) => Promise<void> };
 };
+// The fixed command that runs a PowerShell script read from standard input. It holds no quote characters of its
+// own, so it sits inside the single quotes of a Bash command and the double quotes of cmd.exe alike. The script
+// never goes through the command line: no length limit (cmd.exe stops at 8191 characters, which a Base64 script
+// soon passes), no quoting, UTF-8 in and out, errors as plain text instead of CLIXML, and the exit code kept.
+const SCRIPT_FROM_STDIN =
+  '[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=[Console]::InputEncoding;' +
+  '$PSStyle.OutputRendering=[Management.Automation.OutputRendering]::PlainText;$s=[Console]::In.ReadToEnd();' +
+  '$global:LASTEXITCODE=$null;& ([scriptblock]::Create($s));if($null -ne $LASTEXITCODE){exit $LASTEXITCODE};exit [int](-not $?)';
+export const REMOTE_SCRIPT_COMMAND = `"%CC_DESK_TUNNEL_PWSH%" -NoLogo -NoProfile -NonInteractive -Command "${SCRIPT_FROM_STDIN}"`;
 // `sessionId` is the proxy's name for the session, which a scheduled task needs to continue it.
 export function remotePrompt(projectPath: string, ssh: SshConnection, sessionId: string) {
   return [
     "The user's projects are on their own computer, the device, NOT on this Linux host, which only runs Claude Code and has no copy of them.",
     `Device: Windows. Project directory: ${JSON.stringify(projectPath)}.`,
     `Do all project reads, edits, searches and commands on the device with your native Bash tool: ssh -F ${JSON.stringify(ssh.configPath)} device '<command>'. Do not use this host's Read/Edit tools on project files, and do not print, read into conversation or copy the key the SSH configuration names.`,
-    `On Windows the command is parsed by cmd.exe. Run PowerShell 7 as: "%CC_DESK_TUNNEL_PWSH%" -NoLogo -NoProfile -NonInteractive -EncodedCommand <script as UTF-16LE Base64>, quotes included, the script beginning with Set-Location -LiteralPath '${projectPath.replaceAll("'", "''")}' and using UTF-8 for console and file I/O.`,
+    `On Windows the command is parsed by cmd.exe, and the commands of one device share an SSH connection. Send every PowerShell 7 script on standard input, as a quoted Bash here-document, to this fixed command: ssh -F ${JSON.stringify(ssh.configPath)} device '${REMOTE_SCRIPT_COMMAND}' <<'PS' ... PS`,
+    `The script is plain PowerShell: no Base64, no escaping, any length, UTF-8. Errors come back as plain text and the exit code of the script is kept; standard input is the script itself, so it cannot read more. Begin it with Set-Location -LiteralPath '${projectPath.replaceAll("'", "''")}'. For scp or sftp, write Windows paths with forward slashes, as device:C:/Users/name/file.`,
     'If the device is unreachable, say so; never fall back to this host. After an interruption report results as unknown; do not repeat side effects on your own.',
+    'To look at a picture on the device, such as a pasted screenshot or an attached image, copy that one file with scp to a temporary file on this host, open it with the Read tool, and delete the copy afterwards. That is the only use of Read on this host for a file from the device.',
     'Commands may run concurrently. One that blocks holds the turn until its Bash timeout: size the timeout to the work, and run anything long-lived, such as a dev server or watcher, as a background Bash task. Ending an ssh command does not reliably end what it started on the device; stop that process on the device.',
     `Scheduled and recurring prompts are sent by the desktop client, not by cron on this host: edit the UTF-8 JSON file whose path is in the device's CC_DESK_TUNNEL_SCHEDULES environment variable (its "说明" field documents the format; changes apply within seconds). This session's ID for a task that continues it: ${sessionId}.`,
   ].join('\n');
