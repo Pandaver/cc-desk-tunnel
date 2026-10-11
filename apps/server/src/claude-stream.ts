@@ -16,6 +16,8 @@ export class ClaudeStream {
   messageId = randomUUID();
   streamed = false;
   thinkingStreamed = false;
+  // Model requests seen since the counter was last cleared; the service waits for as many call-log records.
+  requests = 0;
   result: { failed: boolean; text: string } | null = null;
   blocks = new Map<number, string>();
   requestedPermissionMode?: PermissionMode;
@@ -103,6 +105,7 @@ export class ClaudeStream {
     if (message.type === 'stream_event') {
       const event = jsonObject.parse(message.event);
       if (event.type === 'message_start') {
+        this.requests++;
         this.messageId = randomUUID();
         this.streamed = false;
         this.thinkingStreamed = false;

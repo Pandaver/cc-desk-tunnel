@@ -29,6 +29,13 @@ const totals = `COUNT(*) AS requests, COALESCE(SUM(input_tokens), 0) AS inputTok
   COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens, COALESCE(SUM(cache_creation_tokens), 0) AS cacheCreationTokens,
   COALESCE(SUM(cost_usd), 0) AS costUsd`;
 
+// Averages over the requests that report a first-token time; the speed counts only the time spent streaming.
+const streaming = `AVG(ttft_ms) AS ttftMs,
+  SUM(CASE WHEN ttft_ms IS NOT NULL AND duration_ms > ttft_ms THEN output_tokens END) AS streamedTokens,
+  SUM(CASE WHEN ttft_ms IS NOT NULL AND duration_ms > ttft_ms THEN duration_ms - ttft_ms END) AS streamedMs`;
+const perSecond = (tokens: number | null, ms: number | null) =>
+  tokens && ms ? tokens / (ms / 1000) : null;
+
 // The official CLI reports every model request through its own OpenTelemetry log export; the Linux service is the
 // collector. Costs are the CLI's API-price estimate for each request, not a subscription bill.
 export function telemetryEnvironment(endpoint: string): Record<string, string> {
@@ -62,6 +69,11 @@ export class UsageLog {
       );
       CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
     `);
+    // The prompt a request belongs to, which is how one turn's requests, subagents included, are told apart.
+    const columns = database.prepare('PRAGMA table_info(api_requests)').all() as { name: string }[];
+    if (!columns.some((column) => column.name === 'prompt_id'))
+      database.exec('ALTER TABLE api_requests ADD COLUMN prompt_id TEXT');
+    database.exec('CREATE INDEX IF NOT EXISTS api_requests_prompt ON api_requests(prompt_id)');
     this.restoreStarts();
     this.prune();
   }
@@ -154,8 +166,8 @@ export class UsageLog {
   // Accepts one OTLP/HTTP JSON log export and keeps only the model request records.
   ingest(body: unknown) {
     const insert = this.database.prepare(`INSERT OR IGNORE INTO api_requests
-      (at, session_id, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, duration_ms, ttft_ms, source, request_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      (at, session_id, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, duration_ms, ttft_ms, source, request_id, prompt_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     let stored = 0;
     for (const resource of asArray((body as { resourceLogs?: unknown })?.resourceLogs))
       for (const scope of asArray(resource?.scopeLogs))
@@ -196,6 +208,7 @@ export class UsageLog {
               fields.has('ttft_ms') ? number('ttft_ms') : null,
               text('query_source'),
               text('request_id'),
+              text('prompt.id'),
             ).changes,
           );
         }
@@ -309,9 +322,7 @@ export class UsageLog {
       ) as Record<string, number | string | null>[];
     const total = this.database
       .prepare(
-        `SELECT ${totals}, COALESCE(SUM(duration_ms), 0) AS durationMs, AVG(ttft_ms) AS ttftMs,
-        SUM(CASE WHEN ttft_ms IS NOT NULL AND duration_ms > ttft_ms THEN output_tokens END) AS streamedTokens,
-        SUM(CASE WHEN ttft_ms IS NOT NULL AND duration_ms > ttft_ms THEN duration_ms - ttft_ms END) AS streamedMs
+        `SELECT ${totals}, COALESCE(SUM(duration_ms), 0) AS durationMs, ${streaming}
       FROM api_requests WHERE ${filtered}`,
       )
       .get(...values) as Record<string, number | null>;
@@ -356,7 +367,7 @@ export class UsageLog {
       hasMore: rows.length > query.limit,
       totals: {
         ...(sums as Page['totals']),
-        outputPerSecond: streamedTokens && streamedMs ? streamedTokens / (streamedMs / 1000) : null,
+        outputPerSecond: perSecond(streamedTokens, streamedMs),
       },
       // The model list ignores the model filter so the filter can be changed from any selection.
       models: byModel.map((row) => row.model).sort(),
@@ -366,6 +377,34 @@ export class UsageLog {
         at: new Date(index * bucket - offset).toISOString(),
       })),
     };
+  }
+  // One turn's model requests, summed with the figures the call log shows: the requests of the turn's prompts, or,
+  // when the CLI named none, those inside its time window.
+  turnStats(sessionId: string, turn: { promptIds: string[]; startedAt: number; endedAt: number }) {
+    const prompts = turn.promptIds.length > 0;
+    const { streamedTokens, streamedMs, costUsd, ...sums } = this.database
+      .prepare(
+        `SELECT ${totals}, COALESCE(SUM(duration_ms), 0) AS modelMs, COALESCE(SUM(source = 'sdk'), 0) AS mainRequests, ${streaming}
+      FROM api_requests WHERE session_id = ? AND ${
+        prompts
+          ? `prompt_id IN (${turn.promptIds.map(() => '?').join(',')})`
+          : 'at >= ? AND at <= ?'
+      }`,
+      )
+      .get(sessionId, ...(prompts ? turn.promptIds : [turn.startedAt, turn.endedAt])) as Record<
+      string,
+      number | null
+    > & {
+      requests: number;
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheCreationTokens: number;
+      modelMs: number;
+      mainRequests: number;
+      ttftMs: number | null;
+    };
+    return { ...sums, outputPerSecond: perSecond(streamedTokens, streamedMs) };
   }
   prune(now = Date.now()) {
     this.database

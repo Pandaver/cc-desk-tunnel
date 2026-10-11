@@ -60,7 +60,7 @@ test('collector keeps model requests only, once each, without account identity',
   const columns = (
     database.prepare('PRAGMA table_info(api_requests)').all() as { name: string }[]
   ).map((column) => column.name);
-  assert.ok(!columns.some((name) => /email|user|account|prompt/.test(name)));
+  assert.ok(!columns.some((name) => /email|user|account|prompt(?!_id$)/.test(name)));
   const page = log.query({ limit: 1, bucketMinutes: 60, offsetMinutes: 0 }, () => '标题');
   assert.equal(page.rows.length, 1);
   assert.equal(page.hasMore, true);
@@ -341,4 +341,72 @@ test('loopback receiver accepts OTLP JSON log exports', async () => {
   } finally {
     await receiver.close();
   }
+});
+
+test('a turn is summed over its time window with the figures the call log shows', () => {
+  const log = new UsageLog(new DatabaseSync(':memory:'));
+  const session = '4f0c9d0e-1111-4222-8333-444455556666';
+  log.ingest(
+    batch(
+      request(base - 1000, 'before'),
+      request(base, 'a'),
+      request(base + 5000, 'b', { output_tokens: 400, ttft_ms: 500, duration_ms: 2500 }),
+      // Streamed time is what is left after the first token: 2000 ms and 2000 ms for 600 tokens.
+      request(base + 9000, 'elsewhere', { 'session.id': 'ffffffff-1111-4222-8333-444455556666' }),
+      request(base + 20000, 'after'),
+    ),
+  );
+  assert.deepEqual(
+    log.turnStats(session, { promptIds: [], startedAt: base, endedAt: base + 10000 }),
+    {
+      requests: 2,
+      inputTokens: 20,
+      outputTokens: 600,
+      cacheReadTokens: 2000,
+      cacheCreationTokens: 100,
+      modelMs: 5500,
+      mainRequests: 2,
+      ttftMs: 750,
+      outputPerSecond: 150,
+    },
+  );
+  assert.deepEqual(
+    log.turnStats(session, { promptIds: [], startedAt: base + 30000, endedAt: base + 40000 }),
+    {
+      requests: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      modelMs: 0,
+      mainRequests: 0,
+      ttftMs: null,
+      outputPerSecond: null,
+    },
+  );
+});
+
+test('a turn is summed over the requests of its prompts, whatever the time', () => {
+  const log = new UsageLog(new DatabaseSync(':memory:'));
+  const session = '4f0c9d0e-1111-4222-8333-444455556666';
+  log.ingest(
+    batch(
+      request(base, 'main', { 'prompt.id': 'p1' }),
+      // A subagent's request arrives with the prompt it ran for, even long after the turn's window.
+      request(base + 60000, 'subagent', {
+        'prompt.id': 'p1',
+        output_tokens: 100,
+        query_source: 'agent:builtin:general-purpose',
+      }),
+      request(base + 1000, 'next', { 'prompt.id': 'p2' }),
+      request(base + 2000, 'unnamed'),
+    ),
+  );
+  const turn = (promptIds: string[]) => ({ promptIds, startedAt: base, endedAt: base + 5000 });
+  assert.equal(log.turnStats(session, turn(['p1'])).requests, 2);
+  assert.equal(log.turnStats(session, turn(['p1'])).outputTokens, 300);
+  // Only the main loop's requests count towards the requests the turn is waiting for.
+  assert.equal(log.turnStats(session, turn(['p1'])).mainRequests, 1);
+  assert.equal(log.turnStats(session, turn(['p1', 'p2'])).requests, 3);
+  assert.equal(log.turnStats(session, turn([])).requests, 3);
 });
