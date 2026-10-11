@@ -40,16 +40,25 @@ export function sessionSsh(dataDir: string, sessionId: string, ssh: SshConnectio
   return { ...ssh, configPath };
 }
 
-// Runs what the system prompt tells Claude to run: the device's SSH service names its PowerShell in a variable.
+// What the device runs for the host `device-script`: a PowerShell script read whole from standard input. The
+// script never goes through a command line — cmd.exe stops at 8191 characters and has quoting rules of its own
+// — so it is plain text of any length, UTF-8 in and out; errors come back as plain text and its exit code is
+// kept. PowerShell's own `-Command -` and `-File -` take standard input a line at a time, as if typed, and
+// lose a block that spans lines; hence reading it all first. The device's SSH service names its PowerShell in
+// a variable. The command holds no quote characters inside the ones around it, so cmd.exe passes it whole.
+// This way of sending scripts came with #31 (chokhung588-cell), which had the model write the command out.
+const SCRIPT_FROM_STDIN =
+  '[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=[Console]::InputEncoding;' +
+  '$PSStyle.OutputRendering=[Management.Automation.OutputRendering]::PlainText;$s=[Console]::In.ReadToEnd();' +
+  '$global:LASTEXITCODE=$null;& ([scriptblock]::Create($s));if($null -ne $LASTEXITCODE){exit $LASTEXITCODE};exit [int](-not $?)';
+export const SCRIPT_COMMAND = `"%CC_DESK_TUNNEL_PWSH%" -NoLogo -NoProfile -NonInteractive -Command "${SCRIPT_FROM_STDIN}"`;
+
+// Runs a script the way the system prompt tells Claude to.
 export function sshProbe(configPath: string) {
-  const script =
-    "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); Write-Output 'CC_DESK_TUNNEL_SSH_READY'; exit 0";
-  const encoded = Buffer.from(script, 'utf16le').toString('base64');
-  const command = `"%CC_DESK_TUNNEL_PWSH%" -NoLogo -NoProfile -NonInteractive -EncodedCommand ${encoded}`;
   return new Promise<void>((resolve, reject) => {
-    execFile(
+    const child = execFile(
       'ssh',
-      ['-F', configPath, 'device', command],
+      ['-F', configPath, 'device-script'],
       { timeout: 20000, maxBuffer: 65536 },
       (error, stdout) => {
         if (error || !stdout.includes('CC_DESK_TUNNEL_SSH_READY'))
@@ -57,6 +66,8 @@ export function sshProbe(configPath: string) {
         else resolve();
       },
     );
+    child.stdin?.on('error', () => {});
+    child.stdin?.end("Write-Output 'CC_DESK_TUNNEL_SSH_READY'\n");
   });
 }
 // Where the commands of one device share an SSH connection, or nothing when they cannot: the `ssh` of Windows,
@@ -81,8 +92,13 @@ export function sshConfig(
   return {
     knownHosts: `[127.0.0.1]:${port} ${hostPublicKey}\n`,
     config: [
+      // The same computer under a name that takes a script instead of a command. `ssh` reads % in this
+      // option as its own, so the device's variable is written with two.
+      'Host device-script',
+      `  RemoteCommand ${SCRIPT_COMMAND.replaceAll('%', '%%')}`,
+      '  RequestTTY no',
       // `device` is the name the system prompt gives; conversations begun before 0.2.11 know it as `windows`.
-      'Host device windows',
+      'Host device windows device-script',
       '  HostName 127.0.0.1',
       `  Port ${port}`,
       `  User ${username}`,

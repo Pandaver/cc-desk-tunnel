@@ -44,6 +44,7 @@ Claude Code 原生存储是模型会话上下文的唯一权威，包含原生�
 - 首轮 `sessionId`，后续 `resume`；显式 `persistSession: true`。即使每轮启动新 CLI 进程，原生上下文仍由同一 session 恢复。
 - 恢复前通过官方 `getSessionInfo` 检查原生记录存在；缺失则明确失败，不静默另开会话，不用代理事件假装恢复。
 - 运行结束通过官方接口确认记录已保存，并同步保存状态到 GUI。压缩由 CLI 执行，客户端只展示实际公开的压缩 / 状态事件。
+- SSH 配置里一台设备有两个主机名。`device` 原样执行一条命令行（Windows 上由 cmd.exe 解析），scp / sftp 也用它；`device-script` 是同一台设备加上一条固定的 `RemoteCommand`：把标准输入整段读成 PowerShell 7 脚本再执行，UTF-8、纯文本报错、保留退出码。提示词让 Claude 把脚本用 here-document 送给 `device-script`，脚本不经过任何一层命令行，不需要转义或编码，也没有长度限制。就绪探测走的是同一个主机名。PowerShell 自带的 `-Command -` 与 `-File -` 逐行处理标准输入，跨行的块会丢失，所以不用。
 - 每台设备另有一个固定的入口 `devices/<device-id>/`：端口和配置路径在设备在线及宽限期内不变，密钥随每次连接更换；会话的 SSH 配置指向它，所以重连对正在运行的 CLI 没有任何可见变化，设备不在时新发起的命令在入口处等待（最长一分钟）。
 - 临时 SSH config / key 在 `connections/<connection-id>/`；断连回收这个目录，不碰 `native/<session-id>/`、CLI 原生 transcript 或记忆。系统提示词里写的不是这个目录，而是每个会话固定的 `session-ssh/<session-id>.conf`，它只有一行 `Include`，每次运行前指向当前连接的配置：连接目录每次重连都换，提示词若跟着变，模型侧的提示缓存从系统提示词之后全部失效，整段对话要重新写入缓存。重连不丢失会话，也不改变提示词。
 

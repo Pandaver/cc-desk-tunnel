@@ -45,9 +45,9 @@ Windows：读写文件 / PowerShell 命令 → 结果回到 Claude → 事件回
        ◀── 本次连接专用的通道密钥（tunnel.offer）──
 客户端：生成临时 SSH 主机密钥与登录密钥，启动回环 sshd
 客户端 ── 登录私钥 + 主机公钥（经 WSS）──▶ 服务
-服务：写入私有连接目录，用 ssh -F <配置> windows 探测
+服务：写入私有连接目录，用 ssh -F <配置> device-script 探测
        ── tunnel.ready ──▶ 客户端，界面此时才允许发起任务
-Claude Code：原生 Bash ──▶ ssh -F <配置> windows ──▶ PowerShell 7
+Claude Code：原生 Bash ──▶ ssh -F <配置> device-script ──▶ PowerShell 7（脚本走标准输入）
 ```
 
 `ssh` 连的是服务进程在回环上为这台设备开的端口。每来一条 SSH 连接：
