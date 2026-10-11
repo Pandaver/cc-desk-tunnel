@@ -11,6 +11,12 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const dryRun = process.argv.includes('--dry-run');
 const publish = process.argv.includes('--publish');
 const prerelease = process.argv.includes('--prerelease');
+// A word this script does not know is a mistake, not something to release past: `--help` would otherwise publish.
+const unknown = process.argv
+  .slice(2)
+  .filter((word) => !['--dry-run', '--publish', '--prerelease'].includes(word));
+if (unknown.length)
+  throw new Error(`Unknown argument ${unknown.join(' ')}. Use --dry-run, --prerelease, --publish.`);
 const gh = process.env.GH ?? 'gh';
 const run = (file, args, options = {}) =>
   execFileSync(file, args, { cwd: root, encoding: 'utf8', windowsHide: true, ...options });
