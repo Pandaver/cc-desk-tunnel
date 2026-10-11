@@ -1,0 +1,44 @@
+# The checks a change has to pass, the same ones run by hand before a commit. The interface tests and the
+# Windows packaging are not here yet: they need a Windows machine with the bundled components.
+name: check
+on:
+  pull_request:
+  push:
+    branches: [main, 'dev/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run typecheck
+      - run: npm run format:check
+      - run: npm test
+  # The parts of the client that only run on Windows. Without the bundled OpenSSH and PowerShell the tests that
+  # need them skip themselves; this job is here to learn what a hosted Windows machine can run, and does not
+  # hold a change back yet.
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
