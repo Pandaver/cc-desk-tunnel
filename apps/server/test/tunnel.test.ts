@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { sshConfig, sessionSsh, Tunnel } from '../src/tunnel.ts';
+import { Door, sshConfig, sessionSsh, Tunnel } from '../src/tunnel.ts';
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -307,4 +307,64 @@ test('closing the tunnel ends waiting and joined SSH connections, their channels
   assert.equal(device.unexpected(), 0);
   // Closing twice is the same close.
   assert.equal(device.tunnel.close(), device.tunnel.close());
+});
+
+test('a device keeps one door: commands begun while it is away wait for its next tunnel, whose keys replace the old', async (t) => {
+  const first = await harness(t);
+  const directory = mkdtempSync(join(tmpdir(), 'claude-door-'));
+  const door = new Door({ holdMs: 400 }, directory, randomUUID());
+  await door.start();
+  t.after(async () => {
+    await door.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const credentials = (name: string) => ({
+    type: 'tunnel.credentials' as const,
+    connectionId: randomUUID(),
+    username: 'tester',
+    hostPublicKey: `ssh-ed25519 ${name}`,
+    privateKey: `private ${name}\n`,
+  });
+  first.tunnel.credentials = credentials('first');
+  door.use(first.tunnel);
+  const configPath = door.ssh!.configPath;
+  const config = readFileSync(configPath, 'utf8');
+  const port = Number(/Port (\d+)/.exec(config)![1]);
+  assert.notEqual(port, first.tunnel.port);
+  assert.match(config, /ConnectTimeout 16\b/);
+  assert.match(readFileSync(join(door.directory, 'known_hosts'), 'utf8'), /first/);
+
+  // Through the door the connection is the tunnel's like any other.
+  const through = connect(port, '127.0.0.1');
+  const [channelId] = await first.requested(1);
+  const { device } = await first.open(channelId);
+  through.write('ping');
+  assert.equal((await once(device, 'message'))[0].toString(), 'ping');
+  through.destroy();
+
+  // The device goes: what is begun now is held, and goes to the tunnel that comes next.
+  door.use(undefined);
+  const waiting = connect(port, '127.0.0.1');
+  await once(waiting, 'connect');
+  await delay(50);
+  assert.equal(first.requests.length, 1);
+  const second = await harness(t);
+  second.tunnel.credentials = credentials('second');
+  door.use(second.tunnel);
+  assert.equal(door.ssh!.configPath, configPath);
+  assert.match(readFileSync(join(door.directory, 'known_hosts'), 'utf8'), /second/);
+  assert.equal(readFileSync(join(door.directory, 'identity'), 'utf8'), 'private second\n');
+  const [next] = await second.requested(1);
+  const joined = await second.open(next);
+  waiting.write('late');
+  assert.equal((await once(joined.device, 'message'))[0].toString(), 'late');
+  waiting.destroy();
+
+  // Nobody comes back: the wait ends.
+  door.use(undefined);
+  const lost = connect(port, '127.0.0.1');
+  await once(lost, 'connect');
+  const began = Date.now();
+  await closed(lost);
+  assert.ok(Date.now() - began >= 300);
 });

@@ -14,6 +14,8 @@ export type TunnelOptions = {
   pairMs?: number;
   // Tells whether a command reaches the device through the SSH configuration; `sshProbe` unless a test replaces it.
   probe?: (configPath: string) => Promise<void>;
+  // How long a command started while its device is away waits for the device to come back.
+  holdMs?: number;
 };
 export type SshConnection = { configPath: string };
 
@@ -23,9 +25,9 @@ const MAX_WAITING = 32;
 const MAX_CHANNELS = 128;
 
 // The SSH configuration a session's system prompt names. Its path is the session's for good; each run points
-// it at the connection it runs over. A connection's own directory is new on every reconnect, and a system
-// prompt that named it would change with it — the model's prompt cache would then match nothing of the
-// conversation, and all of it would be written to the cache again.
+// it at the door of the device it runs on. A system prompt that named something of a connection would change
+// with every reconnect — the model's prompt cache would then match nothing of the conversation, and all of it
+// would be written to the cache again.
 export function sessionSshPath(dataDir: string, sessionId: string) {
   return join(dataDir, 'session-ssh', `${sessionId}.conf`);
 }
@@ -70,6 +72,8 @@ export function sshConfig(
   username: string,
   hostPublicKey: string,
   platform = process.platform,
+  // Longer where a connection may first wait for the device to come back: see `Door`.
+  connectSeconds = 15,
 ) {
   if (directory.includes('\n') || directory.includes('"'))
     throw new Error('Unsupported data directory');
@@ -89,7 +93,7 @@ export function sshConfig(
       '  StrictHostKeyChecking yes',
       // The local port answers at once; this is the time the device has to open the channel behind it and
       // its SSH service to greet, which is a few round trips to the device.
-      '  ConnectTimeout 15',
+      `  ConnectTimeout ${connectSeconds}`,
       '  ServerAliveInterval 10',
       '  ServerAliveCountMax 2',
       '  ForwardAgent no',
@@ -126,6 +130,8 @@ export class Tunnel {
   ssh?: SshConnection;
   controller = new AbortController();
   closePromise?: Promise<void>;
+  // What the device registered with, once its SSH service answered through this tunnel.
+  credentials?: TunnelCredentials;
   private secret = randomBytes(32).toString('base64url');
   private pairMs: number;
   private probe: NonNullable<TunnelOptions['probe']>;
@@ -152,7 +158,7 @@ export class Tunnel {
   async start(): Promise<Extract<ServerMessage, { type: 'tunnel.offer' }>> {
     mkdirSync(this.directory, { recursive: true, mode: 0o700 });
     // Nothing is read from an SSH connection until its channel is there to take it.
-    const listener = createServer({ pauseOnConnect: true }, (socket) => this.incoming(socket));
+    const listener = createServer({ pauseOnConnect: true }, (socket) => this.carry(socket));
     this.listener = listener;
     await new Promise<void>((resolve, reject) => {
       listener.once('error', reject);
@@ -172,7 +178,8 @@ export class Tunnel {
     const digest = (value: string) => createHash('sha256').update(value).digest();
     return timingSafeEqual(digest(secret), digest(this.secret));
   }
-  private incoming(socket: Socket) {
+  // Takes one SSH connection, paused, and asks the device for the channel to join it to.
+  carry(socket: Socket) {
     socket.on('error', () => socket.destroy());
     if (
       this.controller.signal.aborted ||
@@ -223,6 +230,7 @@ export class Tunnel {
         await this.probe(configPath);
         if (this.controller.signal.aborted) throw new Error('Tunnel closed');
         this.ssh = { configPath };
+        this.credentials = credentials;
         return;
       } catch {
         await delay(300, undefined, { signal: this.controller.signal });
@@ -249,5 +257,104 @@ export class Tunnel {
       rmSync(this.directory, { recursive: true, force: true });
     })();
     return this.closePromise;
+  }
+}
+
+// Where the commands of one device go, whichever of its connections is there to carry them. A connection's
+// tunnel has its own port and keys, new each time; the door keeps one port and one configuration for the
+// device and hands every SSH connection to the tunnel in use. A session's SSH configuration points here, so
+// a reconnect changes nothing a running CLI or its prompt names: the keys in this directory are replaced and
+// the next command uses them.
+//
+// While the device is away the door still answers. An SSH connection made then is held, unread, until a
+// tunnel is there or `holdMs` has passed: a command Claude starts during a short outage is late, not failed.
+// One that was running when the connection broke is lost with it — SSH cannot be taken up again.
+export class Door {
+  directory: string;
+  ssh?: SshConnection;
+  private port = 0;
+  private holdMs: number;
+  private listener?: Server;
+  private tunnel?: Tunnel;
+  private held = new Map<Socket, NodeJS.Timeout>();
+  private closed = false;
+  constructor(options: TunnelOptions, dataDir: string, device: string) {
+    this.directory = join(dataDir, 'devices', device);
+    this.holdMs = options.holdMs ?? 60000;
+  }
+  async start() {
+    mkdirSync(this.directory, { recursive: true, mode: 0o700 });
+    const listener = createServer({ pauseOnConnect: true }, (socket) => this.incoming(socket));
+    this.listener = listener;
+    await new Promise<void>((resolve, reject) => {
+      listener.once('error', reject);
+      listener.listen(0, '127.0.0.1', () => {
+        listener.off('error', reject);
+        resolve();
+      });
+    });
+    listener.on('error', () => {});
+    this.port = (listener.address() as AddressInfo).port;
+  }
+  private incoming(socket: Socket) {
+    if (this.closed) socket.destroy();
+    else if (this.tunnel) this.tunnel.carry(socket);
+    else if (this.held.size >= MAX_WAITING) socket.destroy();
+    else {
+      socket.on('error', () => socket.destroy());
+      this.held.set(
+        socket,
+        setTimeout(() => socket.destroy(), this.holdMs),
+      );
+      socket.once('close', () => {
+        clearTimeout(this.held.get(socket));
+        this.held.delete(socket);
+      });
+    }
+  }
+  // The tunnel that carries the device's commands from now on, or none while the device is away. Its keys
+  // replace the ones here; SSH connections that were waiting go to it.
+  use(tunnel: Tunnel | undefined) {
+    if (this.closed || tunnel === this.tunnel) return;
+    this.tunnel = tunnel;
+    if (!tunnel?.credentials) return;
+    const { username, hostPublicKey, privateKey } = tunnel.credentials;
+    const files = sshConfig(
+      this.directory,
+      this.port,
+      username,
+      hostPublicKey,
+      process.platform,
+      Math.ceil(this.holdMs / 1000) + 15,
+    );
+    const write = (name: string, text: string) => {
+      const next = join(this.directory, `${name}.${randomBytes(6).toString('hex')}`);
+      writeFileSync(next, text, { mode: 0o600 });
+      renameSync(next, join(this.directory, name));
+    };
+    write('identity', privateKey);
+    write('known_hosts', files.knownHosts);
+    write('ssh_config', files.config);
+    this.ssh = { configPath: join(this.directory, 'ssh_config') };
+    for (const [socket, timer] of this.held) {
+      clearTimeout(timer);
+      this.held.delete(socket);
+      tunnel.carry(socket);
+    }
+  }
+  uses(tunnel: Tunnel | undefined) {
+    return this.tunnel === tunnel;
+  }
+  async close() {
+    if (this.closed) return;
+    this.closed = true;
+    this.tunnel = undefined;
+    const listener = this.listener;
+    const closed = listener?.listening
+      ? new Promise<void>((resolve) => listener.close(() => resolve()))
+      : undefined;
+    for (const socket of this.held.keys()) socket.destroy();
+    await closed;
+    rmSync(this.directory, { recursive: true, force: true });
   }
 }

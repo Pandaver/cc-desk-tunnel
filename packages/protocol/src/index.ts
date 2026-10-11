@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const PROTOCOL_VERSION = 14;
+export const PROTOCOL_VERSION = 15;
 export const MAX_FRAME_BYTES = 256 * 1024;
 const id = z.uuid();
 const timestamp = z.iso.datetime();
@@ -191,6 +191,8 @@ export const eventPayloadSchema = z.discriminatedUnion('type', [
     messageId: id,
     text: z.string(),
     scenario: scenarioSchema,
+    // Sent by the "continue" button rather than written: the page shows a mark in place of the text.
+    continued: z.boolean().optional(),
   }),
   z.object({
     type: z.literal('message.delivery'),
@@ -486,6 +488,8 @@ export const commandSchema = z.discriminatedUnion('type', [
     })
     .strict(),
   z.object({ type: z.literal('run.cancel'), ...request, sessionId: id, runId: id }).strict(),
+  // Takes up a session whose last turn was stopped or cut off, without the user writing a message.
+  z.object({ type: z.literal('run.continue'), ...request, sessionId: id }).strict(),
   z
     .object({
       type: z.literal('run.task.stop'),
@@ -551,6 +555,9 @@ export const authSchema = z
 // Which of the user's computers the connection is from, named by `auth.deviceName`. It follows `auth` as a
 // frame of its own because the frame of `auth` has to stay what every version reads.
 export const deviceIdentitySchema = z.object({ type: z.literal('device'), id }).strict();
+// The client is closing the connection on purpose. Without it a connection that ends is taken for a fault on
+// the way, and what the device was running is kept for it to come back to.
+export const leaveSchema = z.object({ type: z.literal('leave') }).strict();
 export const serverMessageSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('ready'),

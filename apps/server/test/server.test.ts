@@ -66,9 +66,9 @@ class Client {
   }
 }
 
-async function fixture(t: TestContext, stepMs = 2) {
+async function fixture(t: TestContext, stepMs = 2, graceMs?: number) {
   const directory = mkdtempSync(join(tmpdir(), 'cc-desk-tunnel-test-'));
-  const server = createProxyServer({ token, dataDir: directory, stepMs });
+  const server = createProxyServer({ token, dataDir: directory, stepMs, graceMs });
   const url = await server.listen(0);
   const clients: Client[] = [];
   t.after(async () => {
@@ -277,10 +277,10 @@ test('disconnect while awaiting approval cancels, cursor replay restores history
   assert.ok(late.type === 'response' && !late.ok);
 });
 
-test('another connection cannot approve or cancel a run', async (t) => {
+test('another computer cannot approve or cancel a run; another window of the same one can', async (t) => {
   const f = await fixture(t);
   const owner = await f.connect();
-  const observer = await f.connect();
+  const observer = await f.connect({ id: randomUUID(), name: '另一台' });
   const sessionId = await f.create(owner);
   await owner.request({ type: 'message.send', sessionId, text: '权限测试', scenario: 'tool' });
   const approval = await owner.event('approval.requested');
@@ -300,6 +300,123 @@ test('another connection cannot approve or cancel a run', async (t) => {
     const response = await observer.request(command);
     assert.ok(response.type === 'response' && !response.ok && response.code === 'not_owner');
   }
+  const second = await f.connect();
+  const stopped = await second.request({
+    type: 'run.cancel',
+    sessionId,
+    runId: approval.event.runId,
+  });
+  assert.ok(stopped.type === 'response' && stopped.ok);
+});
+
+// A run waiting for approval, and where its record stood when the connection was cut.
+async function cutOff(f: Awaited<ReturnType<typeof fixture>>, leave = false) {
+  const client = await f.connect();
+  const sessionId = await f.create(client);
+  await client.request({ type: 'message.send', sessionId, text: '断线测试', scenario: 'tool' });
+  const approval = await client.event('approval.requested');
+  assert.ok(
+    approval.type === 'session.event' && approval.event.payload.type === 'approval.requested',
+  );
+  const closed = new Promise((resolve) => client.socket.once('close', resolve));
+  if (leave) {
+    client.send({ type: 'leave' });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  }
+  client.socket.terminate();
+  await closed;
+  return {
+    sessionId,
+    runId: approval.event.runId,
+    approvalId: approval.event.payload.approvalId,
+    cursor: approval.event.sequence,
+  };
+}
+async function snapshot(client: Client, sessionId: string, afterSequence: number) {
+  await client.request({ type: 'session.subscribe', sessionId, afterSequence });
+  const history = await client.wait((message) => message.type === 'session.snapshot');
+  assert.ok(history.type === 'session.snapshot');
+  return history;
+}
+
+test('a run outlives its connection: the same computer comes back, answers the approval and sees it finish', async (t) => {
+  const f = await fixture(t, 2, 2000);
+  const cut = await cutOff(f);
+  // Another computer finds it running and may not touch it.
+  const other = await f.connect({ id: randomUUID(), name: '另一台' });
+  assert.ok((await snapshot(other, cut.sessionId, cut.cursor)).session.activeRun);
+  const refused = await other.request({
+    type: 'approval.reply',
+    sessionId: cut.sessionId,
+    runId: cut.runId,
+    approvalId: cut.approvalId,
+    allowed: true,
+  });
+  assert.ok(refused.type === 'response' && !refused.ok && refused.code === 'not_owner');
+  const back = await f.connect();
+  const history = await snapshot(back, cut.sessionId, cut.cursor);
+  assert.equal(history.session.activeRun?.id, cut.runId);
+  assert.equal(history.session.activeRun?.status, 'awaiting_approval');
+  const reply = await back.request({
+    type: 'approval.reply',
+    sessionId: cut.sessionId,
+    runId: cut.runId,
+    approvalId: cut.approvalId,
+    allowed: true,
+  });
+  assert.ok(reply.type === 'response' && reply.ok);
+  const end = await back.wait(
+    (message) =>
+      message.type === 'session.event' &&
+      message.event.payload.type === 'run.status' &&
+      message.event.payload.status === 'completed',
+  );
+  assert.ok(end.type === 'session.event' && end.event.runId === cut.runId);
+});
+
+test('a computer that stays away longer than the grace has its run stopped; one that says it leaves, at once', async (t) => {
+  const f = await fixture(t, 2, 150);
+  const cut = await cutOff(f);
+  const watcher = await f.connect({ id: randomUUID(), name: '另一台' });
+  assert.ok((await snapshot(watcher, cut.sessionId, cut.cursor)).session.activeRun);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const after = await snapshot(watcher, cut.sessionId, cut.cursor);
+  assert.equal(after.session.activeRun, null);
+  const stop = after.events.findLast((event) => event.payload.type === 'run.status')?.payload;
+  assert.ok(stop?.type === 'run.status' && stop.status === 'cancelled');
+  assert.match(stop.reason ?? '', /设备离线/);
+
+  const patient = await fixture(t, 2, 60_000);
+  const left = await cutOff(patient, true);
+  const next = await patient.connect();
+  assert.equal((await snapshot(next, left.sessionId, left.cursor)).session.activeRun, null);
+});
+
+test('a stopped turn is taken up again without a message of the user', async (t) => {
+  const f = await fixture(t);
+  const client = await f.connect();
+  const sessionId = await f.create(client);
+  await client.request({ type: 'message.send', sessionId, text: '做到一半', scenario: 'tool' });
+  const approval = await client.event('approval.requested');
+  assert.ok(approval.type === 'session.event');
+  const busy = await client.request({ type: 'run.continue', sessionId });
+  assert.ok(busy.type === 'response' && !busy.ok && busy.code === 'run_active');
+  await client.request({ type: 'run.cancel', sessionId, runId: approval.event.runId });
+  await client.wait(
+    (message) =>
+      message.type === 'session.event' &&
+      message.event.payload.type === 'run.status' &&
+      message.event.payload.status === 'cancelled',
+  );
+  const resumed = await client.request({ type: 'run.continue', sessionId });
+  assert.ok(resumed.type === 'response' && resumed.ok);
+  const message = await client.wait(
+    (item) =>
+      item.type === 'session.event' &&
+      item.event.payload.type === 'message.user' &&
+      item.event.payload.continued === true,
+  );
+  assert.ok(message.type === 'session.event' && message.event.runId !== approval.event.runId);
 });
 
 test('a session is worked on from its own computer; another one takes it over or forks it, with a directory there', async (t) => {
