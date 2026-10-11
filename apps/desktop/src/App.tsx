@@ -3,6 +3,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -177,7 +178,13 @@ export function App() {
   const sessions = state.sessions.filter((session) => isHere(session, state.device));
   const elsewhere = state.sessions.filter((session) => !isHere(session, state.device));
   const away = !!selected && !isHere(selected, state.device);
-  const events = selected ? (state.events[selected.id] ?? []) : [];
+  const recorded = selected ? state.events[selected.id] : undefined;
+  const unfinished = selected ? state.live[selected.id] : undefined;
+  const events = useMemo(
+    () => (selected ? client.shown(selected.id) : []),
+    // What is shown changes with these two.
+    [selected?.id, recorded, unfinished],
+  );
   const history = selected ? state.history[selected.id] : undefined;
   const nativeSession = latest(events, 'native.session');
   const capabilities = latest(events, 'native.capabilities') ?? state.capabilities;
@@ -203,8 +210,9 @@ export function App() {
     !!selected?.activeRun ||
     !!history?.loading ||
     !!terminalSessionId;
-  const ownsRun = !!selected?.activeRun && selected.activeRun.connectionId === state.connectionId;
-  // A native run accepts follow-up messages from the connection that owns it.
+  // A run is that of the computer its session is on, whichever connection of it started the run.
+  const ownsRun = !!selected?.activeRun && isHere(selected, state.device);
+  // A native run accepts follow-up messages from the computer it runs for.
   const inputDisabled =
     !connected ||
     busy ||
@@ -212,6 +220,17 @@ export function App() {
     (!!selected?.activeRun && (!nativeMode || !ownsRun)) ||
     refreshing;
   const draft = selected ? (drafts[selected.id] ?? '') : '';
+  // The last turn of the session did not reach its end: it can be taken up again from the message box.
+  const lastStatus = selected
+    ? state.events[selected.id]?.findLast((event) => event.payload.type === 'run.status')?.payload
+    : undefined;
+  const stopped =
+    !!selected &&
+    !selected.activeRun &&
+    !away &&
+    lastStatus?.type === 'run.status' &&
+    lastStatus.surface !== 'terminal' &&
+    (lastStatus.status === 'cancelled' || lastStatus.status === 'failed');
   const signedOut = state.account?.loggedIn === false;
   const currentError = error ?? state.error;
   // Offered when the service holds a newer installer than the running client.
@@ -313,23 +332,35 @@ export function App() {
   }, [connected, form.remember, form.autoLogin]);
   useEffect(() => {
     const close = () => client.disconnect();
-    const unsubscribe = window.desktop?.onProxyClosed(() => {
+    // The system says the network is back: the attempt that was waiting for its turn is made now.
+    const retry = () => client.retryNow();
+    window.addEventListener('beforeunload', close);
+    window.addEventListener('online', retry);
+    return () => {
+      window.removeEventListener('beforeunload', close);
+      window.removeEventListener('online', retry);
       client.disconnect();
-      setForm((current) => (current.remember ? current : { ...current, token: '' }));
-      setError((value) => value ?? client.state.error ?? '远程连接已关闭，请重新登录。');
+    };
+  }, [client, changeForm]);
+  // A connection that breaks is made again by the client, and the window stays where it is. It comes back to
+  // the sign-in page only when the connection is over for good: ended here, or refused by the service.
+  const signedIn = useRef(false);
+  useEffect(() => {
+    if (state.status === 'connected' || state.status === 'reconnecting') {
+      signedIn.current = true;
+      return;
+    }
+    if (state.status !== 'disconnected' || !signedIn.current) return;
+    signedIn.current = false;
+    void window.desktop?.disconnectProxy();
+    setForm((current) => (current.remember ? current : { ...current, token: '' }));
+    if (client.state.error)
       notifications.push({
         kind: 'connection',
         title: '连接中断',
-        body: client.state.error?.split('\n')[0] ?? '远程连接已关闭，请重新登录。',
+        body: client.state.error.split('\n')[0],
       });
-    });
-    window.addEventListener('beforeunload', close);
-    return () => {
-      window.removeEventListener('beforeunload', close);
-      client.disconnect();
-      unsubscribe?.();
-    };
-  }, [client, changeForm]);
+  }, [state.status]);
   useEffect(() => {
     if (!connected) {
       setTerminalSessionId(null);
@@ -391,12 +422,21 @@ export function App() {
     try {
       if (form.mode === 'remote') {
         setProxyConnecting(true);
-        const connection = await window.desktop!.connectProxy({
-          url: form.url,
-          fingerprint: form.fingerprint,
-          waits: getPrefs().connection,
-        });
-        client.connect(connection.url, form.token, await thisDevice(), false);
+        // The address here only has to be a loopback one; each attempt gets its own from the bridge it opens.
+        client.connect(
+          'ws://127.0.0.1/ws',
+          form.token,
+          await thisDevice(),
+          true,
+          async () =>
+            (
+              await window.desktop!.connectProxy({
+                url: form.url,
+                fingerprint: form.fingerprint,
+                waits: getPrefs().connection,
+              })
+            ).url,
+        );
       } else {
         client.connect(form.url, form.token, await thisDevice());
       }
@@ -516,12 +556,11 @@ export function App() {
   useEffect(() => window.desktop?.onNotifyClicked((sessionId) => sessionId && show(sessionId)));
   const schedules = useSchedules(
     async (task, due) => {
-      const { status, sessions, selectedId, connectionId } = client.state;
+      const { status, sessions, selectedId, device } = client.state;
       if (
         status !== 'connected' ||
         sessions.some(
-          ({ activeRun }) =>
-            activeRun?.surface === 'terminal' && activeRun.connectionId === connectionId,
+          (session) => session.activeRun?.surface === 'terminal' && isHere(session, device),
         )
       )
         return false;
@@ -575,8 +614,8 @@ export function App() {
       : window.prompt('这台电脑上的项目目录', session.projectPath);
     return path?.trim() || null;
   }
-  // Takes a session over from the computer it was on: from the next message Claude works in the directory
-  // chosen here, on this computer.
+  // Moves a session to a directory chosen here, on this computer, which also takes it over from the computer
+  // it was on: from the next message Claude works there.
   async function takeOver(session: Session) {
     await act(async () => {
       const projectPath = await placeHere(session);
@@ -610,6 +649,14 @@ export function App() {
     await act(async () => {
       await client.request({ type: 'message.send', sessionId, text: draft, scenario });
       setDraft(sessionId, '');
+    });
+  }
+  // Takes up the last turn, which was stopped or cut off, without the user writing anything.
+  function resume() {
+    if (!selected) return;
+    const sessionId = selected.id;
+    void act(async () => {
+      await client.request({ type: 'run.continue', sessionId });
     });
   }
   async function compact() {
@@ -781,21 +828,32 @@ export function App() {
         !paths.some((path) => pathKey(path) === pathKey(item.projectPath))
       )
         paths.push(item.projectPath);
-    return paths.map((path) => ({
-      label: projectLabel(path),
-      detail: path,
-      checked: pathKey(path) === pathKey(session.projectPath),
-      run: () => {
-        if (pathKey(path) !== pathKey(session.projectPath))
-          void act(async () => {
-            await client.request({
-              type: 'session.move',
-              sessionId: session.id,
-              projectPath: path,
+    return [
+      ...paths.map((path) => ({
+        label: projectLabel(path),
+        detail: path,
+        checked: pathKey(path) === pathKey(session.projectPath),
+        run: () => {
+          if (pathKey(path) !== pathKey(session.projectPath))
+            void act(async () => {
+              await client.request({
+                type: 'session.move',
+                sessionId: session.id,
+                projectPath: path,
+              });
             });
-          });
+        },
+      })),
+      // A folder that is no project yet becomes one with the move.
+      {
+        label: '选择其他文件夹…',
+        icon: <FolderOpen />,
+        separated: true,
+        run: () => {
+          void takeOver(session);
+        },
       },
-    }));
+    ];
   }
   // Points a project at another folder: its sessions move there, and what this computer keeps about the
   // project (its place in the list, its name, its pin) follows.
@@ -1266,6 +1324,18 @@ export function App() {
                 });
               }}
             />
+            {state.status === 'reconnecting' && (
+              <div className="elsewhere-bar" role="status">
+                <Unplug />
+                <p>
+                  与服务端的连接断开了，正在重新连接。运行中的任务仍在服务端继续，连上之后这里会补上期间的内容；
+                  {state.error ? `原因：${state.error.split('\n')[0]}` : '不需要做什么。'}
+                </p>
+                <button type="button" className="button" onClick={disconnect}>
+                  断开并回到登录页
+                </button>
+              </div>
+            )}
             {selected && away && (
               <div className="elsewhere-bar" role="status">
                 <Laptop />
@@ -1330,6 +1400,7 @@ export function App() {
                 send={() => {
                   void send();
                 }}
+                resume={stopped && !inputDisabled ? resume : undefined}
                 compact={() => {
                   void compact();
                 }}

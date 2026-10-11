@@ -194,7 +194,8 @@ test(
 
     const silent = await connect(false);
     const [raw] = await once(silent.local, 'message');
-    assert.equal(JSON.parse(String(raw)).code, 'tunnel_failed');
+    // A fault on the way, which the window tries again.
+    assert.equal(JSON.parse(String(raw)).code, 'connection_lost');
     assert.match(String(raw), /没有收到服务端的任何数据/);
     await once(silent.local, 'close');
     assert.ok(silent.lines.some((line) => line.startsWith('Reached 127.0.0.1')));

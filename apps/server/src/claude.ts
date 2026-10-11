@@ -52,23 +52,14 @@ export type ClaudeRun = {
   // one of its background tasks.
   controls: { refresh?: () => Promise<void>; stopTask?: (taskId: string) => Promise<void> };
 };
-// The fixed command that runs a PowerShell script read from standard input. It holds no quote characters of its
-// own, so it sits inside the single quotes of a Bash command and the double quotes of cmd.exe alike. The script
-// never goes through the command line: no length limit (cmd.exe stops at 8191 characters, which a Base64 script
-// soon passes), no quoting, UTF-8 in and out, errors as plain text instead of CLIXML, and the exit code kept.
-const SCRIPT_FROM_STDIN =
-  '[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=[Console]::InputEncoding;' +
-  '$PSStyle.OutputRendering=[Management.Automation.OutputRendering]::PlainText;$s=[Console]::In.ReadToEnd();' +
-  '$global:LASTEXITCODE=$null;& ([scriptblock]::Create($s));if($null -ne $LASTEXITCODE){exit $LASTEXITCODE};exit [int](-not $?)';
-export const REMOTE_SCRIPT_COMMAND = `"%CC_DESK_TUNNEL_PWSH%" -NoLogo -NoProfile -NonInteractive -Command "${SCRIPT_FROM_STDIN}"`;
 // `sessionId` is the proxy's name for the session, which a scheduled task needs to continue it.
 export function remotePrompt(projectPath: string, ssh: SshConnection, sessionId: string) {
   return [
     "The user's projects are on their own computer, the device, NOT on this Linux host, which only runs Claude Code and has no copy of them.",
     `Device: Windows. Project directory: ${JSON.stringify(projectPath)}.`,
-    `Do all project reads, edits, searches and commands on the device with your native Bash tool: ssh -F ${JSON.stringify(ssh.configPath)} device '<command>'. Do not use this host's Read/Edit tools on project files, and do not print, read into conversation or copy the key the SSH configuration names.`,
-    `On Windows the command is parsed by cmd.exe, and the commands of one device share an SSH connection. Send every PowerShell 7 script on standard input, as a quoted Bash here-document, to this fixed command: ssh -F ${JSON.stringify(ssh.configPath)} device '${REMOTE_SCRIPT_COMMAND}' <<'PS' ... PS`,
-    `The script is plain PowerShell: no Base64, no escaping, any length, UTF-8. Errors come back as plain text and the exit code of the script is kept; standard input is the script itself, so it cannot read more. Begin it with Set-Location -LiteralPath '${projectPath.replaceAll("'", "''")}'. For scp or sftp, write Windows paths with forward slashes, as device:C:/Users/name/file.`,
+    `Do all project reads, edits, searches and commands on the device with your native Bash tool over SSH, with the configuration ${JSON.stringify(ssh.configPath)}. Do not use this host's Read/Edit tools on project files, and do not print, read into conversation or copy the key the configuration names.`,
+    `Send a script on standard input, as a quoted Bash here-document: ssh -F ${JSON.stringify(ssh.configPath)} device-script <<'PS' ... PS. On Windows it is PowerShell 7, as plain text: any length, UTF-8, nothing to escape or encode. Errors come back as plain text and the script's exit code is kept; standard input is the script, so it cannot read more. Begin it with Set-Location -LiteralPath '${projectPath.replaceAll("'", "''")}'.`,
+    `device-script is the host device with one fixed command, which the configuration shows as RemoteCommand, and takes none of its own. The host device runs a command line as it is, parsed by cmd.exe on Windows, and is the one for scp or sftp, where a Windows path takes forward slashes: the project directory is ${JSON.stringify(`device:${projectPath.replaceAll('\\', '/')}`)}.`,
     'If the device is unreachable, say so; never fall back to this host. After an interruption report results as unknown; do not repeat side effects on your own.',
     'To look at a picture on the device, such as a pasted screenshot or an attached image, copy that one file with scp to a temporary file on this host, open it with the Read tool, and delete the copy afterwards. That is the only use of Read on this host for a file from the device.',
     'Commands may run concurrently. One that blocks holds the turn until its Bash timeout: size the timeout to the work, and run anything long-lived, such as a dev server or watcher, as a background Bash task. Ending an ssh command does not reliably end what it started on the device; stop that process on the device.',

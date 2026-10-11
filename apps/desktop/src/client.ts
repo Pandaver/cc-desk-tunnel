@@ -1,4 +1,9 @@
-import { PROTOCOL_VERSION, serverMessageSchema } from '@cc-desk-tunnel/protocol';
+import {
+  continues,
+  isFragment,
+  PROTOCOL_VERSION,
+  serverMessageSchema,
+} from '@cc-desk-tunnel/protocol';
 import type {
   AccountState,
   Command,
@@ -47,6 +52,9 @@ export type ClientState = {
   device: Device | null;
   sessions: Session[];
   events: Record<string, SessionEvent[]>;
+  // Output a run is in the middle of, as far as it has arrived. It has no place in the history yet: the
+  // event that records it takes its place.
+  live: Record<string, SessionEvent>;
   history: Record<string, HistoryState>;
   selectedId: string | null;
   error: string | null;
@@ -69,7 +77,8 @@ export type ClientState = {
 };
 
 // The renderer's single connection and its state store: components read `state` through subscribe / getSnapshot
-// and send commands with request(). Nothing is resent automatically after a disconnect.
+// and send commands with request(). A connection that breaks is made again, for as long as it takes, and what
+// was missed is read from the service's record; nothing is resent automatically.
 export class ProxyClient {
   state: ClientState = {
     status: 'disconnected',
@@ -77,6 +86,7 @@ export class ProxyClient {
     device: null,
     sessions: [],
     events: {},
+    live: {},
     history: {},
     selectedId: null,
     error: null,
@@ -95,12 +105,26 @@ export class ProxyClient {
   listeners = new Set<() => void>();
   terminalListeners = new Set<(message: TerminalMessage) => void>();
   socket: WebSocket | null = null;
-  credentials: { url: string; token: string; device: Device; reconnect: boolean } | null = null;
+  credentials: {
+    url: string;
+    token: string;
+    device: Device;
+    reconnect: boolean;
+    // Remote mode: opens the bridge in the main process and resolves to its address. A bridge serves one
+    // connection, so every attempt asks for a new one.
+    bridge?: () => Promise<string>;
+  } | null = null;
   retryTimer: ReturnType<typeof setTimeout> | undefined;
   retryAttempt = 0;
-  // Streamed events are merged in batches so a fast reply does not re-render per fragment.
+  // Whether this sign-in has stood once. Until then a failure is the user's to look at; after it, a fault on
+  // the way is tried again.
+  private established = false;
+  // Tells the answer of the bridge asked for last from those of earlier attempts.
+  private turn = 0;
+  // Streamed events and fragments are taken in batches, in the order they came, so a fast reply does not
+  // re-render per fragment.
   streamTimer: ReturnType<typeof setTimeout> | undefined;
-  streamEvents: SessionEvent[] = [];
+  streamEvents: (SessionEvent | Extract<ServerMessage, { type: 'session.fragment' }>)[] = [];
   // Event history is kept for the most recently viewed sessions only.
   cacheOrder: string[] = [];
   pending = new Map<
@@ -122,7 +146,13 @@ export class ProxyClient {
     this.state = { ...this.state, ...values };
     for (const listener of this.listeners) listener();
   }
-  connect(url: string, token: string, device: Device, reconnect = true) {
+  connect(
+    url: string,
+    token: string,
+    device: Device,
+    reconnect = true,
+    bridge?: () => Promise<string>,
+  ) {
     const address = new URL(url);
     if (
       !['ws:', 'wss:'].includes(address.protocol) ||
@@ -139,7 +169,8 @@ export class ProxyClient {
       throw new Error('当前离线原型仅连接本机环回服务。');
     if (token.trim().length < 24) throw new Error('服务凭据至少 24 个字符。');
     this.disconnect();
-    this.credentials = { url: address.toString(), token: token.trim(), device, reconnect };
+    this.credentials = { url: address.toString(), token: token.trim(), device, reconnect, bridge };
+    this.established = false;
     this.cacheOrder = [];
     this.update({
       status: 'connecting',
@@ -152,6 +183,7 @@ export class ProxyClient {
       preparing: null,
       sessions: [],
       events: {},
+      live: {},
       history: {},
       selectedId: null,
       capabilities: null,
@@ -161,8 +193,33 @@ export class ProxyClient {
     this.open();
   }
   private open() {
-    if (!this.credentials) return;
     const credentials = this.credentials;
+    if (!credentials) return;
+    if (!credentials.bridge) {
+      this.attach(credentials);
+      return;
+    }
+    const turn = ++this.turn;
+    const current = () => this.credentials === credentials && this.turn === turn;
+    credentials.bridge().then(
+      (url) => {
+        if (!current()) return;
+        credentials.url = url;
+        this.attach(credentials);
+      },
+      // The bridge could not even be set up on this computer: nothing a later attempt would change.
+      (error) => {
+        if (!current()) return;
+        this.credentials = null;
+        this.update({
+          status: 'disconnected',
+          connectionId: null,
+          error: error instanceof Error ? error.message : '本机连接准备失败。',
+        });
+      },
+    );
+  }
+  private attach(credentials: NonNullable<ProxyClient['credentials']>) {
     const socket = new WebSocket(credentials.url);
     this.socket = socket;
     const timeout = setTimeout(() => socket.close(), 50000);
@@ -189,7 +246,8 @@ export class ProxyClient {
         return;
       }
       if (message.type === 'ready') {
-        if (message.adapter === 'claude-code') credentials.reconnect = false;
+        if (message.adapter === 'claude-code' && !credentials.bridge) credentials.reconnect = false;
+        this.established = true;
         clearTimeout(timeout);
         this.retryAttempt = 0;
         const selectedId = message.sessions.some((session) => session.id === this.state.selectedId)
@@ -229,9 +287,21 @@ export class ProxyClient {
               : null,
           });
         if (
-          ['unauthorized', 'version_mismatch', 'tunnel_failed', 'ssh_failed'].includes(message.code)
+          [
+            'unauthorized',
+            'version_mismatch',
+            'tunnel_failed',
+            'ssh_failed',
+            'connection_lost',
+            'client_failed',
+          ].includes(message.code)
         ) {
-          this.credentials = null;
+          // The way to the service broke, or the service could not reach back: the next attempt may do.
+          const passing =
+            this.established &&
+            credentials.reconnect &&
+            ['tunnel_failed', 'ssh_failed', 'connection_lost'].includes(message.code);
+          if (!passing) this.credentials = null;
           socket.close();
         }
       } else if (
@@ -263,8 +333,10 @@ export class ProxyClient {
         for (const listener of this.terminalListeners) listener(message);
       } else if (message.type === 'session.deleted') {
         const events = { ...this.state.events };
+        const live = { ...this.state.live };
         const history = { ...this.state.history };
         delete events[message.sessionId];
+        delete live[message.sessionId];
         delete history[message.sessionId];
         this.streamEvents = this.streamEvents.filter(
           (event) => event.sessionId !== message.sessionId,
@@ -273,7 +345,7 @@ export class ProxyClient {
         const sessions = this.state.sessions.filter((session) => session.id !== message.sessionId);
         const selectedId =
           this.state.selectedId === message.sessionId ? null : this.state.selectedId;
-        this.update({ sessions, events, history, selectedId });
+        this.update({ sessions, events, live, history, selectedId });
       } else if (message.type === 'session.snapshot') {
         this.flushStream();
         if (
@@ -284,6 +356,11 @@ export class ProxyClient {
           return;
         this.upsert(message.session);
         const id = message.session.id;
+        // History up to now ends where unfinished output begins; the service sends that again, whole.
+        if (message.mode !== 'prepend' && this.state.live[id]) {
+          const { [id]: _stale, ...live } = this.state.live;
+          this.update({ live });
+        }
         const previous = this.state.history[id];
         const history = {
           firstSequence:
@@ -307,6 +384,10 @@ export class ProxyClient {
         if (!this.cacheOrder.includes(message.event.sessionId)) return;
         this.streamEvents.push(message.event);
         this.streamTimer ??= setTimeout(() => this.flushStream(), 32);
+      } else if (message.type === 'session.fragment') {
+        if (!this.cacheOrder.includes(message.sessionId)) return;
+        this.streamEvents.push(message);
+        this.streamTimer ??= setTimeout(() => this.flushStream(), 32);
       }
     };
     socket.onclose = () => {
@@ -315,7 +396,11 @@ export class ProxyClient {
       this.socket = null;
       this.flushStream();
       this.rejectPending();
-      if (!this.credentials || !this.credentials.reconnect) {
+      if (
+        !this.credentials ||
+        !this.credentials.reconnect ||
+        (this.credentials.bridge && !this.established)
+      ) {
         const nativeClosed = !!this.credentials;
         this.credentials = null;
         this.update({
@@ -327,20 +412,34 @@ export class ProxyClient {
       }
       this.update({ status: 'reconnecting', connectionId: null });
       this.retryTimer = setTimeout(
-        () => this.open(),
-        Math.min(1000 * 2 ** this.retryAttempt++, 5000),
+        () => {
+          this.retryTimer = undefined;
+          this.open();
+        },
+        Math.min(1000 * 2 ** this.retryAttempt++, credentials.bridge ? 10000 : 5000),
       );
     };
     socket.onerror = () => {
       /* onclose owns reconnect and pending request cleanup. */
     };
   }
+  // Makes the attempt that is waiting for its turn now: the network just came back.
+  retryNow() {
+    if (this.state.status !== 'reconnecting' || this.retryTimer === undefined) return;
+    clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+    this.open();
+  }
   disconnect() {
     this.flushStream();
     this.credentials = null;
+    this.turn++;
     clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
     const socket = this.socket;
     this.socket = null;
+    // Said before closing, so that the service does not keep this computer's runs for it to come back to.
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'leave' }));
     socket?.close();
     this.rejectPending();
     this.retryAttempt = 0;
@@ -364,12 +463,32 @@ export class ProxyClient {
     clearTimeout(this.streamTimer);
     this.streamTimer = undefined;
     const grouped = new Map<string, SessionEvent[]>();
-    for (const event of this.streamEvents) {
-      const events = grouped.get(event.sessionId) ?? [];
-      events.push(event);
-      grouped.set(event.sessionId, events);
+    const live = { ...this.state.live };
+    let moved = false;
+    for (const item of this.streamEvents) {
+      const open = live[item.sessionId];
+      if ('type' in item) {
+        const { sessionId, runId, payload } = item;
+        if (!isFragment(payload)) continue;
+        const last = open?.runId === runId ? open.payload : undefined;
+        live[sessionId] =
+          open && last && isFragment(last) && continues(last, payload)
+            ? { ...open, payload: { ...payload, text: last.text + payload.text } }
+            : { sessionId, runId, sequence: 0, createdAt: new Date().toISOString(), payload };
+        moved = true;
+        continue;
+      }
+      // Whatever the run records next comes after its unfinished output, which is recorded first.
+      if (open?.runId === item.runId) {
+        delete live[item.sessionId];
+        moved = true;
+      }
+      const events = grouped.get(item.sessionId) ?? [];
+      events.push(item);
+      grouped.set(item.sessionId, events);
     }
     this.streamEvents = [];
+    if (moved) this.update({ live });
     for (const [id, events] of grouped) this.merge(id, events);
   }
   private merge(
@@ -404,6 +523,15 @@ export class ProxyClient {
         },
       },
     });
+  }
+  // A session's events as they are shown: what is recorded, then the output still arriving, where the event
+  // that records it will be.
+  shown(sessionId: string): SessionEvent[] {
+    const recorded = this.state.events[sessionId] ?? [];
+    const unfinished = this.state.live[sessionId];
+    return unfinished
+      ? [...recorded, { ...unfinished, sequence: (recorded.at(-1)?.sequence ?? 0) + 1 }]
+      : recorded;
   }
   private load(sessionId: string) {
     const previous = this.state.history[sessionId];
@@ -458,13 +586,15 @@ export class ProxyClient {
     this.flushStream();
     this.cacheOrder = [...this.cacheOrder.filter((id) => id !== sessionId), sessionId];
     const events = { ...this.state.events };
+    const live = { ...this.state.live };
     const history = { ...this.state.history };
     while (this.cacheOrder.length > 4) {
       const evicted = this.cacheOrder.shift()!;
       delete events[evicted];
+      delete live[evicted];
       delete history[evicted];
     }
-    this.update({ selectedId: sessionId, events, history });
+    this.update({ selectedId: sessionId, events, live, history });
     if (this.state.status === 'connected') this.load(sessionId);
   }
   // Terminal output bypasses the state store; xterm consumes it directly.

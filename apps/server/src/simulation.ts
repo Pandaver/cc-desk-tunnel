@@ -79,14 +79,14 @@ export async function simulate(
       emit({
         type: 'run.status',
         status: 'awaiting_approval',
-        connectionId: run.owner.id,
+        connectionId: run.connectionId,
         waiting: 'question',
       });
       const answers = await reply;
       if (run.controller.signal.aborted) return;
       run.decide = undefined;
       emit({ type: 'approval.resolved', approvalId: run.approvalId, allowed: !!answers });
-      emit({ type: 'run.status', status: 'running', connectionId: run.owner.id });
+      emit({ type: 'run.status', status: 'running', connectionId: run.connectionId });
       run.toolFinished = true;
       const chosen = Object.values(answers ?? {}).join('；');
       emit({
@@ -111,12 +111,12 @@ export async function simulate(
         target: 'Windows (simulation)',
       });
       emit({ type: 'approval.requested', approvalId: run.approvalId, toolId: run.toolId });
-      emit({ type: 'run.status', status: 'awaiting_approval', connectionId: run.owner.id });
+      emit({ type: 'run.status', status: 'awaiting_approval', connectionId: run.connectionId });
       const allowed = await decision;
       if (run.controller.signal.aborted) return;
       run.decide = undefined;
       emit({ type: 'approval.resolved', approvalId: run.approvalId, allowed });
-      emit({ type: 'run.status', status: 'running', connectionId: run.owner.id });
+      emit({ type: 'run.status', status: 'running', connectionId: run.connectionId });
       if (allowed) await pause();
       run.toolFinished = true;
       emit({

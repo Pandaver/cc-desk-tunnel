@@ -10,7 +10,7 @@ import { serverMessageSchema, MAX_FRAME_BYTES } from '@cc-desk-tunnel/protocol';
 import { startWindowsSsh } from './windows-ssh.mjs';
 import { openChannels } from './tunnel-channels.mjs';
 import { httpProxy, openSocket } from './system-proxy.mjs';
-import { channelFailure, controlFailure } from './connect-errors.mjs';
+import { channelFailure, controlFailure, passing } from './connect-errors.mjs';
 
 export function certificateMatches(observed, trusted) {
   if (typeof trusted !== 'string' || typeof observed !== 'string') return false;
@@ -116,6 +116,8 @@ export async function openProxyBridge(
   let release;
   let closed = false;
   let closing;
+  // The window said it is ending the connection on purpose; the service is told, so that it keeps nothing.
+  let leaving = false;
   server.on('upgrade', (request, socket, head) => {
     if (
       closed ||
@@ -170,6 +172,7 @@ export async function openProxyBridge(
           offerReceived
             ? channelFailure(waits.ready / 1000, current.channels?.lastError, target, route.proxy)
             : `服务端在 ${waits.ready / 1000} 秒内没有完成应答。\n请检查网络是否稳定，或稍后重试；反复出现时查看服务端日志。`,
+          'connection_lost',
         ),
       waits.ready,
     );
@@ -213,10 +216,12 @@ export async function openProxyBridge(
         });
       });
     }
-    function fail(message) {
+    // `connection_lost` is a fault on the way, which the window may try again; `client_failed` is something
+    // that trying again does not change.
+    function fail(message, code = 'client_failed') {
       if (!closed) log(`Connection given up: ${message}`);
       if (local.readyState === WebSocket.OPEN)
-        local.send(JSON.stringify({ type: 'connection.error', code: 'tunnel_failed', message }));
+        local.send(JSON.stringify({ type: 'connection.error', code, message }));
       clearTimeout(timer);
       void close(true);
     }
@@ -241,7 +246,8 @@ export async function openProxyBridge(
         // periods of silence.
         if (silent > heartbeatMs * 2.5)
           fail(
-            `已有 ${Math.round(silent / 1000)} 秒没有收到服务端的任何数据，连接已经断开。\n途中的网络、代理或反向代理中断了这条连接而没有通知本机。请重新连接；正在进行的任务可能已被服务端结束，重新连接后可以在会话里看到它停在哪里。`,
+            `已有 ${Math.round(silent / 1000)} 秒没有收到服务端的任何数据，连接已经断开。\n途中的网络、代理或反向代理中断了这条连接而没有通知本机。`,
+            'connection_lost',
           );
         else if (remote.readyState === WebSocket.OPEN) remote.ping();
       }, heartbeatMs);
@@ -251,6 +257,10 @@ export async function openProxyBridge(
       try {
         const message = JSON.parse(raw.toString('utf8'));
         if (message.type?.startsWith('tunnel.')) throw new Error('Renderer tunnel message');
+        if (message.type === 'leave') {
+          leaving = true;
+          return;
+        }
         if (message.type === 'auth') {
           message.tunnel = true;
           token = String(message.token);
@@ -333,6 +343,7 @@ export async function openProxyBridge(
             `${address.hostname}:${address.port || 443}`,
             socket === remote ? route.proxy : null,
           ),
+          socket === remote && passing(error) ? 'connection_lost' : 'client_failed',
         ),
       );
     }
@@ -344,7 +355,16 @@ export async function openProxyBridge(
     closing = (async () => {
       pair?.controller.abort();
       pair?.local.close();
-      pair?.remote.terminate();
+      // Ended on purpose, by the window or by this program: the service hears it before the connection goes,
+      // and ends what this computer was running instead of keeping it for a return.
+      const remote = pair?.remote;
+      if (remote?.readyState === WebSocket.OPEN && (leaving || !notify))
+        await new Promise((resolve) => {
+          remote.once('close', resolve);
+          setTimeout(resolve, 1000);
+          remote.send(JSON.stringify({ type: 'leave' }), () => remote.close(1000));
+        });
+      remote?.terminate();
       await pair?.preparing;
       pair?.channels?.close();
       await pair?.ssh?.close();

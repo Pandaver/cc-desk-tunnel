@@ -1020,6 +1020,17 @@ button.chip:hover:not(:disabled) {
 .page-notes code {
   overflow-wrap: anywhere;
 }
+.text-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.text-link:hover {
+  text-decoration: underline;
+}
 .card {
   border: 1px solid var(--line);
   border-radius: 16px;
@@ -1767,6 +1778,33 @@ details[open] > summary > .fold-chevron {
   width: 30px;
   height: 30px;
   border-radius: 50%;
+}
+/* The ring starts at the top and fills clockwise. */
+.context-ring {
+  width: 18px;
+  height: 18px;
+  transform: rotate(-90deg);
+}
+.context-ring circle {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 2.5;
+}
+.context-ring .context-ring-used {
+  stroke: var(--accent);
+  stroke-linecap: round;
+  transition:
+    stroke-dasharray 0.4s ease,
+    stroke 0.4s ease;
+}
+.context-ring.unknown .context-ring-used {
+  stroke: none;
+}
+.context-ring.high .context-ring-used {
+  stroke: var(--warn);
+}
+.context-ring.full .context-ring-used {
+  stroke: var(--danger);
 }
 .context-tooltip,
 .model-menu,

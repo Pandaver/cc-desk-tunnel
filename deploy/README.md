@@ -63,6 +63,8 @@ sudo bash deploy/manage.sh release-token /path/token.txt   # 不带参数则移�
 
 同时进行的运行和终端有上限，默认按服务器内存估算（每个约占 300 MB，1 GB 内存的服务器是 2 个）。要改就在 `config/service.env` 里加 `PROXY_MAX_RUNS='数量'` 并重启服务。
 
+电脑断线后，它的任务在服务端继续，等它连回来；离线超过 5 分钟才停止。要改这个时间就加 `PROXY_GRACE_SECONDS='秒数'`（0 到 3600，0 表示断线即停止）并重启服务。
+
 需要脚本化或分步执行时仍可用参数形式：
 
 ```sh
@@ -137,7 +139,7 @@ Compose 崩溃 / 主机重启恢复，`tini -g` 管理信号与孤儿进程；�
 
 镜像构建后，`sudo bash deploy/test.sh` 可运行不调用模型的隔离部署回归；占用测试端口 19871..19874，创建临时数据并在结束时回收。不会改既有服务；测试数据被删除，不用来测试生产数据。
 
-备份先停服务保证 SQLite / WAL 与原生数据一致，结束后恢复之前运行状态；排除临时 SSH 凭据及缓存。备份**含 token、API / 账号秘密、证书私钥和历史**，权限 0600，需安全离线保存。恢复仅允许已 stop 且长期数据为空的新初始化部署：
+备份先停服务保证 SQLite / WAL 与原生数据一致，结束后恢复之前运行状态；排除临时 SSH 凭据、缓存和升级时留下的会话库副本（`state/backups`）。备份**含 token、API / 账号秘密、证书私钥和历史**，权限 0600，需安全离线保存。恢复仅允许已 stop 且长期数据为空的新初始化部署：
 
 ```sh
 sudo bash deploy/manage.sh restore /secure/backup.tar.gz

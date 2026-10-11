@@ -308,7 +308,7 @@ case "$command" in
     was_running=false; running && was_running=true
     trap 'if $was_running; then dc start >/dev/null; fi' EXIT
     dc stop
-    tar --exclude=./state/connections --exclude=./home/.cache -czf "$1" -C "$DATA_DIR" .
+    tar --exclude=./state/connections --exclude=./state/devices --exclude=./state/backups --exclude=./home/.cache -czf "$1" -C "$DATA_DIR" .
     chmod 600 "$1"
     echo "Backup saved; contains private credentials and conversation data."
     ;;

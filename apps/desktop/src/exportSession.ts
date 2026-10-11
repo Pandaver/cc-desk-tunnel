@@ -27,7 +27,8 @@ export function markdown(session: Session, events: SessionEvent[]) {
     );
   };
   for (const turn of conversation(events)) {
-    if (turn.question)
+    if (turn.question?.continued) parts.push('> 继续');
+    else if (turn.question)
       parts.push(
         `## 你 · ${new Date(turn.question.at).toLocaleString('zh-CN')}`,
         turn.question.text,
@@ -58,7 +59,7 @@ export async function exportSession(client: ProxyClient, session: Session) {
     await client.loadEarlier(session.id);
     await settled();
   }
-  const text = markdown(session, client.state.events[session.id] ?? []);
+  const text = markdown(session, client.shown(session.id));
   const name = `${session.title.replace(/[\\/:*?"<>|\r\n]+/g, ' ').trim() || '会话'}.md`;
   if (window.desktop) return window.desktop.saveFile(name, text);
   const link = document.createElement('a');

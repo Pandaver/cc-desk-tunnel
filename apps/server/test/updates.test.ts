@@ -175,12 +175,14 @@ test('an installer download that slows to a halt is continued on new connections
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const directory = mkdtempSync(join(tmpdir(), 'cc-desk-tunnel-updates-'));
+  let arrived = 0;
   const updates = new ServiceUpdates(
     {
       repository: 'owner/name',
       api: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
       clientDir: join(directory, 'client'),
       restart: () => undefined,
+      installed: () => arrived++,
       download: { stretch: 2000, stall: 60, attempts: 3, retry: 50 },
     },
     () => undefined,
@@ -195,7 +197,9 @@ test('an installer download that slows to a halt is continued on new connections
   const target = join(directory, 'client', name);
   let seen = 0;
   for (let attempt = 0; attempt < 500 && !existsSync(target); attempt++) {
-    seen = Math.max(seen, updates.preparing?.received ?? 0);
+    // The last bytes may have arrived while the file is still being checked, which is not "on its way".
+    const received = updates.preparing?.received ?? 0;
+    if (received < installer.length) seen = Math.max(seen, received);
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.deepEqual(readFileSync(target), installer);
@@ -208,10 +212,11 @@ test('an installer download that slows to a halt is continued on new connections
     'bytes=18000-',
   ]);
   // While it was on its way, clients could be told how far it was; nothing is left to tell afterwards.
-  assert.ok(seen >= 6000 && seen < installer.length);
+  assert.ok(seen >= 6000);
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(updates.preparing, undefined);
   assert.equal(existsSync(`${target}.part`), false);
+  assert.equal(arrived, 1);
 });
 
 test('a download whose connections keep delivering nothing is given up, and one that is not the announced file is discarded', async (t) => {

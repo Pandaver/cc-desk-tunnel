@@ -301,8 +301,18 @@ function TurnView({ turn, native, live }: { turn: Turn; native: boolean; live: L
     );
   return (
     <>
-      {turn.question && (
-        <Message item={turn.question} native={native} edit={turn.joined ? undefined : live.edit} />
+      {turn.question?.continued ? (
+        <div className="run-notice" role="status">
+          {turn.question.text}
+        </div>
+      ) : (
+        turn.question && (
+          <Message
+            item={turn.question}
+            native={native}
+            edit={turn.joined ? undefined : live.edit}
+          />
+        )
       )}
       {active
         ? steps()

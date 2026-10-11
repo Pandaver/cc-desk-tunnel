@@ -16,6 +16,8 @@ export type TranscriptItem =
       runId: string;
       text: string;
       delivery?: string;
+      // Stands for the "continue" button: there is no message of the user's to show, edit or copy.
+      continued?: boolean;
       at: string;
     }
   | { kind: 'notice'; id: string; runId: string; text: string; error: boolean; at: string }
@@ -48,8 +50,16 @@ export function transcript(events: SessionEvent[]): TranscriptItem[] {
     byId.set(item.id, item);
   }
   for (const { runId, sequence, payload, createdAt: at } of events) {
+    // What the "continue" button sent is no words of the user's: the turn it starts shows a mark for it.
     if (payload.type === 'message.user')
-      add({ kind: 'user', id: payload.messageId, runId, text: payload.text, at });
+      add({
+        kind: 'user',
+        id: payload.messageId,
+        runId,
+        text: payload.continued ? '继续' : payload.text,
+        ...(payload.continued ? { continued: true } : {}),
+        at,
+      });
     if (payload.type === 'message.delivery') {
       const item = byId.get(payload.messageId);
       if (item?.kind === 'user')

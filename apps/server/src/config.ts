@@ -35,6 +35,9 @@ export function environmentConfig(env: NodeJS.ProcessEnv, defaultDataDir: string
   const maxRuns = env.PROXY_MAX_RUNS ? Number(env.PROXY_MAX_RUNS) : undefined;
   if (maxRuns !== undefined && (!Number.isInteger(maxRuns) || maxRuns < 1))
     throw new Error('Invalid PROXY_MAX_RUNS');
+  const grace = env.PROXY_GRACE_SECONDS ? Number(env.PROXY_GRACE_SECONDS) : undefined;
+  if (grace !== undefined && (!Number.isInteger(grace) || grace < 0 || grace > 3600))
+    throw new Error('Invalid PROXY_GRACE_SECONDS');
   if (native && !reverseProxy && (!env.PROXY_TLS_CERT || !env.PROXY_TLS_KEY))
     throw new Error('Direct mode requires PROXY_TLS_CERT and PROXY_TLS_KEY.');
   const options: ServerOptions = {
@@ -51,6 +54,7 @@ export function environmentConfig(env: NodeJS.ProcessEnv, defaultDataDir: string
         : undefined,
     tunnel: native ? {} : undefined,
     maxRuns,
+    graceMs: grace === undefined ? undefined : grace * 1000,
     allowedOrigins: env.PROXY_ORIGINS?.split(','),
     claude: native
       ? {

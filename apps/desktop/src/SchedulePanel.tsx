@@ -25,6 +25,8 @@ type Form = {
 };
 const efforts: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 const weekdays = ['一', '二', '三', '四', '五', '六', '日'];
+// Where Anthropic says what a subscription sign-in is meant for.
+const usagePolicy = 'https://code.claude.com/docs/en/legal-and-compliance';
 
 function formOf(task: Task | null, sessions: Session[], projects: string[]): Form {
   const rule = task?.schedule;
@@ -437,6 +439,21 @@ export default function SchedulePanel({
               <ul className="page-notes muted">
                 <li>只在客户端运行并已连接时触发；晚于计划 10 分钟仍发不出的那一次会跳过。</li>
                 <li>无人值守时请让目标会话使用自动审批，否则会停在审批处。</li>
+                <li>
+                  任务由程序自动发送。用订阅账号登录时，官方的额度按普通的个人使用设定，自动发送是否合适请对照
+                  <button
+                    type="button"
+                    className="text-link"
+                    onClick={() =>
+                      window.desktop
+                        ? void window.desktop.openExternal(usagePolicy)
+                        : void window.open(usagePolicy)
+                    }
+                  >
+                    官方的使用说明
+                  </button>
+                  自行判断。
+                </li>
                 {schedules.path && (
                   <li>
                     配置文件 <code>{schedules.path}</code>

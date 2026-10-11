@@ -45,9 +45,9 @@ Windows：读写文件 / PowerShell 命令 → 结果回到 Claude → 事件回
        ◀── 本次连接专用的通道密钥（tunnel.offer）──
 客户端：生成临时 SSH 主机密钥与登录密钥，启动回环 sshd
 客户端 ── 登录私钥 + 主机公钥（经 WSS）──▶ 服务
-服务：写入私有连接目录，用 ssh -F <配置> windows 探测
+服务：写入私有连接目录，用 ssh -F <配置> device-script 探测
        ── tunnel.ready ──▶ 客户端，界面此时才允许发起任务
-Claude Code：原生 Bash ──▶ ssh -F <配置> windows ──▶ PowerShell 7
+Claude Code：原生 Bash ──▶ ssh -F <配置> device-script ──▶ PowerShell 7（脚本走标准输入）
 ```
 
 `ssh` 连的是服务进程在回环上为这台设备开的端口。每来一条 SSH 连接：
@@ -68,6 +68,7 @@ ssh ── TCP ──▶ 服务的回环端口
 4. 临时私钥不进入会话文本、事件或提示词。提示词只告诉 Claude SSH 配置文件的路径和主机别名。
 5. Windows 侧密钥授权的是当前普通用户；sshd 由一个 Job Object 归属，客户端退出时一并结束。
 6. 一条通道中断只影响它承载的那条 SSH 连接，下一条命令会建立新的通道。通道不再送达数据却没有断开时，两端各自发现：服务端的 `ssh` 每 10 秒询问一次，连续两次没有应答就退出；客户端对每条通道每 15 秒发一次 WebSocket ping，连续两次没有应答就放弃它和本机的那条 SSH 连接。SSH 中断不保证 Windows 上的子进程全部结束；界面只报告实际观察到的结果。
+7. 运行属于会话所在的设备，不属于某条连接。每台设备在服务端有一个固定的入口（端口和 SSH 配置路径不变，密钥随每次连接更换），会话的 SSH 配置指向它：设备断线时 CLI 继续运行，新发起的命令在入口处等设备连回来；设备离线超过宽限期运行才停止。客户端断线后自动重连，从服务端的事件记录补上期间的内容。原生终端是例外，它随连接结束。
 
 模块细节见 [Linux 服务](../apps/server/README.md) 与 [Windows 客户端](../apps/desktop/README.md)，端口与证书见[部署与安全边界](deployment.md)。
 
