@@ -67,6 +67,7 @@ Electron 选择“远程代理”，输入可信 WSS 地址、代理 token；自
 | `electron/main.cjs`、`preload.cjs` | 窗口、托盘、系统通知、IPC（选目录与文件、保存导出、普通会话目录、打开授权页、连接）和暴露给页面的 `window.desktop` |
 | `electron/connect-errors.mjs` | 连接失败时给用户的说明：按系统错误码、TLS 错误和组件的输出区分原因，第一行是原因，其后是该检查的地方 |
 | `electron/git-branch.cjs` | 从仓库文件读出项目当前所在的分支，不依赖本机安装 git |
+| `electron/client-log.cjs` | 连接日志：每次连接的建立、断开与原因，写在用户配置目录的 `logs/` 下，不含凭据和内容 |
 | `electron/proxy-bridge.mjs`、`windows-ssh.mjs`、`tunnel-channels.mjs` | 主进程连接桥：校验服务证书后转发 WSS；启动本机 sshd；按服务端的要求另开到同一地址的连接作为执行通道，接到本机 sshd 上 |
 | `electron/system-proxy.mjs` | 读出系统代理中的 HTTP 代理，并经它建立到服务端的 TCP 连接 |
 | `electron/prepare-ssh.ps1`、`component-host.ps1` | 生成临时 SSH 配置；用 Job Object 托管 sshd |

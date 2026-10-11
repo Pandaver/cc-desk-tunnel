@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('desktop', {
   pathForFile: (file) => webUtils.getPathForFile(file),
   saveFile: (name, text) => ipcRenderer.invoke('file:save', name, text),
   openFolder: (directory) => ipcRenderer.invoke('folder:open', directory),
+  openLogs: () => ipcRenderer.invoke('log:open'),
   gitBranch: (directory) => ipcRenderer.invoke('git:branch', directory),
   copyText: (text) => ipcRenderer.invoke('clipboard:write', text),
   openExternal: (url) => ipcRenderer.invoke('external:open', url),

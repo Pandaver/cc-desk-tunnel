@@ -67,7 +67,7 @@ const sections: { id: Section; name: string; group: string; icon: typeof Bell; w
     name: '关于与更新',
     group: '其他',
     icon: Info,
-    words: '版本 升级 检查更新 项目主页',
+    words: '版本 升级 检查更新 项目主页 日志 排查 断开',
   },
 ];
 const kinds: { key: NotifyKind; title: string; detail: string }[] = [
@@ -371,6 +371,25 @@ function About({
             </span>
           </Row>
         </div>
+        {window.desktop && (
+          <>
+            <h2 className="page-heading">排查</h2>
+            <div className="card">
+              <Row
+                title="连接日志"
+                detail="记录每次连接何时建立、何时断开、是哪一方先断开及原因，保存在本机；不含服务凭据、对话和命令内容。连接无故中断时可以对照服务端日志查看"
+              >
+                <button
+                  type="button"
+                  className="button"
+                  onClick={() => void window.desktop!.openLogs()}
+                >
+                  打开日志文件夹
+                </button>
+              </Row>
+            </div>
+          </>
+        )}
         {project.url && (
           <button type="button" className="button" onClick={openProject}>
             <GithubMark />

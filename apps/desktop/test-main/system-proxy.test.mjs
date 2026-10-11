@@ -157,3 +157,57 @@ test(
     assert.equal(requests.length, 2);
   },
 );
+test(
+  'a service that goes silent is given up and the reason recorded; one that answers is kept',
+  { skip: process.platform !== 'win32', timeout: 30000 },
+  async (t) => {
+    const { cert, key } = await selfSigned();
+    const fingerprint = new X509Certificate(cert).fingerprint256;
+    const bridges = [];
+    const services = [];
+    t.after(async () => {
+      for (const bridge of bridges) await bridge.close();
+      for (const service of services) {
+        service.closeAllConnections();
+        service.close();
+      }
+    });
+    // `answers` is whether the service returns the signs of life it is asked for.
+    const connect = async (answers) => {
+      const service = createHttpsServer({ cert, key });
+      services.push(service);
+      new WebSocketServer({ server: service, autoPong: answers });
+      service.listen(0, '127.0.0.1');
+      await once(service, 'listening');
+      const lines = [];
+      const bridge = await openProxyBridge(
+        { url: `wss://127.0.0.1:${service.address().port}/ws`, fingerprint },
+        { heartbeatMs: 100, log: (line) => lines.push(line) },
+        () => {},
+        [undefined],
+      );
+      bridges.push(bridge);
+      const local = new WebSocket(bridge.url);
+      await once(local, 'open');
+      return { local, lines };
+    };
+
+    const silent = await connect(false);
+    const [raw] = await once(silent.local, 'message');
+    assert.equal(JSON.parse(String(raw)).code, 'tunnel_failed');
+    assert.match(String(raw), /没有收到服务端的任何数据/);
+    await once(silent.local, 'close');
+    assert.ok(silent.lines.some((line) => line.startsWith('Reached 127.0.0.1')));
+    assert.ok(silent.lines.some((line) => line.startsWith('Connection given up: 已有')));
+
+    const answering = await connect(true);
+    let ended = false;
+    answering.local.once('close', () => (ended = true));
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    assert.equal(ended, false);
+    assert.equal(
+      answering.lines.some((line) => line.startsWith('Connection given up')),
+      false,
+    );
+  },
+);

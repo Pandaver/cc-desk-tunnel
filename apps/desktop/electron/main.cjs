@@ -28,6 +28,7 @@ const {
 } = require('node:fs');
 const { mkdtemp, stat, writeFile } = require('node:fs/promises');
 const { gitBranch } = require('./git-branch.cjs');
+const { openLog } = require('./client-log.cjs');
 const { hostname, tmpdir } = require('node:os');
 const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
@@ -61,6 +62,14 @@ function writeSettings(values) {
   const settings = { ...readSettings(), ...values };
   writeFileSync(settingsPath(), JSON.stringify(settings, null, 2));
   return settings;
+}
+
+// See client-log.cjs. Opened on first use, once the profile directory is known.
+let record;
+function log(text) {
+  record ??= openLog(path.join(app.getPath('userData'), 'logs'));
+  record.write(text);
+  return record.directory;
 }
 
 // A remote connection carries long unattended runs; the computer must not go to sleep underneath it.
@@ -113,6 +122,10 @@ handle('folder:open', async (_event, directory) => {
   const target = path.resolve(String(directory));
   if (!(await stat(target)).isDirectory()) throw new Error('不是文件夹。');
   const failure = await shell.openPath(target);
+  if (failure) throw new Error(failure);
+});
+handle('log:open', async () => {
+  const failure = await shell.openPath(log('The log folder was opened.'));
   if (failure) throw new Error(failure);
 });
 handle('git:branch', (_event, directory) => gitBranch(directory));
@@ -219,6 +232,7 @@ handle('proxy:connect', async (event, config) => {
         : undefined,
       // Where Claude finds the scheduled tasks to edit; the service names the variable, not the path.
       environment: { CC_DESK_TUNNEL_SCHEDULES: schedulesPath() },
+      log,
       // The Windows proxy settings (manual, script or automatic detection) as Chromium reads them.
       resolveProxy: (url) => session.defaultSession.resolveProxy(url),
     },
@@ -407,6 +421,7 @@ ipcMain.handle('proxy:disconnect', async () => {
 if (process.platform === 'win32')
   app.setAppUserModelId(app.isPackaged ? 'io.github.ccdesktunnel.desktop' : process.execPath);
 app.whenReady().then(() => {
+  log(`Client ${app.getVersion()} started.`);
   if (!ownsInstance) return;
   // Shortcuts are the page's, where the user can change them or turn them off; Electron's default menu would
   // add its own on top (zoom, reload, close). A run from source keeps reload and the developer tools.

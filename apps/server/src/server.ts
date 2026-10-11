@@ -1112,6 +1112,7 @@ export function createProxyServer(options: ServerOptions) {
       responses: new Map(),
     };
     peers.add(peer);
+    const opened = Date.now();
     const authTimer = setTimeout(() => socket.close(4001, 'Authentication timeout'), 5000);
     // A long unattended run should survive a brief network stall: only two pings in a row without an answer,
     // about 45 seconds of silence, end the connection.
@@ -1167,6 +1168,11 @@ export function createProxyServer(options: ServerOptions) {
       const identity = deviceIdentitySchema.safeParse(value);
       if (identity.success) {
         peer.device = { id: identity.data.id, name: peer.name };
+        // With the line written when it closes, this tells which computer a connection was and how long it held.
+        if (!closing)
+          console.log(
+            `Connection ${peer.id.slice(0, 8)} opened: device "${peer.name}" (${identity.data.id.slice(0, 8)}) from ${address}`,
+          );
         for (const session of store.named(peer.device))
           broadcast({ type: 'session.updated', session });
         return;
@@ -1195,7 +1201,7 @@ export function createProxyServer(options: ServerOptions) {
       const owned = [...runs.values()].filter((run) => run.owner === peer).length;
       if (peer.authenticated && !closing)
         console.log(
-          `Connection ${peer.id.slice(0, 8)} closed: ${timedOut ? 'no heartbeat answer for 45s' : `code ${code}`}; runs ended with it: ${owned}`,
+          `Connection ${peer.id.slice(0, 8)} closed after ${Math.round((Date.now() - opened) / 1000)} s: ${timedOut ? 'no heartbeat answer for 45s' : `code ${code}`}; runs ended with it: ${owned}`,
         );
       release(peer);
     });

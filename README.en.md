@@ -134,6 +134,17 @@ That describes the structure. **It is not a guarantee about your account.** Keep
 - **SmartScreen.** The installer is not code-signed. On first run Windows shows "Windows protected your PC": choose "More info → Run anyway".
 - The project never changes the settings of any security software. If in doubt, build from source.
 
+### When a working connection drops
+
+The client checks every 15 seconds that the service is still there and, after about 45 seconds without any answer, treats the connection as lost and returns to the sign-in page; the service does the same for the client. A task that was running is ended by the service; after reconnecting, the session shows where it stopped.
+
+To find which part of the way failed, compare both records:
+
+- **Client**: `client.log` under "Settings → About and updates → Open log folder". For each connection it records when it was made, when it ended, whether the window or the service side ended it first, and why. It contains no credentials, conversations or commands.
+- **Server**: `sudo docker logs <container> 2>&1 | grep Connection`. For each connection it records which computer it was, the address it came from, how long it lasted and how it ended. `no heartbeat answer for 45s` means the service got no answer from the client; `code 1006` means the other side went away without saying so, usually somewhere on the network, a proxy or a reverse proxy in between.
+
+When connecting through a proxy or a reverse proxy, make sure it does not cut connections that carry little data for a long time; see [nginx as a reverse proxy](deploy/nginx.md) for nginx.
+
 ## Scope
 
 - **Single user.** One service serves one person and one online Windows device at a time. There are no multiple users, permission levels or tenant isolation, and none are planned.
