@@ -46,12 +46,25 @@ await viteBuild({
   },
 });
 // All CommonJS modules ship as written, including helpers required by main/preload.
-// The ESM bridge and its dependencies are already in the bundle above.
+// The ESM bridge and its dependencies are already in the bundle above; the release download needs only Node.
 const commonjs = readdirSync(join(root, 'apps/desktop/electron')).filter((file) =>
   file.endsWith('.cjs'),
 );
-for (const file of [...commonjs, 'icon.png', 'prepare-ssh.ps1', 'component-host.ps1'])
+for (const file of [
+  ...commonjs,
+  'release-download.mjs',
+  'icon.png',
+  'prepare-ssh.ps1',
+  'component-host.ps1',
+])
   cpSync(join(root, 'apps/desktop/electron', file), join(app, 'electron', file));
+// A file the main process loads by path is only missed when its feature is used, so each is looked for here.
+for (const file of commonjs)
+  for (const [, name] of readFileSync(join(app, 'electron', file), 'utf8').matchAll(
+    /path\.join\(__dirname, '([^']+)'\)/g,
+  ))
+    if (!name.startsWith('../vendor') && !existsSync(join(app, 'electron', name)))
+      throw new Error(`${file} loads ${name}, which is not in the package.`);
 // The staging manifest has no dependencies: the Node bridge and protocol are bundled.
 writeFileSync(
   join(app, 'package.json'),

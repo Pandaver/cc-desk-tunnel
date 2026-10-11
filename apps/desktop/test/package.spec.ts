@@ -70,6 +70,14 @@ test('packaged exe runs without development dependencies and reclaims bundled re
     expect(await page.evaluate((path) => window.desktop!.gitBranch(path), project)).toBe(
       'package-smoke',
     );
+    // Loaded only when an upgrade is fetched from the release page, so its absence would not show otherwise.
+    expect(
+      await application.evaluate(({ app }) => {
+        const load = process.mainModule!.require;
+        const file = load('node:path').join(app.getAppPath(), 'electron/release-download.mjs');
+        return typeof load(file).downloadRelease;
+      }),
+    ).toBe('function');
     await application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].show());
     await new Promise<void>((accept, reject) => {
       execFile(
