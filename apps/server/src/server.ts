@@ -120,6 +120,8 @@ export type ServerOptions = {
   graceMs?: number;
 };
 
+// How many answered requests a connection remembers, to answer a resend of one the same way.
+const REMEMBERED = 256;
 // What the "continue" button sends in the user's place. The turn before it was stopped or cut off, and a
 // command that was under way then may or may not have taken effect.
 const CONTINUE =
@@ -504,7 +506,7 @@ export function createProxyServer(options: ServerOptions) {
     if (terminals.has(command.sessionId) || runs.has(command.sessionId) || mutations.size)
       throw new DomainError('native_busy', '请先结束这个会话的运行或会话管理，再打开终端。');
     const ssh = peer.tunnel?.ssh && seats.get(deviceOf(peer).id)?.door?.ssh;
-    if (!ssh) throw new DomainError('execution_offline', 'Windows SSH 尚未就绪。');
+    if (!ssh) throw new DomainError('execution_offline', '本机的执行通道尚未就绪。');
     onDevice(peer, session);
     room();
     const current: Terminal = { id: randomUUID(), sessionId: command.sessionId, owner: peer };
@@ -703,7 +705,7 @@ export function createProxyServer(options: ServerOptions) {
     if (options.claude && !(peer.tunnel?.ssh && seats.get(deviceOf(peer).id)?.door?.ssh))
       throw new DomainError(
         'execution_offline',
-        'Windows SSH 尚未就绪，请通过桌面客户端重新建立连接。',
+        '本机的执行通道尚未就绪，请稍候；客户端正在建立或重新建立连接。',
       );
     onDevice(peer, session);
     room();
@@ -1115,6 +1117,9 @@ export function createProxyServer(options: ServerOptions) {
       }),
     );
     peer.responses.set(command.requestId, { command: serialized, response });
+    // A resend follows its request closely: the latest few are all that can still be asked for again.
+    if (peer.responses.size > REMEMBERED)
+      peer.responses.delete(peer.responses.keys().next().value!);
     track(response.then((value) => send(peer, value)));
   }
   // The computer's place here, made when the first of its connections says which computer it is.

@@ -151,7 +151,7 @@ When connecting through a proxy or a reverse proxy, make sure it does not cut co
 
 ## Scope
 
-- **Single user.** One service serves one person and one online Windows device at a time. There are no multiple users, permission levels or tenant isolation, and none are planned.
+- **Single user.** One service serves one person, who may have several of their computers connected at once; each session runs on the computer its project directory is on. There are no multiple users, permission levels or tenant isolation, and none are planned.
 - **No modification of the official client, no evasion.** Nothing here is designed to get around risk controls or detection, or to get past the service's regional restrictions.
 
 ## Documentation

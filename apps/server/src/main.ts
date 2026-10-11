@@ -12,7 +12,10 @@ const { options, native, port } = environmentConfig(
 const programDir = process.env.PROXY_PROGRAM_DIR;
 if (native) removeFrpLeftovers();
 clearServiceVariables(process.env);
-if (native) rmSync(join(options.dataDir, 'connections'), { recursive: true, force: true });
+// What a process that did not get to close left of its connections and of the doors of their devices.
+if (native)
+  for (const name of ['connections', 'devices'])
+    rmSync(join(options.dataDir, name), { recursive: true, force: true });
 const server = createProxyServer(options);
 console.log(`Proxy ${native ? 'native' : 'simulation'} service: ${await server.listen(port)}`);
 // The entry script counts starts of an upgraded program and gives up on it after three that did not get here.

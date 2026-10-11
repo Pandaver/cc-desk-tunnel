@@ -394,7 +394,7 @@ export class ProxyClient {
           this.retryTimer = undefined;
           this.open();
         },
-        Math.min(1000 * 2 ** this.retryAttempt++, credentials.bridge ? 30000 : 5000),
+        Math.min(1000 * 2 ** this.retryAttempt++, credentials.bridge ? 10000 : 5000),
       );
     };
     socket.onerror = () => {
