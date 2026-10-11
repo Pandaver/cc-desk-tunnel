@@ -315,3 +315,8 @@ test('closing the tunnel ends waiting and joined SSH connections, their channels
   // Closing twice is the same close.
   assert.equal(device.tunnel.close(), device.tunnel.close());
 });
+test('the prompt lets the model look at a picture of the device by copying that one file here', () => {
+  const prompt = remotePrompt('D:\\work', { configPath: '/private/ssh_config' }, 'session');
+  assert.match(prompt, /copy that one file with scp to a temporary file on this host/);
+  assert.match(prompt, /Do not use this host's Read\/Edit tools on project files/);
+});
