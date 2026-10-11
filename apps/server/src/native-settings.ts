@@ -10,6 +10,15 @@ export function settingsPath(configDirectory = process.env.CLAUDE_CONFIG_DIR) {
   return join(configDirectory ?? join(homedir(), '.claude'), 'settings.json');
 }
 
+// Settings the CLI takes as environment variables, which the file holds under `env` as text.
+const variables: Partial<Record<keyof NativeSettings, string>> = {
+  toolSearch: 'ENABLE_TOOL_SEARCH',
+};
+const environment = (file: Record<string, unknown>) =>
+  file.env && typeof file.env === 'object' && !Array.isArray(file.env)
+    ? (file.env as Record<string, unknown>)
+    : {};
+
 function readFile(path: string): Record<string, unknown> {
   let text: string;
   try {
@@ -29,6 +38,11 @@ export function readNativeSettings(path = settingsPath()): NativeSettings {
   // A value the schema does not accept was written by hand; it is shown as unset and left alone until changed here.
   return Object.fromEntries(
     Object.entries(nativeSettingsSchema.shape).map(([key, schema]) => {
+      const variable = variables[key as keyof NativeSettings];
+      if (variable) {
+        const text = environment(file)[variable];
+        return [key, text === 'true' ? true : text === 'false' ? false : null];
+      }
       const parsed = schema.safeParse(file[key] ?? null);
       return [key, parsed.success ? parsed.data : null];
     }),
@@ -38,6 +52,16 @@ export function readNativeSettings(path = settingsPath()): NativeSettings {
 export function updateNativeSettings(values: Partial<NativeSettings>, path = settingsPath()) {
   const file = readFile(path);
   for (const [key, value] of Object.entries(values)) {
+    const variable = variables[key as keyof NativeSettings];
+    if (variable) {
+      if (value === undefined) continue;
+      const env = { ...environment(file) };
+      if (value === null) delete env[variable];
+      else env[variable] = String(value);
+      if (Object.keys(env).length) file.env = env;
+      else delete file.env;
+      continue;
+    }
     if (value === null) delete file[key];
     else if (value !== undefined) file[key] = value;
   }

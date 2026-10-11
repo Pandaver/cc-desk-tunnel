@@ -7,6 +7,16 @@ import { ClaudeStream } from './claude-stream.ts';
 import type { SshConnection } from './tunnel.ts';
 import { nativeCapabilities, nativeContextRefresh, nativeMetrics } from './native-controls.ts';
 import type { NativeInput } from './native-input.ts';
+import { readNativeSettings } from './native-settings.ts';
+
+// Whether reasoning summaries are asked for. A settings file that cannot be read leaves them on.
+function thinkingShown() {
+  try {
+    return readNativeSettings().showThinkingSummaries !== false;
+  } catch {
+    return true;
+  }
+}
 
 export type ClaudeOptions = {
   executable: string;
@@ -120,8 +130,8 @@ export async function runClaude(
         model: run.model ?? options.model,
         effort: run.effort ?? undefined,
         // Newer models return no reasoning text unless a summary is asked for; headless runs ignore the
-        // showThinkingSummaries setting, so this is the only switch.
-        extraArgs: { 'thinking-display': 'summarized' },
+        // showThinkingSummaries setting, so this is the only switch. It follows that setting.
+        extraArgs: thinkingShown() ? { 'thinking-display': 'summarized' } : {},
         settings: options.settingsPath,
         settingSources: ['user', 'project', 'local'],
         maxTurns: options.maxTurns,

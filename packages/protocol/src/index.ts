@@ -41,6 +41,9 @@ export const nativeSettingsSchema = z.object({
   autoCompactEnabled: toggle,
   autoCompactWindow: z.number().int().min(100_000).max(1_000_000).nullable(),
   alwaysThinkingEnabled: toggle,
+  // Whether the model is asked for a summary of its reasoning, which is what the conversation shows. The CLI
+  // ignores this key in the runs the service starts; the service reads it and asks or does not.
+  showThinkingSummaries: toggle,
   fastMode: toggle,
   autoContinueAtUsageLimit: toggle,
   switchModelsOnFlag: toggle,
@@ -58,6 +61,9 @@ export const nativeSettingsSchema = z.object({
   // anything else as unset.
   attribution: z.literal(false).nullable(),
   includeGitInstructions: toggle,
+  // Not a key of its own in the file: ENABLE_TOOL_SEARCH under `env`. Tools are then described to the model
+  // only when it looks for them, instead of all of them with every request.
+  toolSearch: toggle,
 });
 export type NativeSettings = z.infer<typeof nativeSettingsSchema>;
 export const contextUsageSchema = z.object({
