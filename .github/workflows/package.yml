@@ -23,6 +23,8 @@ permissions:
 concurrency:
   group: package-${{ github.ref }}
   cancel-in-progress: true
+# The steps that download Electron and the packaging tools are tried a second time after a minute: those
+# downloads now and then time out.
 jobs:
   windows:
     runs-on: windows-2022
@@ -34,11 +36,14 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run setup:desktop
+      - run: npm run setup:desktop || (sleep 60 && npm run setup:desktop)
+        shell: bash
       # The bundled OpenSSH and PowerShell, fetched and checked against the hashes the script names.
-      - run: npm run prepare:windows:package
+      - run: npm run prepare:windows:package || (sleep 60 && npm run prepare:windows:package)
+        shell: bash
       # Ends with the packaged program started offline; a package that does not start fails here.
-      - run: npm run package:windows
+      - run: npm run package:windows || (sleep 60 && npm run package:windows)
+        shell: bash
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64
@@ -63,8 +68,10 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run setup:desktop
-      - run: npm run package:macos -- --${{ matrix.arch }}
+      - run: npm run setup:desktop || (sleep 60 && npm run setup:desktop)
+        shell: bash
+      - run: npm run package:macos -- --${{ matrix.arch }} || (sleep 60 && npm run package:macos -- --${{ matrix.arch }})
+        shell: bash
         env:
           SMOKE_SCREENSHOT: artifacts/macos/window-${{ matrix.arch }}.png
       - uses: actions/upload-artifact@v4
@@ -95,8 +102,10 @@ jobs:
           cache: npm
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb imagemagick
       - run: npm ci
-      - run: npm run setup:desktop
-      - run: npm run package:linux
+      - run: npm run setup:desktop || (sleep 60 && npm run setup:desktop)
+        shell: bash
+      - run: npm run package:linux || (sleep 60 && npm run package:linux)
+        shell: bash
       - run: sudo apt-get install -y ./artifacts/linux/*.deb
       - run: xvfb-run -a -s "-screen 0 1280x900x24" node scripts/smoke-posix-package.mjs "/opt/CC Desk Tunnel/cc-desk-tunnel"
         env:
