@@ -317,10 +317,11 @@ test(
     const client = await clientOf(executor);
     t.after(() => client.destroy());
     const marker = join(directory, 'writer-pid');
-    const script = `const fs=require('fs');process.on('SIGTERM',()=>{});fs.writeFileSync(${JSON.stringify(marker)},String(process.pid));const b=Buffer.alloc(65536,23);for(let i=0;i<1024;i++){fs.writeSync(1,b);fs.writeSync(2,b);}`;
+    const script = `const fs=require('fs');process.on('SIGTERM',()=>{});fs.writeFileSync(process.argv.at(-1),String(process.pid));const b=Buffer.alloc(65536,23);for(let i=0;i<1024;i++){fs.writeSync(1,b);fs.writeSync(2,b);}`;
     const stream = await new Promise((done, fail) =>
-      client.exec(`${quotePosix(process.execPath)} -e ${quotePosix(script)}`, (error, channel) =>
-        error ? fail(error) : done(channel),
+      client.exec(
+        `${quotePosix(process.execPath)} -e ${quotePosix(script)} ${quotePosix(marker)}`,
+        (error, channel) => (error ? fail(error) : done(channel)),
       ),
     );
     stream.end();
