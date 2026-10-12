@@ -614,3 +614,59 @@ test(
     assert.equal((await run('nonexistent-command-of-the-test\n')).code, 127);
   },
 );
+
+test(
+  'commands of one device share an SSH connection to the service, as the server sets it up',
+  mac,
+  async (t) => {
+    const { sshConfig } = await import('../../server/src/tunnel.ts');
+    const f = await fixture(t);
+    // The socket of a shared connection needs a short path, which the temporary directory of macOS is not.
+    const directory = await mkdtemp('/tmp/cc-mux-');
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const files = sshConfig(
+      directory,
+      f.executor.port,
+      f.executor.credentials.username,
+      f.executor.credentials.hostPublicKey,
+      process.platform,
+      15,
+      process.platform,
+    );
+    assert.match(files.config, /ControlMaster auto/);
+    const configPath = join(directory, 'ssh_config');
+    await writeFile(join(directory, 'identity'), f.executor.credentials.privateKey, {
+      mode: 0o600,
+    });
+    await writeFile(join(directory, 'known_hosts'), files.knownHosts, { mode: 0o600 });
+    await writeFile(configPath, files.config, { mode: 0o600 });
+    const ssh = (host, input, ...command) =>
+      new Promise((done) => {
+        const child = execFile(
+          '/usr/bin/ssh',
+          ['-F', configPath, host, ...command],
+          { timeout: 20000 },
+          (error, stdout) => done({ code: error?.code ?? 0, stdout }),
+        );
+        child.stdin.end(input);
+      });
+    t.after(() => ssh('device', '', '-O', 'exit'));
+    // The first opens the connection; the rest, scripts and command lines together, run over it.
+    assert.deepEqual(await ssh('device-script', 'echo first\n'), { code: 0, stdout: 'first\n' });
+    assert.equal((await ssh('device', '', '-O', 'check')).code, 0);
+    const results = await Promise.all(
+      Array.from({ length: 12 }, (_, index) =>
+        index % 2
+          ? ssh('device-script', `sleep 0.2; printf '%s' ${index}; exit ${index}\n`)
+          : ssh('device', '', `printf '%s' ${index}`),
+      ),
+    );
+    assert.deepEqual(
+      results,
+      Array.from({ length: 12 }, (_, index) => ({
+        code: index % 2 ? index : 0,
+        stdout: String(index),
+      })),
+    );
+  },
+);
