@@ -39,7 +39,7 @@ Windows 上的 shell 命令与脚本使用 `pwsh.exe`（PowerShell 7）。终端
 
 发布在此时才打上 `v<版本>` 标签。已发布的版本不改文件，有问题就递增版本重新发布。
 
-不在本机构建时，GitHub 上的 `package` 工作流可以代为打出 Windows 安装包、两种架构的 macOS 安装包与服务端程序包：在 Actions 页手动运行，或在 `dev/**` 分支上改动打包脚本时自动运行；文件随该次运行保留 14 天，不签名，也不会上传到发布页。
+不在本机构建时，GitHub 上的 `package` 工作流可以代为打出 Windows 安装包、两种架构的 macOS 安装包、Linux 的 deb 与服务端程序包：在 Actions 页手动运行，或在 `dev/**` 分支上改动打包脚本时自动运行；文件随该次运行保留 14 天，不签名，也不会上传到发布页。
 
 需要预发布时使用 `npm run release -- --publish --prerelease`（不加 `--publish` 则保留草稿）。预发布不标记为 Latest，不进入服务端跟踪的稳定版自动更新；使用者需从对应发布页手动下载两端程序包。Windows 打包必经实际 exe 的离线启动检查，失败时不会继续上传。
 

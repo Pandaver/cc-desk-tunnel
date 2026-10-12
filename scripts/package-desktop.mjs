@@ -63,6 +63,10 @@ export async function stageDesktop(root, app, { description, files = [], depende
   await viteBuild({
     configFile: false,
     root,
+    // A package is for one system, the one it is built on. With that written into the bridge, what it would
+    // only do on another system falls out of the bundle: the Windows package holds nothing of the SSH
+    // service of macOS and Linux, and theirs nothing of the one of Windows.
+    define: { 'process.platform': JSON.stringify(process.platform) },
     ssr: { noExternal: true },
     build: {
       ssr: true,

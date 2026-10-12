@@ -12,7 +12,7 @@ Electron + React 的 Windows 桌面客户端：界面、到服务端的连接桥
 
 Electron 44.5.1 的 npm 包将二进制安装改为显式步骤：先运行 `npm run setup:desktop`（该包的官方 `install-electron`，从 Electron 发布源下载并用其内置 checksums 校验），再执行 `npm run build` / `npm run desktop`。桌面窗口加载同一份生产渲染页，不自动开启另一个代理服务；可连接 `npm run dev` 已启动的模拟服务。
 
-macOS 上是同一个客户端，实验性支持：本机的 SSH 服务换成应用自身的一个进程，脚本由使用者的 shell 执行。安装、差别和实现见 [macOS 客户端](../../docs/macos.md)。
+macOS 与 Linux 上是同一个客户端，实验性支持：本机的 SSH 服务换成应用自身的一个进程，脚本由使用者的 shell 执行。安装、差别和实现见 [macOS 客户端](../../docs/macos.md)与 [Linux 客户端](../../docs/linux.md)。
 
 ## 发行构建
 
