@@ -118,10 +118,20 @@ if (dryRun) {
     }
     if (!started) throw new Error('The package workflow did not start on GitHub.');
     console.log(`GitHub run ${started.databaseId} builds the files of ${tag}.`);
-    // Fails when the run does: a release does not go out with a package that did not start.
-    run(gh, ['run', 'watch', String(started.databaseId), '--exit-status', '--interval', '30'], {
-      stdio: 'inherit',
-    });
+    // Fails when the run does: a release does not go out with a package that did not start. The jobs
+    // download Electron and other files, which now and then times out; what failed is tried once more.
+    const watch = () =>
+      run(gh, ['run', 'watch', String(started.databaseId), '--exit-status', '--interval', '30'], {
+        stdio: 'inherit',
+      });
+    try {
+      watch();
+    } catch {
+      console.log('The run failed; running its failed jobs once more.');
+      run(gh, ['run', 'rerun', String(started.databaseId), '--failed']);
+      wait(15_000);
+      watch();
+    }
     const attached = JSON.parse(run(gh, ['release', 'view', tag, '--json', 'assets'])).assets.map(
       (asset) => asset.name,
     );
