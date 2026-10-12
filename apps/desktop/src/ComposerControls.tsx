@@ -189,7 +189,9 @@ export default function ComposerControls({
                 <input
                   style={
                     {
-                      '--fill': `${(Math.max(0, levels.indexOf(shownEffort ?? 'high')) / Math.max(1, levels.length - 1)) * 100}%`,
+                      '--fill': shownEffort
+                        ? `${(Math.max(0, levels.indexOf(shownEffort)) / Math.max(1, levels.length - 1)) * 100}%`
+                        : '0%',
                     } as CSSProperties
                   }
                   aria-label="推理强度"
@@ -199,8 +201,14 @@ export default function ComposerControls({
                   max={levels.length - 1}
                   aria-valuetext={shownEffort ? effortNames[shownEffort] : '原生默认'}
                   value={Math.max(0, levels.indexOf(shownEffort ?? 'high'))}
+                  data-unset={shownEffort ? undefined : ''}
                   onPointerDown={(event) => {
                     dragging.current = true;
+                    // Unset: the handle is hidden, so pressing where it would be picks that level; dragging or a press elsewhere overrides it.
+                    if (!shownEffort) {
+                      setPreview(levels[Number(event.currentTarget.value)]);
+                      commitPending.current = true;
+                    }
                     event.currentTarget.setPointerCapture(event.pointerId);
                   }}
                   onChange={(event) => {
