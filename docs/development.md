@@ -32,8 +32,10 @@ Windows 上的 shell 命令与脚本使用 `pwsh.exe`（PowerShell 7）。终端
 版本号以 `apps/desktop/package.json` 为准，两端共用；[变更记录](../CHANGELOG.md)里要有同名的一节，按该文件开头说明的结构书写（一句概括，然后是新增功能、优化改进、问题修复、升级说明）。发布脚本把这一节放进固定的发布说明模板：项目简介、本版变化、下载与升级，因此每一版的发布页读起来是同一个样子。
 
 1. 在合并请求里改好版本号与变更记录，合入 `main`。
-2. 在 Windows x64 上检出最新的 `main`，准备好打包组件（`npm run prepare:windows:package`）、`gh` 和环境变量 `GH_TOKEN`。
-3. `npm run release` 构建 Windows 安装包与服务端程序包，先建一个草稿发布，再启动 GitHub 上的 `package` 工作流，由它从同一提交打出 macOS 的两个 dmg 与 Linux 的 deb 并直接挂到草稿上（约十分钟，这些文件不经过本机；任何一个包没有打出或启动检查没过即中止，草稿留在原处，删掉后可重来），最后生成 `release.json`（版本、协议版本、提交、各文件的大小与 SHA256）和 `SHA256SUMS`，一并上传；默认停在草稿，核对无误后在发布页点发布，或直接用 `npm run release -- --publish`。`--dry-run` 只构建到 `artifacts/release/`，不上传，也不启动 GitHub 上的运行；`--windows-only` 不带 macOS 与 Linux 的包。
+2. 在任意一台电脑上检出最新的 `main`，准备好已登录的 `gh`。发布的文件不在本机构建。
+3. `npm run release` 先建一个草稿发布，写好发布说明，再启动 GitHub 上的 `package` 工作流：它从同一提交打出 Windows 安装包、macOS 的两个 dmg、Linux 的 deb 和服务端程序包，每个客户端都实际启动一次作检查，然后连同 `release.json`（版本、协议版本、提交、各文件的大小与 SHA256）和 `SHA256SUMS` 一起挂到草稿上，约十五分钟。任何一个文件没有打出或启动检查没过即中止，草稿留在原处，删掉后可重来。默认停在草稿，核对无误后在发布页点发布，或直接用 `npm run release -- --publish`。`--dry-run` 只把发布说明写到 `artifacts/release/notes.md`，不动 GitHub。
+
+发布的文件只来自 GitHub 的机器：谁来发布、在哪台电脑上发布，得到的都是同一提交按同一流程构建的文件，构建记录留在该次运行里。
 
 `release.json` 里的 `runtime` 是该版本所需的镜像级别，取自 `deploy/docker/runtime-level`。改动 Dockerfile、镜像入口脚本或 Node.js 的版本时把这个数字加一：旧镜像上的服务端会提示在服务器上升级，而不是自行安装。只更换 Claude Code 的版本不需要加，升级时会把所需版本装进数据目录。
 
@@ -41,7 +43,7 @@ Windows 上的 shell 命令与脚本使用 `pwsh.exe`（PowerShell 7）。终端
 
 不在本机构建时，GitHub 上的 `package` 工作流可以代为打出 Windows 安装包、两种架构的 macOS 安装包、Linux 的 deb 与服务端程序包：在 Actions 页手动运行，或在 `dev/**` 分支上改动打包脚本时自动运行；文件随该次运行保留 14 天，不签名；只有发布脚本启动的那一次会把 macOS 与 Linux 的包挂到草稿发布上。
 
-需要预发布时使用 `npm run release -- --publish --prerelease`（不加 `--publish` 则保留草稿）。预发布不标记为 Latest，不进入服务端跟踪的稳定版自动更新；使用者需从对应发布页手动下载两端程序包。Windows 打包必经实际 exe 的离线启动检查，失败时不会继续上传。
+新版本先作为预发布放出：`npm run release -- --publish --prerelease`。预发布不标记为 Latest，服务端不会把它当作更新提供，安装脚本的下载入口也仍指向上一个正式版，试用的人从发布页手动下载两端的文件。确认没有问题后在发布页取消“预发布”并设为 Latest，它就成为正式版。发布说明从一开始就按正式版书写，转正时不改一个字，文件也不重新构建。
 
 ## 凭据与本机文件
 

@@ -85,6 +85,8 @@ Download `CC-Desk-Tunnel-Setup-<version>-x64.exe` from the [releases page](https
 
 Expect a SmartScreen prompt on first run; see [Antivirus and SmartScreen](#antivirus-and-smartscreen).
 
+Packages for macOS and Linux are on the same releases page; see [macOS client](docs/macos.md) and [Linux client](docs/linux.md) (in Chinese). They are experimental, unsigned, and upgraded by downloading and installing the new package.
+
 ### 3. Sign in to Claude
 
 Sign in to your Claude account on the account page at the bottom left of the client (the official `claude auth` flow; the login is stored only on the server), add a project folder and start a conversation.

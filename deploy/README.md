@@ -1,6 +1,6 @@
 # Linux Docker 部署
 
-Ubuntu amd64 优先；arm64 为试验性支持：镜像构建、部署自测和服务端测试在 arm64 上自动运行通过，还没有人在 arm64 服务器上用真实账号跑过会话。官方 Claude Code、Agent SDK、PTY 同容器；不改 Claude 本体、不加入执行 MCP。容器有可写层和较完整工具环境，不是只读沙箱；以 uid 1000 普通用户运行，无宿主 Docker socket、特权模式或宿主项目挂载。
+Ubuntu amd64 优先；arm64 为实验性支持：镜像构建、部署自测和服务端测试在 arm64 上自动运行通过，还没有人在 arm64 服务器上用真实账号跑过会话。官方 Claude Code、Agent SDK、PTY 同容器；不改 Claude 本体、不加入执行 MCP。容器有可写层和较完整工具环境，不是只读沙箱；以 uid 1000 普通用户运行，无宿主 Docker socket、特权模式或宿主项目挂载。
 
 ## 准备
 

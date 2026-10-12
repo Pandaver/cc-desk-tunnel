@@ -1,19 +1,21 @@
 # Builds the release files on GitHub's machines instead of a maintainer's own: the Windows installer, the
-# macOS and Linux packages, which no maintainer has a machine for, and the server bundle. Nothing is signed with a
-# certificate; the files are kept with the run for 14 days, and attached to a draft release when the release
-# script asks for that. It runs when asked for, and by itself when what does the packaging changes on a dev branch.
+# macOS and Linux packages and the server bundle, each client started as a check. This is where a release
+# is built: the release script names its draft in `release`, and the files are attached to it with their
+# hashes. Nothing is signed with a certificate. Otherwise the files are kept with the run for 14 days; it
+# runs when asked for, and by itself when what does the packaging changes on a dev branch.
 name: package
 on:
   workflow_dispatch:
     inputs:
       release:
-        description: Tag of a draft release to attach the macOS and Linux packages to. Left empty, they stay with the run.
+        description: Tag of a draft release to attach the files to. Left empty, they stay with the run.
         default: ''
   push:
     branches: ['dev/**']
     paths:
       - .github/workflows/package.yml
       - scripts/package-*.mjs
+      - scripts/release-manifest.mjs
       - scripts/smoke-posix-package.mjs
       - scripts/prepare-windows.ps1
 permissions:
@@ -119,29 +121,41 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - run: node scripts/package-server.mjs "$RUNNER_TEMP/cc-desk-tunnel-server.tar.gz"
+      - run: |
+          version="$(node -p "require('./apps/desktop/package.json').version")"
+          mkdir -p artifacts/server
+          node scripts/package-server.mjs "artifacts/server/cc-desk-tunnel-server-$version.tar.gz"
       - uses: actions/upload-artifact@v4
         with:
           name: server
-          path: ${{ runner.temp }}/cc-desk-tunnel-server.tar.gz
+          path: artifacts/server/*.tar.gz
           if-no-files-found: error
           retention-days: 14
-  # For the release script: the packages of macOS and Linux go from here to the draft release it made,
-  # without passing through the maintainer's computer. The only job that may write to the repository.
+  # For the release script: every file of the release goes from here to the draft it made, described by
+  # release.json and SHA256SUMS, without passing through a maintainer's computer. The only job that may
+  # write to the repository.
   attach:
     if: inputs.release != ''
-    needs: [macos, linux]
+    needs: [windows, macos, linux, server]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - uses: actions/download-artifact@v4
         with:
-          pattern: '{macos-arm64,macos-x64,linux-x64}'
+          pattern: '{windows-x64,macos-arm64,macos-x64,linux-x64,server}'
           merge-multiple: true
-          path: packages
-      - run: gh release upload "$TAG" packages/*.dmg packages/*.deb --repo "$GITHUB_REPOSITORY"
+          path: downloaded
+      - run: |
+          mkdir release
+          mv downloaded/*.exe downloaded/*.dmg downloaded/*.deb downloaded/*.tar.gz release/
+          node scripts/release-manifest.mjs release
+          gh release upload "$TAG" release/* --repo "$GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.release }}

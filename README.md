@@ -46,7 +46,7 @@ Claude Code（简称 CC）运行在一台 Linux 服务器上；项目代码、�
 
 ## 快速开始
 
-需要：一台有公网 IP 或域名的 Linux 服务器（x86_64；arm64 为试验性支持。推荐 Ubuntu，已安装 Docker），和一台 Windows 10 / 11 x64 电脑。
+需要：一台有公网 IP 或域名的 Linux 服务器（x86_64；arm64 为实验性支持。推荐 Ubuntu，已安装 Docker），和一台 Windows 10 / 11 x64 电脑。macOS 与 Linux 上也有客户端，目前是实验性支持。
 
 **服务器不需要高配。** 编译、测试和各种开发工具都在 Windows 本机运行，服务器上只有 Claude Code 和一个轻量的代理服务，2 核 1 GB 内存的入门机型就能运行。只有打算让 Claude 直接在服务器上编译或跑重负载时，才需要按那些任务选配置。
 
@@ -72,6 +72,8 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/sun168567/cc-desk-t
 从[发布页](https://github.com/sun168567/cc-desk-tunnel/releases/latest)下载 `CC-Desk-Tunnel-Setup-<版本>-x64.exe` 并安装。安装包自带 PowerShell 7 和 OpenSSH，不需要另装任何东西。启动后填入上一步的三项信息并连接。
 
 首次运行会遇到 SmartScreen 提示，处理方法见[杀毒软件与 SmartScreen](#杀毒软件与-smartscreen)。
+
+macOS 与 Linux 的安装包在同一个发布页，安装方法见 [macOS 客户端](docs/macos.md)与 [Linux 客户端](docs/linux.md)。它们是实验性支持，没有签名，升级时需要重新下载安装。
 
 ### 3. 登录 Claude
 
