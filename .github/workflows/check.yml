@@ -21,6 +21,8 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      # The tests of the SSH service of macOS and Linux write their fixtures for zsh.
+      - run: sudo apt-get install -y --no-install-recommends zsh
       - run: npm ci
       - run: npm run check
       - run: npm run typecheck
@@ -41,4 +43,16 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      - run: npm test
+  # The SSH service of the macOS client, with the system's own ssh, scp and sftp-server.
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
       - run: npm test

@@ -1,12 +1,11 @@
-import { builtinModules } from 'node:module';
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import files from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { build as viteBuild } from 'vite';
 import { build as electronBuild, Platform, Arch } from 'electron-builder';
+import { stageDesktop } from './package-desktop.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const app = join(root, '.local/windows-package/app');
@@ -19,71 +18,10 @@ for (const file of ['openssh/sshd.exe', 'openssh/ssh-keygen.exe', 'pwsh/pwsh.exe
   if (!existsSync(join(vendor, file)))
     throw new Error(`Missing bundled component: ${file}. Run npm run prepare:windows:package.`);
 }
-mkdirSync(app, { recursive: true });
-await viteBuild({
-  root: join(root, 'apps/desktop'),
-  build: { outDir: join(app, 'dist'), emptyOutDir: true },
+await stageDesktop(root, app, {
+  description: 'Windows client for a native remote Claude Code session',
+  files: ['prepare-ssh.ps1', 'component-host.ps1'],
 });
-await viteBuild({
-  configFile: false,
-  root,
-  ssr: { noExternal: true },
-  build: {
-    ssr: true,
-    target: 'node24',
-    outDir: join(app, 'electron'),
-    emptyOutDir: true,
-    rolldownOptions: {
-      input: join(root, 'apps/desktop/electron/proxy-bridge.mjs'),
-      external: [
-        ...builtinModules,
-        ...builtinModules.map((name) => `node:${name}`),
-        'bufferutil',
-        'utf-8-validate',
-      ],
-      output: { format: 'es', entryFileNames: 'proxy-bridge.mjs', codeSplitting: false },
-    },
-  },
-});
-// All CommonJS modules ship as written, including helpers required by main/preload.
-// The ESM bridge and its dependencies are already in the bundle above; the release download needs only Node.
-const commonjs = readdirSync(join(root, 'apps/desktop/electron')).filter((file) =>
-  file.endsWith('.cjs'),
-);
-for (const file of [
-  ...commonjs,
-  'release-download.mjs',
-  'icon.png',
-  'prepare-ssh.ps1',
-  'component-host.ps1',
-])
-  cpSync(join(root, 'apps/desktop/electron', file), join(app, 'electron', file));
-// A file the main process loads by path is only missed when its feature is used, so each is looked for here.
-for (const file of commonjs)
-  for (const [, name] of readFileSync(join(app, 'electron', file), 'utf8').matchAll(
-    /path\.join\(__dirname, '([^']+)'\)/g,
-  ))
-    if (!name.startsWith('../vendor') && !existsSync(join(app, 'electron', name)))
-      throw new Error(`${file} loads ${name}, which is not in the package.`);
-// The staging manifest has no dependencies: the Node bridge and protocol are bundled.
-writeFileSync(
-  join(app, 'package.json'),
-  JSON.stringify(
-    {
-      name: 'cc-desk-tunnel',
-      productName: 'CC Desk Tunnel',
-      // The desktop workspace manifest is the single source of the client version.
-      version: JSON.parse(readFileSync(join(root, 'apps/desktop/package.json'), 'utf8')).version,
-      description: 'Windows client for a native remote Claude Code session',
-      author: 'CC Desk Tunnel contributors',
-      private: true,
-      main: 'electron/main.cjs',
-      type: 'module',
-    },
-    null,
-    2,
-  ) + '\n',
-);
 const electron = JSON.parse(readFileSync(join(root, 'node_modules/electron/package.json'), 'utf8'));
 // Security software may hold an executable for some seconds after it is copied, while it scans it; electron-builder
 // writes the executable's resources right after copying it and fails. Its writes wait for the file instead.

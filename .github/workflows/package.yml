@@ -1,6 +1,7 @@
-# Builds the release files on GitHub's machines instead of a maintainer's own: the Windows installer and the
-# server bundle. Nothing is signed or uploaded to a release; the files are kept with the run for 14 days. It
-# runs when asked for, and by itself when what does the packaging changes on a dev branch.
+# Builds the release files on GitHub's machines instead of a maintainer's own: the Windows installer, the
+# macOS packages, which no maintainer has a machine for, and the server bundle. Nothing is signed with a
+# certificate or uploaded to a release; the files are kept with the run for 14 days. It runs when asked for,
+# and by itself when what does the packaging changes on a dev branch.
 name: package
 on:
   workflow_dispatch:
@@ -9,6 +10,7 @@ on:
     paths:
       - .github/workflows/package.yml
       - scripts/package-*.mjs
+      - scripts/smoke-macos-package.mjs
       - scripts/prepare-windows.ps1
 permissions:
   contents: read
@@ -35,6 +37,37 @@ jobs:
         with:
           name: windows-x64
           path: artifacts/windows/*.exe
+          if-no-files-found: error
+          retention-days: 14
+  # One package for each kind of Mac, each built and started on a machine of its own kind. The picture is of
+  # the window as the system draws it there.
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15, arch: arm64 }
+          - { runner: macos-15-intel, arch: x64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run setup:desktop
+      - run: npm run package:macos -- --${{ matrix.arch }}
+        env:
+          SMOKE_SCREENSHOT: artifacts/macos/window-${{ matrix.arch }}.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            artifacts/macos/*.dmg
+            artifacts/macos/*.zip
+            artifacts/macos/*.png
           if-no-files-found: error
           retention-days: 14
   server:
