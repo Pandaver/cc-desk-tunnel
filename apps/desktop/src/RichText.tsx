@@ -68,15 +68,52 @@ const code = new RegExp(
   `(${fence}[\\s\\S]*?(?:${fence}[^\\S\\n]*$|(?![\\s\\S]))|\`[^\`\\n]*\`)`,
   'm',
 );
+// A dollar sign is far more often a price than a formula. One opens a formula only as it does in Pandoc:
+// closed on the same line, no space just inside either end, and no digit right after the closing one. Any
+// other is escaped, so that "$5 and $8" stays text.
+function prices(prose: string) {
+  let result = '';
+  for (let at = 0; at < prose.length;) {
+    const character = prose[at];
+    if (character === '\\') {
+      result += prose.slice(at, at + 2);
+      at += 2;
+    } else if (character !== '$') {
+      result += character;
+      at++;
+    } else if (prose[at + 1] === '$') {
+      const end = prose.indexOf('$$', at + 2);
+      const next = end < 0 ? prose.length : end + 2;
+      result += prose.slice(at, next);
+      at = next;
+    } else {
+      let close = at + 1;
+      while (close < prose.length && prose[close] !== '$' && prose[close] !== '\n')
+        close += prose[close] === '\\' ? 2 : 1;
+      const body = prose.slice(at + 1, close);
+      if (prose[close] !== '$') {
+        result += character;
+        at++;
+      } else if (body && !/^\s|\s$/.test(body) && !/\d/.test(prose[close + 1] ?? '')) {
+        result += prose.slice(at, close + 1);
+        at = close + 1;
+      } else {
+        result += '\\$';
+        at++;
+      }
+    }
+  }
+  return result;
+}
 export function dollars(text: string) {
-  if (!text.includes('\\(') && !text.includes('\\[')) return text;
+  if (!text.includes('$') && !text.includes('\\(') && !text.includes('\\[')) return text;
   return text
     .split(code)
     .map((part, index) =>
       // Prose and code alternate, prose first.
       index % 2
         ? part
-        : part
+        : prices(part)
             .replace(/\\\[([\s\S]+?)\\\]/g, (_, formula: string) => `$$${formula}$$`)
             .replace(/\\\(([^\n]+?)\\\)/g, (_, formula: string) => `$${formula}$`),
     )
