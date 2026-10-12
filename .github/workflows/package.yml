@@ -1,0 +1,54 @@
+# Builds the release files on GitHub's machines instead of a maintainer's own: the Windows installer and the
+# server bundle. Nothing is signed or uploaded to a release; the files are kept with the run for 14 days. It
+# runs when asked for, and by itself when what does the packaging changes on a dev branch.
+name: package
+on:
+  workflow_dispatch:
+  push:
+    branches: ['dev/**']
+    paths:
+      - .github/workflows/package.yml
+      - scripts/package-*.mjs
+      - scripts/prepare-windows.ps1
+permissions:
+  contents: read
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run setup:desktop
+      # The bundled OpenSSH and PowerShell, fetched and checked against the hashes the script names.
+      - run: npm run prepare:windows:package
+      # Ends with the packaged program started offline; a package that does not start fails here.
+      - run: npm run package:windows
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: artifacts/windows/*.exe
+          if-no-files-found: error
+          retention-days: 14
+  server:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node scripts/package-server.mjs "$RUNNER_TEMP/cc-desk-tunnel-server.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server
+          path: ${{ runner.temp }}/cc-desk-tunnel-server.tar.gz
+          if-no-files-found: error
+          retention-days: 14
