@@ -101,6 +101,28 @@ test('narrow screen, safe Markdown, switching and cancellation while awaiting ap
   expect(await page.evaluate(() => 'untrusted' in window)).toBe(false);
   await expandActivity(page);
   await expect(page.locator('.message.assistant pre')).toBeVisible();
+  // Formulas in either notation are typeset, a dollar in code is left alone, and a drawing is shown as an
+  // image, which runs nothing.
+  await send(
+    page,
+    '行内 $a^2+b^2$ 与 \\(c^2\\)，价格 `$5 \\(x\\)`：\n\n\\[\nE=mc^2\n\\]\n\n```svg\n<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><script>window.untrusted = true</script><circle cx="20" cy="20" r="18"/></svg>\n```',
+  );
+  await settled(page);
+  await expandActivity(page);
+  const typeset = page.locator('.transcript');
+  await expect(typeset.locator('.katex')).toHaveCount(3);
+  await expect(typeset.locator('.katex-display')).toHaveCount(1);
+  await expect(typeset.locator(':not(pre) > code')).toHaveText('$5 \\(x\\)');
+  const picture = typeset.getByRole('img', { name: 'SVG 图像' });
+  await expect(picture).toBeVisible();
+  await expect
+    .poll(() => picture.evaluate((image: HTMLImageElement) => image.naturalWidth))
+    .toBe(40);
+  expect(await page.evaluate(() => 'untrusted' in window)).toBe(false);
+  await noOverflow(page);
+  await page.screenshot({ path: resolve(screenshots, 'mobile-formula.png') });
+  await typeset.getByRole('button', { name: '查看源码', exact: true }).click();
+  await expect(typeset.locator('pre').last()).toContainText('<circle');
   await send(page, '取消审批', 'tool');
   await expect(page.getByRole('button', { name: '允许', exact: true })).toBeVisible();
   await noOverflow(page);

@@ -1348,11 +1348,32 @@ kbd {
 .code-block {
   position: relative;
 }
-.code-block > .copy-button {
+.code-actions {
   position: absolute;
   right: 7px;
   top: 7px;
+  display: flex;
+  gap: 4px;
+}
+.code-actions > .copy-button {
   background: var(--surface-2);
+}
+/* A drawing takes the place of its source, on the same ground as the code would have. */
+.code-picture {
+  display: block;
+  box-sizing: border-box;
+  max-width: 100%;
+  max-height: 520px;
+  margin: 10px 0;
+  padding: 38px 14px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-s);
+  background: white;
+}
+.message-content .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
 }
 .message-content .code-block > pre {
   padding-top: 38px;
