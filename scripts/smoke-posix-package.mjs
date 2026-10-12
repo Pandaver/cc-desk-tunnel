@@ -101,9 +101,12 @@ try {
     await application.evaluate(({ BrowserWindow }) => {
       const window = BrowserWindow.getAllWindows()[0];
       window.show();
+      window.moveTop();
       window.focus();
     });
-    await delay(2000);
+    // A window shown for the first time takes a moment to be drawn, longer without a graphics card.
+    await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => done())));
+    await delay(4000);
     mkdirSync(dirname(resolve(process.env.SMOKE_SCREENSHOT)), { recursive: true });
     try {
       // The whole screen: the window's buttons are the system's on macOS and Chromium's own on Linux, and
@@ -113,6 +116,10 @@ try {
     } catch (error) {
       console.log(`No screenshot: ${error.message}`);
     }
+    // And the page alone, as the program itself renders it, should the screen have shown nothing.
+    await page.screenshot({
+      path: resolve(process.env.SMOKE_SCREENSHOT).replace(/\.png$/, '-page.png'),
+    });
   }
   console.log('PASS: the packaged client starts offline and its SSH service runs a script.');
 } finally {
