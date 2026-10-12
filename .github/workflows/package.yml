@@ -1,10 +1,14 @@
 # Builds the release files on GitHub's machines instead of a maintainer's own: the Windows installer, the
 # macOS and Linux packages, which no maintainer has a machine for, and the server bundle. Nothing is signed with a
-# certificate or uploaded to a release; the files are kept with the run for 14 days. It runs when asked for,
-# and by itself when what does the packaging changes on a dev branch.
+# certificate; the files are kept with the run for 14 days, and attached to a draft release when the release
+# script asks for that. It runs when asked for, and by itself when what does the packaging changes on a dev branch.
 name: package
 on:
   workflow_dispatch:
+    inputs:
+      release:
+        description: Tag of a draft release to attach the macOS and Linux packages to. Left empty, they stay with the run.
+        default: ''
   push:
     branches: ['dev/**']
     paths:
@@ -122,3 +126,22 @@ jobs:
           path: ${{ runner.temp }}/cc-desk-tunnel-server.tar.gz
           if-no-files-found: error
           retention-days: 14
+  # For the release script: the packages of macOS and Linux go from here to the draft release it made,
+  # without passing through the maintainer's computer. The only job that may write to the repository.
+  attach:
+    if: inputs.release != ''
+    needs: [macos, linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '{macos-arm64,macos-x64,linux-x64}'
+          merge-multiple: true
+          path: packages
+      - run: gh release upload "$TAG" packages/*.dmg packages/*.deb --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release }}

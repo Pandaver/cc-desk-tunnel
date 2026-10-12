@@ -1,14 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import {
-  copyFileSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -17,8 +9,8 @@ import { fileURLToPath } from 'node:url';
 // --dry-run only builds. Needs gh (or GH pointing at it) and GH_TOKEN.
 //
 // The Windows installer and the server bundle are built here. The packages for macOS and Linux cannot be:
-// they are taken from the `package` workflow's run on GitHub for the same commit, which is started and
-// waited for if there is none yet. --windows-only leaves them out, for when GitHub's machines are not to
+// the `package` workflow on GitHub builds them from the same commit and attaches them to the draft, which
+// this script starts and waits for. --windows-only leaves them out, for when GitHub's machines are not to
 // be waited for.
 const root = fileURLToPath(new URL('..', import.meta.url));
 const dryRun = process.argv.includes('--dry-run');
@@ -118,61 +110,7 @@ for (let attempt = 1; ; attempt++) {
 copyFileSync(join(root, 'artifacts/windows', installer), join(output, installer));
 run(process.execPath, ['scripts/package-server.mjs', join(output, server)], { stdio: 'inherit' });
 
-// The packages of the other systems: the disk images for macOS and the .deb, as GitHub's machines built and
-// started them from this commit. A dry run takes them if such a run is there and does not start one.
-function otherSystems() {
-  if (windowsOnly) return [];
-  const runs = () =>
-    JSON.parse(
-      run(gh, [
-        'run',
-        'list',
-        '--workflow',
-        'package.yml',
-        '--commit',
-        commit,
-        '--json',
-        'databaseId,status,conclusion',
-      ]),
-    );
-  let found = runs().find((item) => item.status !== 'completed' || item.conclusion === 'success');
-  if (!found && dryRun) {
-    console.log('No package run on GitHub for this commit: macOS and Linux are left out.');
-    return [];
-  }
-  if (!found) {
-    run(gh, ['workflow', 'run', 'package.yml', '--ref', 'main']);
-    for (let attempt = 0; !found && attempt < 30; attempt++) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5_000);
-      found = runs().find((item) => item.status !== 'completed');
-    }
-    if (!found) throw new Error('The package workflow did not start on GitHub.');
-  }
-  console.log(`Taking the macOS and Linux packages from GitHub run ${found.databaseId}.`);
-  // Fails when the run does: a release does not go out with a package that did not start.
-  run(gh, ['run', 'watch', String(found.databaseId), '--exit-status', '--interval', '30'], {
-    stdio: 'inherit',
-  });
-  const names = [];
-  for (const artifact of ['macos-arm64', 'macos-x64', 'linux-x64']) {
-    const directory = join(output, artifact);
-    run(gh, ['run', 'download', String(found.databaseId), '--name', artifact, '--dir', directory], {
-      stdio: 'inherit',
-    });
-    const packages = readdirSync(directory).filter((name) =>
-      new RegExp(`^CC-Desk-Tunnel-${version.replaceAll('.', '\\.')}-.+\\.(dmg|deb)$`).test(name),
-    );
-    if (packages.length !== 1)
-      throw new Error(`Expected one package of version ${version} in ${artifact}.`);
-    copyFileSync(join(directory, packages[0]), join(output, packages[0]));
-    rmSync(directory, { recursive: true, force: true });
-    names.push(packages[0]);
-  }
-  return names;
-}
-const others = otherSystems();
-
-const files = [installer, server, ...others].map((name) => ({
+const local = [installer, server].map((name) => ({
   name,
   size: statSync(join(output, name)).size,
   sha256: createHash('sha256')
@@ -180,25 +118,84 @@ const files = [installer, server, ...others].map((name) => ({
     .digest('hex'),
 }));
 // release.json is what programs read; SHA256SUMS is the same hashes for `sha256sum -c`.
-writeFileSync(
-  join(output, 'release.json'),
-  JSON.stringify({ version, protocol, runtime, commit, files }, null, 2) + '\n',
-);
-writeFileSync(
-  join(output, 'SHA256SUMS'),
-  files.map((file) => `${file.sha256}  ${file.name}\n`).join(''),
-);
-writeFileSync(join(output, 'notes.md'), notes(others) + '\n');
-for (const file of files) console.log(`${file.sha256}  ${file.name}  (${file.size} bytes)`);
+function describe(files) {
+  writeFileSync(
+    join(output, 'release.json'),
+    JSON.stringify({ version, protocol, runtime, commit, files }, null, 2) + '\n',
+  );
+  writeFileSync(
+    join(output, 'SHA256SUMS'),
+    files.map((file) => `${file.sha256}  ${file.name}\n`).join(''),
+  );
+  const others = files.slice(local.length).map((file) => file.name);
+  writeFileSync(join(output, 'notes.md'), notes(others) + '\n');
+  for (const file of files) console.log(`${file.sha256}  ${file.name}  (${file.size} bytes)`);
+}
+
+// The packages of the other systems go from GitHub's machines straight to the release: the `package`
+// workflow builds and starts them from this commit and attaches the disk images for macOS and the .deb to
+// the draft. Their sizes and hashes are then read from the release itself.
+function otherSystems() {
+  const wait = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  const runs = () =>
+    JSON.parse(
+      run(gh, [
+        'run',
+        'list',
+        '--workflow',
+        'package.yml',
+        '--event',
+        'workflow_dispatch',
+        '--commit',
+        commit,
+        '--json',
+        'databaseId,createdAt',
+      ]),
+    );
+  const before = new Set(runs().map((item) => item.databaseId));
+  run(gh, ['workflow', 'run', 'package.yml', '--ref', 'main', '-f', `release=${tag}`]);
+  let started;
+  for (let attempt = 0; !started && attempt < 30; attempt++) {
+    wait(5_000);
+    started = runs().find((item) => !before.has(item.databaseId));
+  }
+  if (!started) throw new Error('The package workflow did not start on GitHub.');
+  console.log(`GitHub run ${started.databaseId} builds the macOS and Linux packages.`);
+  // Fails when the run does: a release does not go out with a package that did not start.
+  run(gh, ['run', 'watch', String(started.databaseId), '--exit-status', '--interval', '30'], {
+    stdio: 'inherit',
+  });
+  const id = run(gh, ['release', 'view', tag, '--json', 'databaseId', '--jq', '.databaseId']);
+  const assets = JSON.parse(
+    run(gh, ['api', `repos/{owner}/{repo}/releases/${id.trim()}`, '--jq', '.assets']),
+  );
+  const pattern = new RegExp(
+    `^CC-Desk-Tunnel-${version.replaceAll('.', '\\.')}-(mac-arm64\\.dmg|mac-x64\\.dmg|linux-amd64\\.deb)$`,
+  );
+  const files = assets
+    .filter((asset) => pattern.test(asset.name))
+    .map((asset) => ({
+      name: asset.name,
+      size: asset.size,
+      sha256: /^sha256:([0-9a-f]{64})$/.exec(asset.digest ?? '')?.[1],
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  if (files.length !== 3 || files.some((file) => !file.sha256))
+    throw new Error(`The draft ${tag} does not hold the three packages with their hashes.`);
+  return files;
+}
 
 if (dryRun) {
-  console.log(`Built ${tag} in ${output}; nothing uploaded.`);
+  describe(local);
+  console.log(`Built ${tag} in ${output}; nothing uploaded, macOS and Linux left to GitHub.`);
 } else {
+  // Always a draft first: what is published is complete.
+  describe(local);
   const url = run(gh, [
     'release',
     'create',
     tag,
-    ...(publish ? [] : ['--draft']),
+    '--draft',
     ...(prerelease ? ['--prerelease', '--latest=false'] : []),
     '--target',
     commit,
@@ -206,9 +203,24 @@ if (dryRun) {
     `CC Desk Tunnel ${version}`,
     '--notes-file',
     join(output, 'notes.md'),
-    ...[installer, server, ...others, 'release.json', 'SHA256SUMS'].map((name) =>
-      join(output, name),
-    ),
+    ...[installer, server].map((name) => join(output, name)),
   ]).trim();
+  try {
+    describe(windowsOnly ? local : [...local, ...otherSystems()]);
+  } catch (error) {
+    console.log(
+      `The draft ${url} is left as it is. Delete it (gh release delete ${tag}) to try again.`,
+    );
+    throw error;
+  }
+  run(gh, ['release', 'upload', tag, join(output, 'release.json'), join(output, 'SHA256SUMS')]);
+  run(gh, [
+    'release',
+    'edit',
+    tag,
+    '--notes-file',
+    join(output, 'notes.md'),
+    ...(publish ? ['--draft=false'] : []),
+  ]);
   console.log(`${publish ? 'Published' : 'Draft'} release: ${url}`);
 }
