@@ -1,7 +1,7 @@
 # Builds the release files on GitHub's machines instead of a maintainer's own: the Windows installer, the
 # macOS and Linux packages and the server bundle, each client started as a check. This is where a release
 # is built: the release script names its draft in `release`, and the files are attached to it with their
-# hashes. Nothing is signed with a certificate. Otherwise the files are kept with the run for 14 days; it
+# hashes. Nothing is signed with a certificate. Otherwise the files are kept with the run for 3 days; it
 # runs when asked for, and by itself when what does the packaging changes on a dev branch.
 name: package
 on:
@@ -35,6 +35,19 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      # Electron and the packaging tools, kept from one run to the next: they are fetched from release pages
+      # that now and then time out, and change only with the versions the lock file names.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/AppData/Local/electron/Cache
+            ~/AppData/Local/electron-builder/Cache
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+            ~/.cache/electron
+            ~/.cache/electron-builder
+            .tools
+          key: packaging-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'scripts/prepare-windows.ps1') }}
       - run: npm ci
       - run: npm run setup:desktop || (sleep 60 && npm run setup:desktop)
         shell: bash
@@ -49,7 +62,7 @@ jobs:
           name: windows-x64
           path: artifacts/windows/*.exe
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 3
   # One package for each kind of Mac, each built and started on a machine of its own kind. The picture is of
   # the window as the system draws it there.
   macos:
@@ -67,6 +80,19 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      # Electron and the packaging tools, kept from one run to the next: they are fetched from release pages
+      # that now and then time out, and change only with the versions the lock file names.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/AppData/Local/electron/Cache
+            ~/AppData/Local/electron-builder/Cache
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+            ~/.cache/electron
+            ~/.cache/electron-builder
+            .tools
+          key: packaging-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'scripts/prepare-windows.ps1') }}
       - run: npm ci
       - run: npm run setup:desktop || (sleep 60 && npm run setup:desktop)
         shell: bash
@@ -81,14 +107,14 @@ jobs:
             artifacts/macos/*.dmg
             artifacts/macos/*.zip
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 3
       # By itself, so that it can be looked at without fetching the package.
       - uses: actions/upload-artifact@v4
         with:
           name: macos-${{ matrix.arch }}-window
           path: artifacts/macos/*.png
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 3
   # The .deb, built and then installed the way a user installs it, and started from where it was installed:
   # that is where its sandbox and what it depends on are in place. A virtual screen stands in for a desktop.
   linux:
@@ -101,6 +127,19 @@ jobs:
           node-version: 24
           cache: npm
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb imagemagick
+      # Electron and the packaging tools, kept from one run to the next: they are fetched from release pages
+      # that now and then time out, and change only with the versions the lock file names.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/AppData/Local/electron/Cache
+            ~/AppData/Local/electron-builder/Cache
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+            ~/.cache/electron
+            ~/.cache/electron-builder
+            .tools
+          key: packaging-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'scripts/prepare-windows.ps1') }}
       - run: npm ci
       - run: npm run setup:desktop || (sleep 60 && npm run setup:desktop)
         shell: bash
@@ -115,13 +154,13 @@ jobs:
           name: linux-x64
           path: artifacts/linux/*.deb
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 3
       - uses: actions/upload-artifact@v4
         with:
           name: linux-x64-window
           path: artifacts/linux/*.png
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 3
   server:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -139,7 +178,7 @@ jobs:
           name: server
           path: artifacts/server/*.tar.gz
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 3
   # For the release script: every file of the release goes from here to the draft it made, described by
   # release.json and SHA256SUMS, without passing through a maintainer's computer. The only job that may
   # write to the repository.
