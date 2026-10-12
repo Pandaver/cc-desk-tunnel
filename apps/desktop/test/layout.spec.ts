@@ -520,6 +520,27 @@ test('approval modes are described where they are chosen, and models sit behind 
   await page.getByRole('button', { name: '设置与账号', exact: true }).click();
   await page.getByRole('menuitem', { name: '设置', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Claude Code 设置' })).toBeVisible();
+
+  // The mode that asks about nothing: offered once allowed in the settings, chosen only after a warning.
+  await page
+    .getByRole('navigation', { name: '设置分类' })
+    .getByRole('button', { name: '常规', exact: true })
+    .click();
+  await page.getByRole('switch', { name: '允许绕过权限', exact: true }).click();
+  await page.getByRole('button', { name: '会话', exact: true }).click();
+  await trigger.click();
+  await expect(menu.getByRole('menuitemradio')).toHaveCount(5);
+  await menu.getByRole('menuitemradio', { name: '绕过权限', exact: true }).click();
+  const warning = page.getByRole('alertdialog', { name: '确认绕过权限' });
+  await expect(warning).toContainText('在你的电脑上执行任意命令');
+  await shot(page, '12-绕过权限确认');
+  await warning.getByRole('button', { name: '取消', exact: true }).click();
+  await expect(trigger).toContainText('手动审批');
+  await menu.getByRole('menuitemradio', { name: '绕过权限', exact: true }).click();
+  await warning.getByRole('button', { name: '绕过权限', exact: true }).click();
+  await expect(trigger).toContainText('绕过权限');
+  await expect(trigger).toHaveClass(/danger/);
+  expect(modes).toEqual(['default', 'bypassPermissions']);
 });
 
 test('Electron: frameless window, the project branch, files by path and window settings', async () => {

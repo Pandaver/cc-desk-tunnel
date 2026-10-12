@@ -4,7 +4,14 @@ export const PROTOCOL_VERSION = 16;
 export const MAX_FRAME_BYTES = 256 * 1024;
 const id = z.uuid();
 const timestamp = z.iso.datetime();
-export const permissionModeSchema = z.enum(['auto', 'default', 'plan', 'acceptEdits']);
+// `bypassPermissions` asks about nothing at all; the client offers it only once the user allowed that.
+export const permissionModeSchema = z.enum([
+  'auto',
+  'default',
+  'plan',
+  'acceptEdits',
+  'bypassPermissions',
+]);
 export type PermissionMode = z.infer<typeof permissionModeSchema>;
 export const effortSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
 export type Effort = z.infer<typeof effortSchema>;

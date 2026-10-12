@@ -21,6 +21,8 @@ export type Prefs = {
   // `keys` holds only what the user changed, by action; an empty combination means none.
   shortcuts: { enabled: boolean; keys: Record<string, string> };
   connection: ConnectionWaits;
+  // Whether the approval modes include the one that asks about nothing.
+  bypassPermissions: boolean;
 };
 
 const storageKey = 'proxy-prefs';
@@ -42,6 +44,7 @@ const defaults: Prefs = {
   },
   shortcuts: { enabled: true, keys: {} },
   connection: connectionWaits,
+  bypassPermissions: false,
 };
 
 function read(): Prefs {
@@ -76,6 +79,7 @@ function read(): Prefs {
           ];
         }),
       ) as ConnectionWaits,
+      bypassPermissions: saved.bypassPermissions === true,
     };
   } catch {
     return defaults;

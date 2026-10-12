@@ -136,6 +136,8 @@ export async function runClaude(
         abortController,
         includePartialMessages: true,
         permissionMode: run.permissionMode,
+        // The SDK takes the mode that asks about nothing only with this said as well.
+        allowDangerouslySkipPermissions: run.permissionMode === 'bypassPermissions',
         persistSession: true,
         systemPrompt: {
           type: 'preset',

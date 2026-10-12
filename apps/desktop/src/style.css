@@ -282,6 +282,12 @@ button.chip:hover:not(:disabled) {
 .chip.quiet {
   background: var(--surface-2);
 }
+/* The approval mode that asks about nothing must not look like the others. */
+.chip.danger,
+button.chip.danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
 .brand {
   display: flex;
   align-items: center;
@@ -940,8 +946,35 @@ html[data-platform='darwin'] .titlebar {
 .menu button:disabled {
   color: var(--faint);
 }
-.menu button.danger:not(:disabled) {
+.menu button.danger:not(:disabled),
+.permission-menu button.danger,
+.permission-menu button.danger small {
   color: var(--danger);
+}
+.permission-menu button.danger > svg {
+  color: inherit;
+}
+.permission-confirm {
+  margin: 0;
+  padding: 6px 10px 10px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.permission-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 6px 4px;
+}
+.permission-menu .permission-confirm-actions button {
+  width: auto;
+  border: 1px solid var(--line);
+  padding: 5px 12px;
+}
+.permission-menu .permission-confirm-actions button.danger {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: white;
 }
 .menu button > svg,
 .permission-menu button > svg {

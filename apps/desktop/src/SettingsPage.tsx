@@ -154,7 +154,7 @@ function General({
   chooseWorkspace: (reset: boolean) => void;
 }) {
   const [closeToTray, setCloseToTray] = useState<boolean | null>(null);
-  const { connection } = usePrefs();
+  const { connection, bypassPermissions } = usePrefs();
   useEffect(() => {
     void window.desktop?.windowSettings().then((values) => setCloseToTray(values.closeToTray));
   }, []);
@@ -253,6 +253,19 @@ function General({
             </div>
           </>
         )}
+        <h2 className="page-heading">审批</h2>
+        <div className="card">
+          <Row
+            title="允许绕过权限"
+            detail="审批模式里多出“绕过权限”：Claude 做任何事都不再询问，包括在你的电脑上执行命令。只建议在测试机或虚拟机里打开"
+          >
+            <Switch
+              label="允许绕过权限"
+              checked={bypassPermissions}
+              onChange={(value) => setPrefs((prefs) => ({ ...prefs, bypassPermissions: value }))}
+            />
+          </Row>
+        </div>
       </div>
     </section>
   );

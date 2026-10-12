@@ -109,6 +109,14 @@ test('control terminal launches the official CLI directly with remote guidance a
     )[1],
     'manual',
   );
+  assert.equal(
+    terminalArguments(
+      { executable: 'claude' },
+      { projectPath: 'D:\\test', permissionMode: 'bypassPermissions' } as Session,
+      { configPath: '/ssh' },
+    )[1],
+    'bypassPermissions',
+  );
 });
 
 test('terminal provider environment stays inside the child process and does not mutate the proxy', (t) => {
