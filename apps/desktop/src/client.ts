@@ -38,6 +38,37 @@ type NewCommand = Command extends infer C
     ? Omit<C, 'requestId'>
     : never
   : never;
+// Losing a reply says nothing about whether the operation reached the service. Keep that uncertainty
+// separate from the current connection state, which can recover while the warning is still displayed.
+export class RequestInterruptedError extends Error {
+  readonly readOnly: boolean;
+  constructor(type: Command['type']) {
+    const readOnly = [
+      'session.subscribe',
+      'session.history',
+      'session.status',
+      'account.status',
+      'usage.summary',
+      'usage.query',
+      'settings.get',
+      'service.update.check',
+    ].includes(type);
+    super(
+      readOnly
+        ? '连接中断，上次读取未完成；连接恢复后可重试。'
+        : '连接中断；上次请求的确认未收到。任务可能仍在运行，请查看会话历史确认结果；不会自动重发。',
+    );
+    this.name = 'RequestInterruptedError';
+    this.readOnly = readOnly;
+  }
+  describe(connected: boolean) {
+    if (!connected) return this.message;
+    return this.readOnly
+      ? '连接已恢复；上次读取未完成，请重试。'
+      : '连接已恢复；上次请求的确认因断线未收到。任务可能仍在运行，请查看会话历史确认结果；不会自动重发。';
+  }
+}
+
 export type HistoryState = {
   firstSequence: number;
   lastSequence: number;
@@ -133,6 +164,7 @@ export class ProxyClient {
       resolve: (response: Response) => void;
       reject: (error: Error) => void;
       timer: ReturnType<typeof setTimeout>;
+      type: Command['type'];
     }
   >();
   getSnapshot = () => this.state;
@@ -448,7 +480,7 @@ export class ProxyClient {
   private rejectPending() {
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
-      request.reject(new Error('连接中断；请以恢复后的历史确认提交结果，不会自动重发。'));
+      request.reject(new RequestInterruptedError(request.type));
     }
     this.pending.clear();
   }
@@ -632,7 +664,7 @@ export class ProxyClient {
           ? 30000
           : 10000,
       );
-      this.pending.set(requestId, { resolve, reject, timer });
+      this.pending.set(requestId, { resolve, reject, timer, type: command.type });
       this.socket!.send(JSON.stringify({ ...command, requestId }));
     });
   }
