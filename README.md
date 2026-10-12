@@ -46,7 +46,7 @@ Claude Code（简称 CC）运行在一台 Linux 服务器上；项目代码、�
 
 ## 快速开始
 
-需要：一台有公网 IP 或域名的 Linux 服务器（x86_64，推荐 Ubuntu，已安装 Docker），和一台 Windows 10 / 11 x64 电脑。
+需要：一台有公网 IP 或域名的 Linux 服务器（x86_64；arm64 为试验性支持。推荐 Ubuntu，已安装 Docker），和一台 Windows 10 / 11 x64 电脑。
 
 **服务器不需要高配。** 编译、测试和各种开发工具都在 Windows 本机运行，服务器上只有 Claude Code 和一个轻量的代理服务，2 核 1 GB 内存的入门机型就能运行。只有打算让 Claude 直接在服务器上编译或跑重负载时，才需要按那些任务选配置。
 
