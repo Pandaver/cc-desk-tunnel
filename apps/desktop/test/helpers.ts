@@ -44,7 +44,7 @@ export async function search(page: Page, text: string) {
 export async function createSession(page: Page, prefix: string) {
   const title = `${prefix} ${Date.now()}`;
   await page.getByRole('button', { name: '添加项目', exact: true }).click();
-  await page.getByLabel('Windows 项目目录').fill('D:\\工作\\中文项目');
+  await page.getByLabel('本机项目目录').fill('D:\\工作\\中文项目');
   await page.getByRole('button', { name: '添加', exact: true }).click();
   await expect(page.getByRole('dialog')).not.toBeVisible();
   await page.getByRole('button', { name: '新建会话 · D:\\工作\\中文项目', exact: true }).click();

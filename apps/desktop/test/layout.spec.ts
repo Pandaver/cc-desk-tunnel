@@ -215,7 +215,7 @@ test('a question is answered with its choices, and a session or a whole project 
   // The session moves to another project from the chip above the message box.
   const other = 'D:\\工作\\另一个项目';
   await page.getByRole('button', { name: '添加项目', exact: true }).click();
-  await page.getByLabel('Windows 项目目录').fill(other);
+  await page.getByLabel('本机项目目录').fill(other);
   await page.getByRole('button', { name: '添加', exact: true }).click();
   const chip = page.getByRole('button', { name: '会话所在的项目', exact: true });
   await expect(chip).toContainText('中文项目');
@@ -253,7 +253,7 @@ test('a question is answered with its choices, and a session or a whole project 
   const moved = 'E:\\搬家后\\另一个项目';
   await page.getByRole('button', { name: `项目操作 · ${other}`, exact: true }).click();
   await page.getByRole('menuitem', { name: '更改文件夹…', exact: true }).click();
-  await page.getByRole('dialog').getByLabel('Windows 项目目录').fill(moved);
+  await page.getByRole('dialog').getByLabel('本机项目目录').fill(moved);
   await page.getByRole('dialog').getByRole('button', { name: '更改', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(chip).toHaveAttribute('title', moved);
