@@ -389,3 +389,35 @@ test('the prompt lets the model look at a picture of the device by copying that 
   assert.match(prompt, /copy that one file with scp to a temporary file on this host/);
   assert.match(prompt, /Do not use this host's Read\/Edit tools on project files/);
 });
+
+test('a device with a POSIX shell gets a script command and a prompt of its own', () => {
+  const files = sshConfig(
+    '/tmp/private',
+    32123,
+    'device',
+    'ssh-ed25519 AAAATEST',
+    'linux',
+    15,
+    'darwin',
+  );
+  assert.match(files.config, /\n {2}RemoteCommand exec "\$CC_DESK_TUNNEL_SHELL" -s\n/);
+  assert.doesNotMatch(files.config, /CC_DESK_TUNNEL_PWSH/);
+  const ssh = { configPath: '/private/ssh_config' };
+  const prompt = remotePrompt("/Users/me/my project/it's", ssh, 'session', 'darwin');
+  assert.match(prompt, /Device: macOS\. Project directory: "\/Users\/me\/my project\/it's"\./);
+  assert.match(prompt, /ssh -F "\/private\/ssh_config" device-script <<'PS'/);
+  assert.match(prompt, /Begin it with cd -- '\/Users\/me\/my project\/it'\\''s'\./);
+  assert.match(prompt, /the project directory is "device:\/Users\/me\/my project\/it's"/);
+  assert.match(prompt, /background processes included/);
+  assert.doesNotMatch(prompt, /PowerShell|cmd\.exe|Windows|Set-Location/);
+  // Everything that does not depend on the system reads the same on both, line for line.
+  const windows = remotePrompt('D:\\work', ssh, 'session').split('\n');
+  const mac = remotePrompt('/work', ssh, 'session', 'darwin').split('\n');
+  assert.equal(windows.length, mac.length);
+  assert.deepEqual(
+    windows.flatMap((line, index) => (line === mac[index] ? [] : [index])),
+    [1, 3, 4, 7],
+  );
+  // No system named is Windows, as it was before others were supported.
+  assert.equal(remotePrompt('D:\\work', ssh, 'session', 'win32'), windows.join('\n'));
+});

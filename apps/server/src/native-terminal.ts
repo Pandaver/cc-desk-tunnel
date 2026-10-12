@@ -1,5 +1,6 @@
 import { spawn as spawnPty } from 'node-pty';
 import type { IPty } from 'node-pty';
+import { platformOf } from '@cc-desk-tunnel/protocol';
 import type { Session } from '@cc-desk-tunnel/protocol';
 import type { ClaudeOptions } from './claude.ts';
 import { remotePrompt } from './claude.ts';
@@ -43,7 +44,7 @@ export function terminalArguments(options: ClaudeOptions, session: Session, ssh:
     '--permission-mode',
     session.permissionMode === 'default' ? 'manual' : session.permissionMode,
     '--append-system-prompt',
-    remotePrompt(session.projectPath, ssh, session.id),
+    remotePrompt(session.projectPath, ssh, session.id, platformOf(session.device)),
     ...((session.model ?? options.model) ? ['--model', session.model ?? options.model!] : []),
     ...(session.effort ? ['--effort', session.effort] : []),
     ...(options.settingsPath ? ['--settings', options.settingsPath] : []),

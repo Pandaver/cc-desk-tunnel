@@ -7,7 +7,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { setTimeout as delay } from 'node:timers/promises';
 import { createWebSocketStream } from 'ws';
 import type { WebSocket } from 'ws';
-import type { ServerMessage, TunnelCredentials } from '@cc-desk-tunnel/protocol';
+import type { DevicePlatform, ServerMessage, TunnelCredentials } from '@cc-desk-tunnel/protocol';
 
 export type TunnelOptions = {
   // How long an SSH connection waits for the device to open its channel before it is dropped.
@@ -52,6 +52,11 @@ const SCRIPT_FROM_STDIN =
   '$PSStyle.OutputRendering=[Management.Automation.OutputRendering]::PlainText;$s=[Console]::In.ReadToEnd();' +
   '$global:LASTEXITCODE=$null;& ([scriptblock]::Create($s));if($null -ne $LASTEXITCODE){exit $LASTEXITCODE};exit [int](-not $?)';
 export const SCRIPT_COMMAND = `"%CC_DESK_TUNNEL_PWSH%" -NoLogo -NoProfile -NonInteractive -Command "${SCRIPT_FROM_STDIN}"`;
+// The same on a device with a POSIX shell: the user's own, which the device's SSH service names in a variable
+// as well, reads the script from standard input and leaves with the status of its last command.
+const POSIX_SCRIPT_COMMAND = 'exec "$CC_DESK_TUNNEL_SHELL" -s';
+export const scriptCommand = (device: DevicePlatform) =>
+  device === 'win32' ? SCRIPT_COMMAND : POSIX_SCRIPT_COMMAND;
 
 // Runs a script the way the system prompt tells Claude to.
 export function sshProbe(configPath: string) {
@@ -62,12 +67,13 @@ export function sshProbe(configPath: string) {
       { timeout: 20000, maxBuffer: 65536 },
       (error, stdout) => {
         if (error || !stdout.includes('CC_DESK_TUNNEL_SSH_READY'))
-          reject(new Error('Windows SSH / PowerShell probe failed.'));
+          reject(new Error('Device SSH probe failed.'));
         else resolve();
       },
     );
     child.stdin?.on('error', () => {});
-    child.stdin?.end("Write-Output 'CC_DESK_TUNNEL_SSH_READY'\n");
+    // `echo` is a command of PowerShell and of the POSIX shells alike.
+    child.stdin?.end('echo CC_DESK_TUNNEL_SSH_READY\n');
   });
 }
 // Where the commands of one device share an SSH connection, or nothing when they cannot: the `ssh` of Windows,
@@ -85,6 +91,8 @@ export function sshConfig(
   platform = process.platform,
   // Longer where a connection may first wait for the device to come back: see `Door`.
   connectSeconds = 15,
+  // The system of the device, which decides what its scripts are run by.
+  device: DevicePlatform = 'win32',
 ) {
   if (directory.includes('\n') || directory.includes('"'))
     throw new Error('Unsupported data directory');
@@ -95,7 +103,7 @@ export function sshConfig(
       // The same computer under a name that takes a script instead of a command. `ssh` reads % in this
       // option as its own, so the device's variable is written with two.
       'Host device-script',
-      `  RemoteCommand ${SCRIPT_COMMAND.replaceAll('%', '%%')}`,
+      `  RemoteCommand ${scriptCommand(device).replaceAll('%', '%%')}`,
       '  RequestTTY no',
       // `device` is the name the system prompt gives; conversations begun before 0.2.11 know it as `windows`.
       'Host device windows device-script',
@@ -148,6 +156,7 @@ export class Tunnel {
   closePromise?: Promise<void>;
   // What the device registered with, once its SSH service answered through this tunnel.
   credentials?: TunnelCredentials;
+  platform: DevicePlatform = 'win32';
   private secret = randomBytes(32).toString('base64url');
   private pairMs: number;
   private probe: NonNullable<TunnelOptions['probe']>;
@@ -227,14 +236,18 @@ export class Tunnel {
     splice(socket, channel);
     return true;
   }
-  async accept(credentials: TunnelCredentials) {
+  async accept(credentials: TunnelCredentials, platform: DevicePlatform = 'win32') {
     if (this.ssh || credentials.connectionId !== this.id || this.controller.signal.aborted)
       throw new Error('Inactive SSH registration');
+    this.platform = platform;
     const files = sshConfig(
       this.directory,
       this.port,
       credentials.username,
       credentials.hostPublicKey,
+      process.platform,
+      15,
+      platform,
     );
     const configPath = join(this.directory, 'ssh_config');
     writeFileSync(join(this.directory, 'identity'), credentials.privateKey, { mode: 0o600 });
@@ -252,7 +265,7 @@ export class Tunnel {
         await delay(300, undefined, { signal: this.controller.signal });
       }
     }
-    throw new Error('Windows SSH readiness timed out');
+    throw new Error('Device SSH readiness timed out');
   }
   // Every SSH connection ends with the tunnel: those still waiting and those in use.
   close() {
@@ -342,6 +355,7 @@ export class Door {
       hostPublicKey,
       process.platform,
       Math.ceil(this.holdMs / 1000) + 15,
+      tunnel.platform,
     );
     const write = (name: string, text: string) => {
       const next = join(this.directory, `${name}.${randomBytes(6).toString('hex')}`);
