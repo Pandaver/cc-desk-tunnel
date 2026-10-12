@@ -42,6 +42,7 @@ async function connected(t) {
     dataDir,
     tls,
     claude: { executable: join(directory, 'no-cli') },
+    tunnel: {},
   });
   const port = Number(new URL(await server.listen(0)).port);
   const schedules = join(home, 'schedules.json');
