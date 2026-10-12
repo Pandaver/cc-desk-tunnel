@@ -127,3 +127,31 @@ test('a session from before computers were told apart becomes that of the first 
   );
   assert.equal(store.get(session.id).session.device?.name, '新名字');
 });
+
+test('a session taken to a computer of another system is told how that one runs scripts', (t) => {
+  const { store, session } = fixture(t);
+  ran(store, session.id);
+  assert.equal(store.promptValues(session.id).platform, 'win32');
+  const mac = { id: randomUUID(), name: 'MacBook', platform: 'darwin' as const };
+  store.move(session.id, '/Users/me/项目', mac);
+  const notice = store.notice(session.id);
+  assert.match(notice, /From now on the device is that computer: macOS\./);
+  assert.match(notice, /is now "\/Users\/me\/项目" \(it was "D:\\\\项目 甲"\)/);
+  assert.match(notice, /replaces what was said of scripts and command lines/);
+  assert.match(notice, /Begin it with cd -- '\/Users\/me\/项目'\./);
+  assert.doesNotMatch(notice, /PowerShell/);
+  assert.equal(store.notice(session.id), '');
+  // The prompt stays what it was until a compaction: only then does it describe the Mac.
+  assert.deepEqual(store.promptValues(session.id), {
+    projectPath: 'D:\\项目 甲',
+    platform: 'win32',
+  });
+  // A move on the Mac says nothing of systems again; the way back to Windows does.
+  store.move(session.id, '/Users/me/别处', mac);
+  assert.doesNotMatch(store.notice(session.id), /scripts and command lines/);
+  store.move(session.id, 'D:\\项目 甲', device);
+  assert.match(store.notice(session.id), /that computer: Windows\..*Set-Location -LiteralPath/s);
+  store.compacted(session.id);
+  store.move(session.id, '/Users/me/项目', mac);
+  assert.equal(store.promptValues(session.id).platform, 'darwin');
+});

@@ -8,9 +8,14 @@ import { pipeline } from 'node:stream/promises';
 import { WebSocket, WebSocketServer } from 'ws';
 import { serverMessageSchema, MAX_FRAME_BYTES } from '@cc-desk-tunnel/protocol';
 import { startWindowsSsh } from './windows-ssh.mjs';
+import { startPosixSsh } from './posix-ssh.mjs';
 import { openChannels } from './tunnel-channels.mjs';
 import { httpProxy, openSocket } from './system-proxy.mjs';
 import { channelFailure, controlFailure, passing } from './connect-errors.mjs';
+
+// The SSH service of a connection. The two are started and closed alike and give the same credentials; what
+// is behind them differs with the system: see each module.
+export const startLocalSsh = process.platform === 'win32' ? startWindowsSsh : startPosixSsh;
 
 export function certificateMatches(observed, trusted) {
   if (typeof trusted !== 'string' || typeof observed !== 'string') return false;
@@ -265,6 +270,11 @@ export async function openProxyBridge(
           message.tunnel = true;
           token = String(message.token);
         }
+        // The system this computer runs is said here, not by the page. Windows is what none means.
+        if (message.type === 'device') {
+          delete message.platform;
+          if (process.platform !== 'win32') message.platform = process.platform;
+        }
         if (verified && remote.readyState === WebSocket.OPEN) remote.send(JSON.stringify(message));
         else queue.push(JSON.stringify(message));
       } catch {
@@ -290,7 +300,7 @@ export async function openProxyBridge(
           return;
         }
         offerReceived = true;
-        current.preparing = startWindowsSsh(
+        current.preparing = startLocalSsh(
           message.connectionId,
           binaries,
           current.controller.signal,
@@ -382,6 +392,9 @@ export async function openProxyBridge(
   // Fetches the installer the service announced and accepts it only if its hash matches. Works after the
   // connection closed, as it does when the service refused this client's version.
   async function downloadInstaller(directory) {
+    // The service holds the Windows installer only.
+    if (process.platform !== 'win32')
+      throw new Error('这个系统上的客户端不能在应用内升级，请到发布页下载新版本。');
     if (!release || !token) throw new Error('服务端没有提供客户端安装包。');
     const expected = release;
     const target = join(directory, `CC-Desk-Tunnel-Setup-${expected.version}-x64.exe`);

@@ -1,14 +1,22 @@
-// Windows paths compare case-insensitively and may arrive with either separator.
+// A path tells its own system: a Windows one begins with a drive letter or two backslashes, anything else is
+// a POSIX one. Sessions of both kinds can be in one list, each from the computer it is on.
+const isWindowsPath = (path: string) => /^[a-z]:[\\/]|^\\\\/i.test(path);
+// Windows paths compare case-insensitively and may arrive with either separator; a POSIX path is taken as
+// written, where a backslash is a character of a name like any other.
 export const pathKey = (path: string) =>
-  path.replaceAll('/', '\\').replace(/\\+$/, '').toLowerCase();
+  isWindowsPath(path)
+    ? path.replaceAll('/', '\\').replace(/\\+$/, '').toLowerCase()
+    : path.replace(/\/+$/, '') || '/';
 export const folderName = (path: string) =>
   path
-    .replace(/[\\/]+$/, '')
-    .split(/[\\/]/)
+    .split(isWindowsPath(path) ? /[\\/]/ : '/')
+    .filter(Boolean)
     .at(-1) || path;
 // Whether a path lies under one of the folders that hold the sessions without a project.
 export const isInside = (path: string, roots: string[]) =>
-  roots.some((root) => pathKey(path).startsWith(`${pathKey(root)}\\`));
+  roots.some((root) =>
+    pathKey(path).startsWith(`${pathKey(root)}${isWindowsPath(root) ? '\\' : '/'}`),
+  );
 // Dotted numeric versions, e.g. 0.10.1 is newer than 0.9.0.
 export function isNewer(candidate: string, current: string) {
   const [a, b] = [candidate, current].map((version) => version.split('.').map(Number));
@@ -26,6 +34,4 @@ export function ago(time: number) {
   return new Date(time).toLocaleDateString('zh-CN');
 }
 export const withProject = (projects: string[], path: string) =>
-  projects.some((item) => item.toLowerCase() === path.toLowerCase())
-    ? projects
-    : [...projects, path];
+  projects.some((item) => pathKey(item) === pathKey(path)) ? projects : [...projects, path];

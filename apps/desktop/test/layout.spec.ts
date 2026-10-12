@@ -159,6 +159,12 @@ test('pages, side column, menus, pins, export, settings and the notice list', as
   await page.getByRole('button', { name: '允许', exact: true }).click();
   await settled(page);
   await expect(bell).toHaveAccessibleName('通知（2 条未读）');
+  // Back in front, the session on screen has shown what its notices say: they stay in the list, read.
+  await page.evaluate(() => {
+    document.hasFocus = () => true;
+    window.dispatchEvent(new Event('focus'));
+  });
+  await expect(bell).toHaveAccessibleName('通知');
   await bell.click();
   const notices = page.getByRole('dialog', { name: '通知' });
   await expect(notices.locator('.notice strong')).toHaveText(['任务完成', '等待审批']);
@@ -215,7 +221,7 @@ test('a question is answered with its choices, and a session or a whole project 
   // The session moves to another project from the chip above the message box.
   const other = 'D:\\工作\\另一个项目';
   await page.getByRole('button', { name: '添加项目', exact: true }).click();
-  await page.getByLabel('Windows 项目目录').fill(other);
+  await page.getByLabel('本机项目目录').fill(other);
   await page.getByRole('button', { name: '添加', exact: true }).click();
   const chip = page.getByRole('button', { name: '会话所在的项目', exact: true });
   await expect(chip).toContainText('中文项目');
@@ -253,7 +259,7 @@ test('a question is answered with its choices, and a session or a whole project 
   const moved = 'E:\\搬家后\\另一个项目';
   await page.getByRole('button', { name: `项目操作 · ${other}`, exact: true }).click();
   await page.getByRole('menuitem', { name: '更改文件夹…', exact: true }).click();
-  await page.getByRole('dialog').getByLabel('Windows 项目目录').fill(moved);
+  await page.getByRole('dialog').getByLabel('本机项目目录').fill(moved);
   await page.getByRole('dialog').getByRole('button', { name: '更改', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(chip).toHaveAttribute('title', moved);
@@ -514,6 +520,27 @@ test('approval modes are described where they are chosen, and models sit behind 
   await page.getByRole('button', { name: '设置与账号', exact: true }).click();
   await page.getByRole('menuitem', { name: '设置', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Claude Code 设置' })).toBeVisible();
+
+  // The mode that asks about nothing: offered once allowed in the settings, chosen only after a warning.
+  await page
+    .getByRole('navigation', { name: '设置分类' })
+    .getByRole('button', { name: '常规', exact: true })
+    .click();
+  await page.getByRole('switch', { name: '允许绕过权限', exact: true }).click();
+  await page.getByRole('button', { name: '会话', exact: true }).click();
+  await trigger.click();
+  await expect(menu.getByRole('menuitemradio')).toHaveCount(5);
+  await menu.getByRole('menuitemradio', { name: '绕过权限', exact: true }).click();
+  const warning = page.getByRole('alertdialog', { name: '确认绕过权限' });
+  await expect(warning).toContainText('在你的电脑上执行任意命令');
+  await shot(page, '12-绕过权限确认');
+  await warning.getByRole('button', { name: '取消', exact: true }).click();
+  await expect(trigger).toContainText('手动审批');
+  await menu.getByRole('menuitemradio', { name: '绕过权限', exact: true }).click();
+  await warning.getByRole('button', { name: '绕过权限', exact: true }).click();
+  await expect(trigger).toContainText('绕过权限');
+  await expect(trigger).toHaveClass(/danger/);
+  expect(modes).toEqual(['default', 'bypassPermissions']);
 });
 
 test('Electron: frameless window, the project branch, files by path and window settings', async () => {

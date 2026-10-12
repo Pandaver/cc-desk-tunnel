@@ -1,6 +1,6 @@
 # 部署与安全边界
 
-服务端以 Docker / Compose 部署在 Ubuntu amd64 上。安装与日常操作见[部署操作手册](../deploy/README.md)，整体威胁模型见 [SECURITY.md](../SECURITY.md)；本页说明端口、证书、凭据、数据和信任边界。
+服务端以 Docker / Compose 部署在 Ubuntu amd64 上，arm64 为实验性支持。安装与日常操作见[部署操作手册](../deploy/README.md)，整体威胁模型见 [SECURITY.md](../SECURITY.md)；本页说明端口、证书、凭据、数据和信任边界。
 
 ## 部署选择
 

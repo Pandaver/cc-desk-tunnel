@@ -1,3 +1,4 @@
+import { isMac } from './platform.ts';
 import type { Prefs } from './prefs.ts';
 
 // The window's keyboard shortcuts. They act only on key presses that reach this window while it is in front —
@@ -35,9 +36,18 @@ const defaults: Record<Action, string> = {
   zoomOut: 'Ctrl+Minus',
   zoomReset: 'Ctrl+Digit0',
 };
+// On macOS the key of commands is Command, which a key press names `Win` here as on any keyboard. Option
+// with an arrow moves through text there, so going back and forward take the brackets, as in its browsers.
+const macDefaults = {
+  ...(Object.fromEntries(
+    Object.entries(defaults).map(([action, combo]) => [action, combo.replace('Ctrl+', 'Win+')]),
+  ) as Record<Action, string>),
+  back: 'Win+BracketLeft',
+  forward: 'Win+BracketRight',
+};
 // The combination an action answers to: the user's own, or the default; empty when the user removed it.
 export const keyFor = (prefs: Prefs, action: Action) =>
-  prefs.shortcuts.keys[action] ?? defaults[action];
+  prefs.shortcuts.keys[action] ?? (isMac ? macDefaults : defaults)[action];
 
 const numpad: Record<string, string> = {
   NumpadAdd: 'Equal',
@@ -62,6 +72,7 @@ export function comboOf(event: KeyboardEvent | React.KeyboardEvent) {
 export const usable = (combo: string) => /(^|\+)(Ctrl|Alt|Win|F\d{1,2})(\+|$)/.test(combo);
 
 const names: Record<string, string> = {
+  ...(isMac ? { Win: '⌘', Alt: '⌥' } : {}),
   Equal: '=',
   Minus: '-',
   Comma: ',',

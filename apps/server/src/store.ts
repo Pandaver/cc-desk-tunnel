@@ -5,10 +5,12 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   continues,
   isFragment,
+  platformOf,
   snapshotSchema,
   sessionSchema,
   terminalStatuses,
 } from '@cc-desk-tunnel/protocol';
+import { deviceTerms } from './device-terms.ts';
 import { DomainError } from './errors.ts';
 import type {
   Device,
@@ -641,12 +643,19 @@ export class SessionStore {
     const known = said.told ?? said;
     const device = session.device?.id;
     if (known.projectPath === session.projectPath && known.device === device) return '';
-    said.told = { projectPath: session.projectPath, device };
+    const platform = platformOf(session.device);
+    said.told = { projectPath: session.projectPath, device, platform };
     this.save(session);
+    const terms = deviceTerms(platform, session.projectPath);
+    // The prompt's account of scripts and command lines holds for one system only.
+    const system =
+      (known.platform ?? 'win32') === platform
+        ? ''
+        : ` It runs another system than the one described so far, and this replaces what was said of scripts and command lines. For device-script: ${terms.script} ${terms.command}`;
     const paths = `The project directory is now ${JSON.stringify(session.projectPath)} (it was ${JSON.stringify(known.projectPath)}).`;
     return known.device === device
       ? `[CC Desk Tunnel: the user moved this session to another project on the device. ${paths} From now on use the new directory as the project directory, in place of the one given earlier.]\n\n`
-      : `[CC Desk Tunnel: the user now continues this session from another of their computers, ${JSON.stringify(session.device!.name)}. From now on the device is that computer: Windows. ${paths} What the earlier computer had, its files, paths and running processes, is not on this one unless you find it there.]\n\n`;
+      : `[CC Desk Tunnel: the user now continues this session from another of their computers, ${JSON.stringify(session.device!.name)}. From now on the device is that computer: ${terms.name}. ${paths} What the earlier computer had, its files, paths and running processes, is not on this one unless you find it there.${system}]\n\n`;
   }
   // What the system prompt of a run says. A prompt that changes costs the whole conversation's prompt cache,
   // so it stays what it first was — through moves, which `notice` tells Claude of — until a compaction,
@@ -654,8 +663,13 @@ export class SessionStore {
   promptValues(sessionId: string) {
     const { session } = this.get(sessionId);
     const said = session.prompt;
-    if (said && !said.compacted) return { projectPath: said.projectPath };
-    const now = { projectPath: session.projectPath, device: session.device?.id };
+    if (said && !said.compacted)
+      return { projectPath: said.projectPath, platform: said.platform ?? 'win32' };
+    const now = {
+      projectPath: session.projectPath,
+      device: session.device?.id,
+      platform: platformOf(session.device),
+    };
     session.prompt = now;
     this.save(session);
     return now;

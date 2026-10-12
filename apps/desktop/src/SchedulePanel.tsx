@@ -277,9 +277,17 @@ function Editor({
           </select>
         </label>
       </div>
-      {form.target === 'session' && session && session.permissionMode !== 'auto' && (
+      {form.target === 'session' &&
+        session &&
+        session.permissionMode !== 'auto' &&
+        session.permissionMode !== 'bypassPermissions' && (
+          <p className="schedule-warning" role="status">
+            这个会话不是自动审批：无人值守时任务会停在审批处，直到有人处理。
+          </p>
+        )}
+      {form.target === 'session' && session?.permissionMode === 'bypassPermissions' && (
         <p className="schedule-warning" role="status">
-          这个会话不是自动审批：无人值守时任务会停在审批处，直到有人处理。
+          这个会话绕过权限：无人值守时任务做任何事都不会询问。
         </p>
       )}
       {failure && (

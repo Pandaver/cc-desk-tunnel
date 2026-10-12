@@ -22,10 +22,12 @@ export type Notifications = {
   clear: () => void;
 };
 const kept = 50;
+const away = () => !document.hasFocus() || document.visibilityState === 'hidden';
 
 // Watches every session's run for the moments that need the user — it ended, or it waits for an answer — and
 // tells them: in the bell's list, and through the system's own notification when the window is not in front.
-// The session being read in a focused window says it already and raises neither.
+// The session being read in a focused window says it already and raises neither, and what the list holds
+// about it counts as read. Only what waits for the user's answer also asks for attention in the taskbar.
 export function useNotifications(client: ProxyClient, viewing: () => string | null): Notifications {
   const [notices, setNotices] = useState<Notice[]>([]);
   const view = useRef(viewing);
@@ -34,22 +36,45 @@ export function useNotifications(client: ProxyClient, viewing: () => string | nu
   const push = useCallback<Notifications['push']>((notice) => {
     const prefs = getPrefs().notify;
     if (!prefs.enabled || !prefs[notice.kind]) return;
-    const away = !document.hasFocus() || document.visibilityState === 'hidden';
-    if (!away && notice.sessionId && notice.sessionId === view.current()) return;
+    const elsewhere = away();
+    if (!elsewhere && notice.sessionId && notice.sessionId === view.current()) return;
     setNotices((current) =>
       [{ ...notice, id: crypto.randomUUID(), at: Date.now(), read: false }, ...current].slice(
         0,
         kept,
       ),
     );
-    if (away)
+    if (elsewhere)
       void window.desktop?.notify({
         title: notice.title,
         body: notice.body,
         sessionId: notice.sessionId ?? null,
         silent: !prefs.sound,
+        attention: notice.kind === 'approval' || notice.kind === 'question',
       });
   }, []);
+
+  const seen = viewing();
+  useEffect(() => {
+    const read = () => {
+      const sessionId = view.current();
+      if (!sessionId || away()) return;
+      setNotices((current) =>
+        current.some((notice) => !notice.read && notice.sessionId === sessionId)
+          ? current.map((notice) =>
+              notice.sessionId === sessionId ? { ...notice, read: true } : notice,
+            )
+          : current,
+      );
+    };
+    read();
+    window.addEventListener('focus', read);
+    document.addEventListener('visibilitychange', read);
+    return () => {
+      window.removeEventListener('focus', read);
+      document.removeEventListener('visibilitychange', read);
+    };
+  }, [seen]);
 
   useEffect(() => {
     let previous = new Map<string, Session['activeRun']>();

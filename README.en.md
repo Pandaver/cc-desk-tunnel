@@ -58,7 +58,7 @@ This repository publishes all of its own client, server, build and deployment so
 
 ## Quick start
 
-You need a Linux server with a public IP or domain name (x86_64, Ubuntu recommended, Docker installed) and a Windows 10 / 11 x64 PC.
+You need a Linux server with a public IP or domain name (x86_64, or arm64 as experimental support; Ubuntu recommended, Docker installed) and a Windows 10 / 11 x64 PC.
 
 **The server can be small.** Builds, tests and development tools all run on your Windows PC; the server only hosts Claude Code and a lightweight proxy service, so an entry-level machine with 2 vCPUs and 1 GB of memory is enough. Size it for heavier work only if you plan to have Claude build or run demanding tasks on the server itself.
 
@@ -84,6 +84,8 @@ There is no prebuilt image yet: the image is built from source on your server, w
 Download `CC-Desk-Tunnel-Setup-<version>-x64.exe` from the [releases page](https://github.com/sun168567/cc-desk-tunnel/releases/latest) and install it. It bundles PowerShell 7 and OpenSSH; nothing else is needed. Start it, enter the three values from step 1 and connect.
 
 Expect a SmartScreen prompt on first run; see [Antivirus and SmartScreen](#antivirus-and-smartscreen).
+
+Packages for macOS and Linux are on the same releases page; see [macOS client](docs/macos.md) and [Linux client](docs/linux.md) (in Chinese). They are experimental, unsigned, and upgraded by downloading and installing the new package.
 
 ### 3. Sign in to Claude
 

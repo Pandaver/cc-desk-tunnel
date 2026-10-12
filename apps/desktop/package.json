@@ -1,6 +1,6 @@
 {
   "name": "@cc-desk-tunnel/desktop",
-  "version": "0.2.13",
+  "version": "0.3.0",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -15,11 +15,15 @@
     "@cc-desk-tunnel/protocol": "0.0.0",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/xterm": "6.0.0",
+    "katex": "0.16.47",
     "lucide-react": "1.49.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "react-markdown": "10.1.0",
+    "rehype-katex": "7.0.1",
     "remark-gfm": "4.0.1",
+    "remark-math": "6.0.0",
+    "ssh2": "1.17.0",
     "ws": "8.22.0"
   },
   "devDependencies": {

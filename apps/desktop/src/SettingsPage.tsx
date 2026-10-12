@@ -154,7 +154,7 @@ function General({
   chooseWorkspace: (reset: boolean) => void;
 }) {
   const [closeToTray, setCloseToTray] = useState<boolean | null>(null);
-  const { connection } = usePrefs();
+  const { connection, bypassPermissions } = usePrefs();
   useEffect(() => {
     void window.desktop?.windowSettings().then((values) => setCloseToTray(values.closeToTray));
   }, []);
@@ -201,7 +201,7 @@ function General({
             </div>
             <h2 className="page-heading">连接</h2>
             <div className="card">
-              <Row title="记住凭据" detail="服务凭据经当前 Windows 账户加密后保存在本机">
+              <Row title="记住凭据" detail="服务凭据经当前系统账户加密后保存在本机">
                 <Switch
                   label="记住凭据"
                   checked={form.remember}
@@ -253,6 +253,19 @@ function General({
             </div>
           </>
         )}
+        <h2 className="page-heading">审批</h2>
+        <div className="card">
+          <Row
+            title="允许绕过权限"
+            detail="审批模式里多出“绕过权限”：Claude 做任何事都不再询问，包括在你的电脑上执行命令。只建议在测试机或虚拟机里打开"
+          >
+            <Switch
+              label="允许绕过权限"
+              checked={bypassPermissions}
+              onChange={(value) => setPrefs((prefs) => ({ ...prefs, bypassPermissions: value }))}
+            />
+          </Row>
+        </div>
       </div>
     </section>
   );
@@ -267,8 +280,7 @@ function Notices() {
       <div className="page-body">
         <h1 className="page-title">通知</h1>
         <p className="muted">
-          窗口收在托盘或不在前台时，用 Windows
-          通知提醒需要你知道的事；点通知回到对应的会话。正在看的会话不会重复提醒。
+          窗口收在托盘或不在前台时，用系统通知提醒需要你知道的事；点通知回到对应的会话。正在看的会话不会重复提醒。
         </p>
         <div className="card">
           <Row title="开启通知" detail="关闭后既不弹出系统通知，也不记入通知列表">
@@ -278,7 +290,7 @@ function Notices() {
               onChange={(enabled) => set({ enabled })}
             />
           </Row>
-          <Row title="提示音" detail="弹出系统通知时播放 Windows 的通知声音">
+          <Row title="提示音" detail="弹出系统通知时播放系统的通知声音">
             <Switch
               label="提示音"
               checked={notify.sound}

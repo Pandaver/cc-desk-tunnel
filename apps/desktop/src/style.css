@@ -282,6 +282,12 @@ button.chip:hover:not(:disabled) {
 .chip.quiet {
   background: var(--surface-2);
 }
+/* The approval mode that asks about nothing must not look like the others. */
+.chip.danger,
+button.chip.danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
 .brand {
   display: flex;
   align-items: center;
@@ -432,6 +438,10 @@ button.chip:hover:not(:disabled) {
   padding: 0 calc(100vw - env(titlebar-area-width, 100vw) + 10px) 0 10px;
   -webkit-app-region: drag;
   user-select: none;
+}
+/* macOS draws them at the left end instead. */
+html[data-platform='darwin'] .titlebar {
+  padding: 0 10px 0 78px;
 }
 .titlebar button {
   -webkit-app-region: no-drag;
@@ -936,8 +946,35 @@ button.chip:hover:not(:disabled) {
 .menu button:disabled {
   color: var(--faint);
 }
-.menu button.danger:not(:disabled) {
+.menu button.danger:not(:disabled),
+.permission-menu button.danger,
+.permission-menu button.danger small {
   color: var(--danger);
+}
+.permission-menu button.danger > svg {
+  color: inherit;
+}
+.permission-confirm {
+  margin: 0;
+  padding: 6px 10px 10px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.permission-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 6px 4px;
+}
+.permission-menu .permission-confirm-actions button {
+  width: auto;
+  border: 1px solid var(--line);
+  padding: 5px 12px;
+}
+.permission-menu .permission-confirm-actions button.danger {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: white;
 }
 .menu button > svg,
 .permission-menu button > svg {
@@ -1311,11 +1348,32 @@ kbd {
 .code-block {
   position: relative;
 }
-.code-block > .copy-button {
+.code-actions {
   position: absolute;
   right: 7px;
   top: 7px;
+  display: flex;
+  gap: 4px;
+}
+.code-actions > .copy-button {
   background: var(--surface-2);
+}
+/* A drawing takes the place of its source, on the same ground as the code would have. */
+.code-picture {
+  display: block;
+  box-sizing: border-box;
+  max-width: 100%;
+  max-height: 520px;
+  margin: 10px 0;
+  padding: 38px 14px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-s);
+  background: white;
+}
+.message-content .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
 }
 .message-content .code-block > pre {
   padding-top: 38px;

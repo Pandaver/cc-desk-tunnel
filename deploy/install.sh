@@ -23,7 +23,7 @@ main() {
   (($#)) || set -- setup
   [[ "$1" = init || "$1" = setup ]] || fail "参数只接受 setup（默认）或 init …；其余操作请用 deploy/manage.sh。"
   [[ "$(id -u)" = 0 ]] || fail "需要 root 权限，请在命令前加 sudo。"
-  [[ "$(uname -s)" = Linux && "$(uname -m)" = x86_64 ]] || fail "目前只支持 x86_64（amd64）的 Linux。"
+  [[ "$(uname -s)" = Linux && "$(uname -m)" =~ ^(x86_64|aarch64)$ ]] || fail "目前只支持 x86_64（amd64）和 aarch64（arm64）的 Linux。"
   # Piped from curl, the script itself is on standard input; the questions need the terminal.
   if [[ ! -t 0 ]]; then
     [[ -r /dev/tty ]] || fail "需要交互终端。请改用：sudo bash -c \"\$(curl -fsSL …/deploy/install.sh)\""

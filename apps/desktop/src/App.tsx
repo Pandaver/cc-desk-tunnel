@@ -42,6 +42,7 @@ import AccountPanel from './AccountPanel.tsx';
 import { ProxyClient, RequestInterruptedError } from './client.ts';
 import Composer from './Composer.tsx';
 import { isHere, thisDevice } from './device.ts';
+import { isMac, selfUpdating } from './platform.ts';
 import { useDrafts } from './drafts.ts';
 import SchedulePanel from './SchedulePanel.tsx';
 import { taskMessage, useSchedules } from './schedules.ts';
@@ -236,11 +237,18 @@ export function App() {
   const currentError = actionError ?? state.error;
   // Offered when the service holds a newer installer than the running client.
   const upgrade =
-    version && state.release && isNewer(state.release, version) ? state.release : null;
+    selfUpdating && version && state.release && isNewer(state.release, version)
+      ? state.release
+      : null;
   // The service refused this client as the older one: its version can also be fetched from the release page,
   // whether or not the service holds the installer.
   const direct =
-    state.mismatch && window.desktop && version && state.service && isNewer(state.service, version)
+    selfUpdating &&
+    state.mismatch &&
+    window.desktop &&
+    version &&
+    state.service &&
+    isNewer(state.service, version)
       ? state.service
       : null;
   // How far an installer being fetched from the release page is, from 0 to 1.
@@ -820,7 +828,7 @@ export function App() {
       ...(window.desktop
         ? [
             {
-              label: '在资源管理器中打开',
+              label: isMac ? '在访达中打开' : '在资源管理器中打开',
               icon: <FolderOpen />,
               separated: true,
               run: () => {
@@ -1106,9 +1114,11 @@ export function App() {
             ? `${currentError}${
                 isNewer(version, state.service)
                   ? '此客户端较新，请先升级服务端。'
-                  : state.preparing !== null
-                    ? `服务端正在下载这一版的安装包（${Math.floor(state.preparing * 100)}%），稍后重新连接就能从服务端升级；也可以现在直接从 GitHub 发布页下载。`
-                    : '服务端还没有这一版的安装包，它会继续尝试下载；可以直接从 GitHub 发布页下载，或稍后重试。'
+                  : !selfUpdating
+                    ? '这个系统上的客户端需要手动升级：请到 GitHub 发布页下载与服务端同一版本的安装包。'
+                    : state.preparing !== null
+                      ? `服务端正在下载这一版的安装包（${Math.floor(state.preparing * 100)}%），稍后重新连接就能从服务端升级；也可以现在直接从 GitHub 发布页下载。`
+                      : '服务端还没有这一版的安装包，它会继续尝试下载；可以直接从 GitHub 发布页下载，或稍后重试。'
               }`
             : currentError
         }
@@ -1448,9 +1458,10 @@ export function App() {
           connected={connected}
           error={actionError}
           close={() => setRepointProject(null)}
-          add={(path) => {
+          add={(written) => {
             void act(async () => {
-              if (!path) return;
+              if (!written) return;
+              const path = (await window.desktop?.asOnDisk(written)) ?? written;
               await repoint(repointProject, path);
               setRepointProject(null);
             });
@@ -1463,9 +1474,10 @@ export function App() {
           connected={connected}
           error={actionError}
           close={() => setCreateOpen(false)}
-          add={(path) => {
+          add={(written) => {
             void act(async () => {
-              if (!path) return;
+              if (!written) return;
+              const path = (await window.desktop?.asOnDisk(written)) ?? written;
               setProjects((value) => withProject(value, path));
               setCreateOpen(false);
             });

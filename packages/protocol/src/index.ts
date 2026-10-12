@@ -1,10 +1,17 @@
 import { z } from 'zod';
 
-export const PROTOCOL_VERSION = 15;
+export const PROTOCOL_VERSION = 16;
 export const MAX_FRAME_BYTES = 256 * 1024;
 const id = z.uuid();
 const timestamp = z.iso.datetime();
-export const permissionModeSchema = z.enum(['auto', 'default', 'plan', 'acceptEdits']);
+// `bypassPermissions` asks about nothing at all; the client offers it only once the user allowed that.
+export const permissionModeSchema = z.enum([
+  'auto',
+  'default',
+  'plan',
+  'acceptEdits',
+  'bypassPermissions',
+]);
 export type PermissionMode = z.infer<typeof permissionModeSchema>;
 export const effortSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
 export type Effort = z.infer<typeof effortSchema>;
@@ -309,8 +316,18 @@ export const eventSchema = z.object({
   payload: eventPayloadSchema,
 });
 export type SessionEvent = z.infer<typeof eventSchema>;
-// One of the user's computers: the client there makes the ID once and keeps it.
-export const deviceSchema = z.object({ id, name: z.string().trim().min(1).max(120) });
+// The systems a device may run. What runs its scripts and how its paths are written follow from it.
+export const devicePlatformSchema = z.enum(['win32', 'darwin', 'linux']);
+export type DevicePlatform = z.infer<typeof devicePlatformSchema>;
+// One of the user's computers: the client there makes the ID once and keeps it. Its system is recorded
+// unless it is Windows, which is what every computer was before others were supported.
+export const deviceSchema = z.object({
+  id,
+  name: z.string().trim().min(1).max(120),
+  platform: devicePlatformSchema.optional(),
+});
+export const platformOf = (device?: { platform?: DevicePlatform } | null): DevicePlatform =>
+  device?.platform ?? 'win32';
 export type Device = z.infer<typeof deviceSchema>;
 export const sessionSchema = z.object({
   id,
@@ -332,7 +349,15 @@ export const sessionSchema = z.object({
     .object({
       projectPath: z.string(),
       device: id.optional(),
-      told: z.object({ projectPath: z.string(), device: id.optional() }).optional(),
+      // The system the prompt describes; Windows where none is recorded.
+      platform: devicePlatformSchema.optional(),
+      told: z
+        .object({
+          projectPath: z.string(),
+          device: id.optional(),
+          platform: devicePlatformSchema.optional(),
+        })
+        .optional(),
       compacted: z.boolean().optional(),
     })
     .optional(),
@@ -574,7 +599,10 @@ export const authSchema = z
   .strict();
 // Which of the user's computers the connection is from, named by `auth.deviceName`. It follows `auth` as a
 // frame of its own because the frame of `auth` has to stay what every version reads.
-export const deviceIdentitySchema = z.object({ type: z.literal('device'), id }).strict();
+// The system is not the page's to say: the desktop's main process writes it into the frame on its way out.
+export const deviceIdentitySchema = z
+  .object({ type: z.literal('device'), id, platform: devicePlatformSchema.optional() })
+  .strict();
 // The client is closing the connection on purpose. Without it a connection that ends is taken for a fault on
 // the way, and what the device was running is kept for it to come back to.
 export const leaveSchema = z.object({ type: z.literal('leave') }).strict();

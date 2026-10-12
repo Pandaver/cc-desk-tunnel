@@ -4,7 +4,9 @@ declare global {
     desktop?: {
       // Run from the source tree, not installed: the login page then also offers the simulation service.
       dev: boolean;
+      platform: 'win32' | 'darwin' | 'linux';
       chooseProject: () => Promise<string | null>;
+      asOnDisk: (path: string) => Promise<string>;
       // Files to mention in a message; the paths of the ones chosen.
       chooseFiles: () => Promise<string[]>;
       pathForFile: (file: File) => string;
@@ -32,13 +34,15 @@ declare global {
       onSchedulesChanged: (callback: (text: string) => void) => () => void;
       windowSettings: () => Promise<{ closeToTray: boolean }>;
       setWindowSettings: (values: { closeToTray: boolean }) => Promise<void>;
-      // A system notification, shown unless the window is in front (`always` shows it regardless).
+      // A system notification, shown unless the window is in front (`always` shows it regardless). `attention`
+      // also flashes the taskbar button, or bounces the Dock icon, of a window left open behind others.
       notify: (notice: {
         title: string;
         body: string;
         sessionId: string | null;
         silent: boolean;
         always?: boolean;
+        attention?: boolean;
       }) => Promise<void>;
       onNotifyClicked: (callback: (sessionId: string | null) => void) => () => void;
       // 1 and -1 step the interface size, 0 restores it.

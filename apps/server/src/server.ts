@@ -20,6 +20,7 @@ import {
   isFragment,
   leaveSchema,
   MAX_FRAME_BYTES,
+  platformOf,
   PROTOCOL_VERSION,
   TUNNEL_CLOSE,
   tunnelAttachSchema,
@@ -264,11 +265,13 @@ export function createProxyServer(options: ServerOptions) {
   // told apart becomes that of the first to use it.
   function onDevice(peer: Peer, session: Session) {
     const device = deviceOf(peer);
-    if (!session.device) updated(store.claim(session.id, device).id);
-    else if (session.device.id !== device.id)
+    // Before computers were told apart they were all Windows ones, and so is the session's project path.
+    if (!session.device && platformOf(device) === 'win32')
+      updated(store.claim(session.id, device).id);
+    else if (session.device?.id !== device.id)
       throw new DomainError(
         'other_device',
-        `此会话在设备“${session.device.name}”上。要在本机接着做，请先为它选择本机的项目目录，或把它分叉到本机。`,
+        `此会话在设备“${session.device?.name ?? '一台 Windows 电脑'}”上。要在本机接着做，请先为它选择本机的项目目录，或把它分叉到本机。`,
       );
   }
   function room() {
@@ -366,6 +369,7 @@ export function createProxyServer(options: ServerOptions) {
         sessionId: run.sessionId,
         nativeRoot: session.nativeRoot ?? session.id,
         projectPath: said.projectPath,
+        platform: said.platform,
         permissionMode: session.permissionMode,
         model: session.model,
         effort: session.effort,
@@ -793,7 +797,7 @@ export function createProxyServer(options: ServerOptions) {
       cancel(
         run,
         options.claude
-          ? '用户停止；已发出的 Windows SSH 命令可能继续执行，副作用未撤销，不能自动重试。'
+          ? '用户停止；已发出的 SSH 命令可能继续执行，副作用未撤销，不能自动重试。'
           : '用户停止',
       );
       return;
@@ -1083,7 +1087,7 @@ export function createProxyServer(options: ServerOptions) {
     peer.registering = true;
     track(
       peer.tunnel
-        .accept(credentials)
+        .accept(credentials, peer.device?.platform)
         .then(() => adopt(peer))
         .then(() => {
           send(peer, { type: 'tunnel.ready', connectionId: peer.id });
@@ -1093,7 +1097,9 @@ export function createProxyServer(options: ServerOptions) {
             type: 'connection.error',
             code: 'ssh_failed',
             message:
-              '服务端经隧道连不上本机的 SSH 服务。\n隧道已经建立，但探测命令没有得到应答：常见于安全软件拦截了内置的 sshd.exe 或 PowerShell，请检查保护记录后重新连接。',
+              platformOf(peer.device) === 'win32'
+                ? '服务端经隧道连不上本机的 SSH 服务。\n隧道已经建立，但探测命令没有得到应答：常见于安全软件拦截了内置的 sshd.exe 或 PowerShell，请检查保护记录后重新连接。'
+                : '服务端经隧道连不上本机的 SSH 服务。\n隧道已经建立，但探测命令没有得到应答：请重新连接；反复出现时在“设置 → 常规”里打开连接日志查看原因。',
           });
           peer.socket.close(4003, 'SSH probe failed');
         }),
@@ -1297,7 +1303,11 @@ export function createProxyServer(options: ServerOptions) {
       }
       const identity = deviceIdentitySchema.safeParse(value);
       if (identity.success) {
-        peer.device = { id: identity.data.id, name: peer.name };
+        peer.device = {
+          id: identity.data.id,
+          name: peer.name,
+          ...(identity.data.platform ? { platform: identity.data.platform } : {}),
+        };
         // With the line written when it closes, this tells which computer a connection was and how long it held.
         if (!closing)
           console.log(

@@ -86,7 +86,13 @@ export function channelFailure(seconds, error, target, proxy) {
   const head = `执行通道在 ${seconds} 秒内没有就绪。`;
   if (error)
     return `${head}\n服务凭据已通过，但为执行通道再连接服务端时失败：${controlFailure(error, target, proxy).split('\n')[0]}\n执行通道与控制连接走同一个地址，每条 SSH 连接另占一条连接：请确认反向代理、系统代理或防火墙没有限制同一地址的并发连接数。`;
-  return `${head}\n服务凭据已通过，本机的 SSH 服务也已启动，但服务端经执行通道发来的探测命令没有得到应答：请检查安全软件是否拦截了内置的 sshd.exe 或 PowerShell，网络较慢时可在“设置 → 常规”里调大等待时间。`;
+  // What may keep the probe from an answer differs: on Windows the bundled programs that run it, elsewhere
+  // the user's own shell.
+  const check =
+    process.platform === 'win32'
+      ? '请检查安全软件是否拦截了内置的 sshd.exe 或 PowerShell，网络较慢时'
+      : '请重新连接；登录 shell 的启动脚本或网络较慢时';
+  return `${head}\n服务凭据已通过，本机的 SSH 服务也已启动，但服务端经执行通道发来的探测命令没有得到应答：${check}可在“设置 → 常规”里调大等待时间。`;
 }
 
 // The component host ended while the connection was wanted. `output` is what it and its components printed,
