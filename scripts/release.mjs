@@ -42,7 +42,10 @@ const [installer, server, ...others] = releaseFiles(version);
 const notes = [
   '> 用桌面客户端驱动云端的 Claude Code，经反向隧道在你自己的电脑上执行。',
   '',
-  section.replace(/^### /gm, '## '),
+  // The change log links to files beside it; on the release page those links need the whole address.
+  section
+    .replace(/^### /gm, '## ')
+    .replace(/\]\((?![a-z]+:|#)([^)]+)\)/g, `](${repository}/blob/main/$1)`),
   '',
   '---',
   '',
