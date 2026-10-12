@@ -39,7 +39,7 @@ import type {
   SessionEvent,
 } from '@cc-desk-tunnel/protocol';
 import AccountPanel from './AccountPanel.tsx';
-import { ProxyClient } from './client.ts';
+import { ProxyClient, RequestInterruptedError } from './client.ts';
 import Composer from './Composer.tsx';
 import { isHere, thisDevice } from './device.ts';
 import { isMac, selfUpdating } from './platform.ts';
@@ -122,7 +122,7 @@ export function App() {
     [],
   );
   const [proxyConnecting, setProxyConnecting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | RequestInterruptedError | null>(null);
   // One request at a time from this window; `refreshing` is the slower native status read.
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -233,7 +233,8 @@ export function App() {
     lastStatus.surface !== 'terminal' &&
     (lastStatus.status === 'cancelled' || lastStatus.status === 'failed');
   const signedOut = state.account?.loggedIn === false;
-  const currentError = error ?? state.error;
+  const actionError = error instanceof RequestInterruptedError ? error.describe(connected) : error;
+  const currentError = actionError ?? state.error;
   // Offered when the service holds a newer installer than the running client.
   const upgrade =
     selfUpdating && version && state.release && isNewer(state.release, version)
@@ -419,7 +420,13 @@ export function App() {
     try {
       await action();
     } catch (error) {
-      setError(error instanceof Error ? error.message : '操作失败。');
+      setError(
+        error instanceof RequestInterruptedError
+          ? error
+          : error instanceof Error
+            ? error.message
+            : '操作失败。',
+      );
     } finally {
       setBusy(false);
     }
@@ -515,7 +522,13 @@ export function App() {
     try {
       await client.request({ type: 'session.status', sessionId });
     } catch (error) {
-      setError(error instanceof Error ? error.message : '原生状态读取失败');
+      setError(
+        error instanceof RequestInterruptedError
+          ? error
+          : error instanceof Error
+            ? error.message
+            : '原生状态读取失败',
+      );
     } finally {
       setRefreshing(false);
     }
@@ -1443,7 +1456,7 @@ export function App() {
           action="更改"
           busy={busy}
           connected={connected}
-          error={error}
+          error={actionError}
           close={() => setRepointProject(null)}
           add={(written) => {
             void act(async () => {
@@ -1459,7 +1472,7 @@ export function App() {
         <AddProjectDialog
           busy={busy}
           connected={connected}
-          error={error}
+          error={actionError}
           close={() => setCreateOpen(false)}
           add={(written) => {
             void act(async () => {
@@ -1477,7 +1490,7 @@ export function App() {
           native={nativeMode}
           busy={busy}
           connected={connected}
-          error={error}
+          error={actionError}
           close={() => setDeleteSession(null)}
           confirm={() => {
             void act(async () => {
@@ -1512,7 +1525,7 @@ export function App() {
           session={renameSession}
           busy={busy}
           connected={connected}
-          error={error}
+          error={actionError}
           close={() => setRenameSession(null)}
           rename={(title) => {
             void act(async () => {

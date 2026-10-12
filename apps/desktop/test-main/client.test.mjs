@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { ProxyClient } from '../src/client.ts';
+import { ProxyClient, RequestInterruptedError } from '../src/client.ts';
 import { PROTOCOL_VERSION } from '@cc-desk-tunnel/protocol';
 import { conversation, transcript } from '../src/transcript.ts';
 import { describe, duration, summarize } from '../src/activity.ts';
@@ -88,6 +88,37 @@ function event(sessionId, sequence, text = 'text') {
     createdAt: new Date().toISOString(),
     payload: { type: 'text.delta', messageId: randomUUID(), text },
   };
+}
+
+for (const type of [
+  'session.status',
+  'session.history',
+  'account.status',
+  'usage.query',
+  'settings.get',
+  'message.send',
+  'settings.update',
+]) {
+  test(`an interrupted ${type} reply keeps its operation kind and is never replayed`, async (t) => {
+    const { client, socket, sessions } = fixture(t);
+    const result = client.request({ type, sessionId: sessions[0].id }).catch((error) => error);
+    socket.close();
+    const error = await result;
+    assert.ok(error instanceof RequestInterruptedError);
+    const readOnly = !['message.send', 'settings.update'].includes(type);
+    assert.equal(error.readOnly, readOnly);
+    assert.match(error.describe(false), /连接中断/);
+    assert.match(error.describe(true), /连接已恢复/);
+    if (readOnly) {
+      assert.match(error.describe(true), /读取未完成/);
+      assert.doesNotMatch(error.describe(true), /提交|任务可能/);
+    } else {
+      assert.match(error.describe(true), /上次请求.*确认.*未收到/);
+      assert.match(error.describe(true), /不会自动重发/);
+    }
+    assert.equal(client.pending.size, 0);
+    assert.equal(socket.sent.filter((command) => command.type === type).length, 1);
+  });
 }
 
 test('login only receives the session directory; content is loaded when selected and cache is bounded', (t) => {

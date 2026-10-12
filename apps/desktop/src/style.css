@@ -1955,6 +1955,13 @@ details[open] > summary > .fold-chevron {
 .model-menu input[type='range']:disabled {
   opacity: 0.6;
 }
+/* No level known yet: no fill and no handle, so nothing claims a value; picking one brings the handle back. */
+.model-menu input[type='range'][data-unset] {
+  background: var(--hover);
+}
+.model-menu input[type='range'][data-unset]::-webkit-slider-thumb {
+  opacity: 0;
+}
 /* Level names under the track, centred on the handle's positions: the handle is 30px, so its centre runs
    from 15px to 15px short of the other end. */
 .effort-ticks {
