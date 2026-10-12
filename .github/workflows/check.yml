@@ -28,6 +28,26 @@ jobs:
       - run: npm run typecheck
       - run: npm run format:check
       - run: npm test
+  # The service as it is deployed: the image built on the machine, then every way of setting it up, on both
+  # architectures a server may have. On arm64 the service's own tests run as well, for what it compiles there.
+  deploy:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f deploy/docker/Dockerfile -t cc-desk-tunnel:local .
+      - run: sudo bash deploy/test.sh
+      - if: matrix.runner == 'ubuntu-24.04-arm'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - if: matrix.runner == 'ubuntu-24.04-arm'
+        run: sudo apt-get install -y --no-install-recommends zsh && npm ci && npm test
   # The parts of the client that only run on Windows. Without the bundled OpenSSH and PowerShell the tests that
   # need them skip themselves; this job is here to learn what a hosted Windows machine can run, and does not
   # hold a change back yet.
