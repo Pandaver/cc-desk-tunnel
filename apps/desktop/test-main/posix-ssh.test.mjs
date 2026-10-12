@@ -520,7 +520,9 @@ test(
     t.after(() => socket.destroy());
     await once(socket, 'connect');
     socket.resume();
-    const ended = once(socket, 'close');
+    // Closed either way: the service may end the connection or reset it, and a reset arrives as an error
+    // first, which `once` would turn into a failure.
+    const ended = new Promise((resolve) => socket.once('close', resolve));
     await executor.close();
     await ended;
     assert.equal(socket.destroyed, true);
