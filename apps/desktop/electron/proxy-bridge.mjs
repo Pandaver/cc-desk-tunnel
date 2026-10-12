@@ -15,7 +15,7 @@ import { channelFailure, controlFailure, passing } from './connect-errors.mjs';
 
 // The SSH service of a connection. The two are started and closed alike and give the same credentials; what
 // is behind them differs with the system: see each module.
-const startLocalSsh = process.platform === 'win32' ? startWindowsSsh : startPosixSsh;
+export const startLocalSsh = process.platform === 'win32' ? startWindowsSsh : startPosixSsh;
 
 export function certificateMatches(observed, trusted) {
   if (typeof trusted !== 'string' || typeof observed !== 'string') return false;

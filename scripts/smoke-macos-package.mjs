@@ -49,10 +49,10 @@ try {
     import { pathToFileURL } from 'node:url';
     const root = process.env.CC_PACKAGE_ROOT;
     const directory = process.cwd();
+    // The bridge as it is packaged: one file, which starts the SSH service's process from the files beside it.
     const bridge = await import(pathToFileURL(join(root, 'electron/proxy-bridge.mjs')));
     assert.equal(typeof bridge.openProxyBridge, 'function');
-    const { startPosixSsh } = await import(pathToFileURL(join(root, 'electron/posix-ssh.mjs')));
-    const service = await startPosixSsh(randomUUID(), {
+    const service = await bridge.startLocalSsh(randomUUID(), {
       shellPath: '/bin/zsh',
       env: { HOME: directory, ZDOTDIR: directory, PATH: '/usr/bin:/bin:/usr/sbin:/sbin' },
       environment: { CC_DESK_TUNNEL_SCHEDULES: join(directory, 'schedules.json') },
