@@ -409,8 +409,10 @@ handle('notify:show', (event, notice) => {
       event.sender.send('notify:clicked', notice?.sessionId ? String(notice.sessionId) : null);
   });
   toast.show();
-  // A window left open behind others also asks for attention in the taskbar.
-  if (window.isVisible() && !inFront) {
+  // What waits for the user also asks for attention in the taskbar or the Dock, from a window left open
+  // behind others. The rest is said by the notification alone: an icon that flashes long after the
+  // notification went away, or where the system shows none, points at nothing.
+  if (notice?.attention === true && window.isVisible() && !inFront) {
     window.flashFrame(true);
     window.once('focus', () => window.flashFrame(false));
   }

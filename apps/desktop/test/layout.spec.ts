@@ -159,6 +159,12 @@ test('pages, side column, menus, pins, export, settings and the notice list', as
   await page.getByRole('button', { name: '允许', exact: true }).click();
   await settled(page);
   await expect(bell).toHaveAccessibleName('通知（2 条未读）');
+  // Back in front, the session on screen has shown what its notices say: they stay in the list, read.
+  await page.evaluate(() => {
+    document.hasFocus = () => true;
+    window.dispatchEvent(new Event('focus'));
+  });
+  await expect(bell).toHaveAccessibleName('通知');
   await bell.click();
   const notices = page.getByRole('dialog', { name: '通知' });
   await expect(notices.locator('.notice strong')).toHaveText(['任务完成', '等待审批']);
