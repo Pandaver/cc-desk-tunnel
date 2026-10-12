@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN userdel -r ubuntu && useradd --uid 1000 --create-home --shell /bin/bash ccdesktunnel
 
 FROM base AS build
+# Legacy Docker builders create WORKDIR as root, even after USER.
+RUN install -d -o ccdesktunnel -g ccdesktunnel /app
 COPY scripts/install-linux.sh /tmp/install-linux.sh
 USER ccdesktunnel
 RUN CC_DESK_TUNNEL_RUNTIME=/home/ccdesktunnel/runtime bash /tmp/install-linux.sh
