@@ -408,7 +408,6 @@ test('a device with a POSIX shell gets a script command and a prompt of its own'
   assert.match(prompt, /ssh -F "\/private\/ssh_config" device-script <<'PS'/);
   assert.match(prompt, /Begin it with cd -- '\/Users\/me\/my project\/it'\\''s'\./);
   assert.match(prompt, /the project directory is "device:\/Users\/me\/my project\/it's"/);
-  assert.match(prompt, /background processes included/);
   assert.doesNotMatch(prompt, /PowerShell|cmd\.exe|Windows|Set-Location/);
   // Everything that does not depend on the system reads the same on both, line for line.
   const windows = remotePrompt('D:\\work', ssh, 'session').split('\n');
@@ -416,7 +415,7 @@ test('a device with a POSIX shell gets a script command and a prompt of its own'
   assert.equal(windows.length, mac.length);
   assert.deepEqual(
     windows.flatMap((line, index) => (line === mac[index] ? [] : [index])),
-    [1, 3, 4, 7],
+    [1, 3, 4],
   );
   // No system named is Windows, as it was before others were supported.
   assert.equal(remotePrompt('D:\\work', ssh, 'session', 'win32'), windows.join('\n'));

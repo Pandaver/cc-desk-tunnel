@@ -35,6 +35,20 @@ function copyDependency(root, app, name, copied = new Set()) {
   return manifest.version;
 }
 
+// What a package for macOS or Linux takes beside the common part: the modules of the SSH service's own
+// process, which it loads by path next to the bundled bridge, and the SSH library they use. The Windows
+// package has neither: its SSH service is the bundled OpenSSH.
+export const posixService = {
+  files: [
+    'posix-ssh-worker.mjs',
+    'process-supervisor.mjs',
+    'shell-environment.mjs',
+    'ssh-keys.mjs',
+    'ssh-channel-output.mjs',
+  ],
+  dependencies: ['ssh2'],
+};
+
 // Lays out what goes into the application archive, the same way for every system: the page, the connection
 // bridge with what it imports bundled into one file, and the main process's own modules as written.
 // `files` are the further files of apps/desktop/electron that this system's package needs; `dependencies`

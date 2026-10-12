@@ -1,5 +1,5 @@
 # Builds the release files on GitHub's machines instead of a maintainer's own: the Windows installer, the
-# macOS packages, which no maintainer has a machine for, and the server bundle. Nothing is signed with a
+# macOS and Linux packages, which no maintainer has a machine for, and the server bundle. Nothing is signed with a
 # certificate or uploaded to a release; the files are kept with the run for 14 days. It runs when asked for,
 # and by itself when what does the packaging changes on a dev branch.
 name: package
@@ -10,7 +10,7 @@ on:
     paths:
       - .github/workflows/package.yml
       - scripts/package-*.mjs
-      - scripts/smoke-macos-package.mjs
+      - scripts/smoke-posix-package.mjs
       - scripts/prepare-windows.ps1
 permissions:
   contents: read
@@ -74,6 +74,37 @@ jobs:
         with:
           name: macos-${{ matrix.arch }}-window
           path: artifacts/macos/*.png
+          if-no-files-found: warn
+          retention-days: 14
+  # The .deb, built and then installed the way a user installs it, and started from where it was installed:
+  # that is where its sandbox and what it depends on are in place. A virtual screen stands in for a desktop.
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb imagemagick
+      - run: npm ci
+      - run: npm run setup:desktop
+      - run: npm run package:linux
+      - run: sudo apt-get install -y ./artifacts/linux/*.deb
+      - run: xvfb-run -a -s "-screen 0 1280x900x24" node scripts/smoke-posix-package.mjs "/opt/CC Desk Tunnel/cc-desk-tunnel"
+        env:
+          SMOKE_SCREENSHOT: artifacts/linux/window-x64.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: artifacts/linux/*.deb
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64-window
+          path: artifacts/linux/*.png
           if-no-files-found: warn
           retention-days: 14
   server:

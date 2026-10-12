@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build as electronBuild, Platform, Arch } from 'electron-builder';
-import { stageDesktop } from './package-desktop.mjs';
+import { posixService, stageDesktop } from './package-desktop.mjs';
 
 // Builds the macOS package: a disk image to install from and a ZIP of the same application. It is not signed
 // with a Developer ID and not notarized, so macOS asks the user to allow it on first start (see docs/macos.md),
@@ -27,18 +27,9 @@ const unpacked = args.includes('--dir');
 const app = join(root, `.local/macos-package/${architecture}/app`);
 const output = join(root, 'artifacts/macos');
 const bundle = join(output, architecture === 'arm64' ? 'mac-arm64' : 'mac', 'CC Desk Tunnel.app');
-// The modules of the SSH service's own process, which it loads by path beside the bundled bridge, and the
-// SSH library they use.
 await stageDesktop(root, app, {
   description: 'macOS client for a native remote Claude Code session',
-  files: [
-    'posix-ssh-worker.mjs',
-    'process-supervisor.mjs',
-    'shell-environment.mjs',
-    'ssh-keys.mjs',
-    'ssh-channel-output.mjs',
-  ],
-  dependencies: ['ssh2'],
+  ...posixService,
 });
 // The system's icon format wants a source of 512 pixels or more; the artwork is the one of the Windows package.
 const icon = join(app, 'macos-icon.png');
@@ -93,7 +84,7 @@ const results = await electronBuild({
 execFileSync('codesign', ['--verify', '--deep', '--strict', bundle], { stdio: 'inherit' });
 // A package of this machine's architecture is started, offline, before it counts as built.
 if (architecture === process.arch)
-  execFileSync(process.execPath, [join(root, 'scripts/smoke-macos-package.mjs'), bundle], {
+  execFileSync(process.execPath, [join(root, 'scripts/smoke-posix-package.mjs'), bundle], {
     cwd: root,
     stdio: 'inherit',
     env: { ...process.env, NATIVE_TEST_CONFIG: '' },

@@ -5,14 +5,20 @@ import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { _electron } from '@playwright/test';
 
-// Starts a packaged macOS application offline, with a profile of its own: the main process, the preload and
-// the page have to come up, and the SSH service has to start from the packaged files alone and run a script
-// the way the service sends one. The package's own program serves as the Node that checks the latter.
-if (process.platform !== 'darwin' || !process.argv[2]?.endsWith('.app'))
-  throw new Error('Usage: node scripts/smoke-macos-package.mjs "/path/to/CC Desk Tunnel.app"');
-const bundle = resolve(process.argv[2]);
-const executable = join(bundle, 'Contents/MacOS/CC Desk Tunnel');
-const root = resolve('.local/macos-package-smoke');
+// Starts a packaged macOS or Linux application offline, with a profile of its own: the main process, the
+// preload and the page have to come up, and the SSH service has to start from the packaged files alone and
+// run a script the way the service sends one. The package's own program serves as the Node that checks the
+// latter. Takes the application (the .app of macOS, the program file of Linux) and further arguments for it.
+const mac = process.platform === 'darwin';
+if (process.platform === 'win32' || !process.argv[2] || mac !== process.argv[2].endsWith('.app'))
+  throw new Error('Usage: node scripts/smoke-posix-package.mjs <application> [arguments]');
+const executable = mac
+  ? join(resolve(process.argv[2]), 'Contents/MacOS/CC Desk Tunnel')
+  : resolve(process.argv[2]);
+const archive = join(dirname(executable), mac ? '../Resources/app.asar' : 'resources/app.asar');
+// The shell each system gives its users: the script host has to work with both.
+const shell = mac ? '/bin/zsh' : '/bin/bash';
+const root = resolve('.local/package-smoke');
 mkdirSync(root, { recursive: true });
 const directory = mkdtempSync(join(root, 'run-'));
 const env = Object.fromEntries(
@@ -23,7 +29,7 @@ const env = Object.fromEntries(
 env.PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 const application = await _electron.launch({
   executablePath: executable,
-  args: ['--smoke-test', `--user-data-dir=${join(directory, 'profile')}`],
+  args: [...process.argv.slice(3), '--smoke-test', `--user-data-dir=${join(directory, 'profile')}`],
   cwd: directory,
   env,
   timeout: 30_000,
@@ -34,7 +40,7 @@ try {
   page.on('pageerror', (error) => errors.push(error.message));
   await page.getByRole('heading', { name: '连接代理服务', exact: true }).waitFor();
   assert.equal(await application.evaluate(({ app }) => app.isPackaged), true);
-  assert.equal(await page.evaluate(() => window.desktop.platform), 'darwin');
+  assert.equal(await page.evaluate(() => window.desktop.platform), process.platform);
   execFileSync(
     executable,
     [
@@ -53,7 +59,7 @@ try {
     const bridge = await import(pathToFileURL(join(root, 'electron/proxy-bridge.mjs')));
     assert.equal(typeof bridge.openProxyBridge, 'function');
     const service = await bridge.startLocalSsh(randomUUID(), {
-      shellPath: '/bin/zsh',
+      shellPath: process.env.CC_PACKAGE_SHELL,
       env: { HOME: directory, ZDOTDIR: directory, PATH: '/usr/bin:/bin:/usr/sbin:/sbin' },
       environment: { CC_DESK_TUNNEL_SCHEDULES: join(directory, 'schedules.json') },
       cwd: directory,
@@ -84,7 +90,8 @@ try {
       env: {
         ...env,
         ELECTRON_RUN_AS_NODE: '1',
-        CC_PACKAGE_ROOT: join(bundle, 'Contents/Resources/app.asar'),
+        CC_PACKAGE_ROOT: archive,
+        CC_PACKAGE_SHELL: shell,
       },
     },
   );
@@ -99,12 +106,15 @@ try {
     await delay(2000);
     mkdirSync(dirname(resolve(process.env.SMOKE_SCREENSHOT)), { recursive: true });
     try {
-      execFileSync('screencapture', ['-x', resolve(process.env.SMOKE_SCREENSHOT)]);
+      // The whole screen: the window's buttons are the system's on macOS and Chromium's own on Linux, and
+      // neither is part of the page.
+      if (mac) execFileSync('screencapture', ['-x', resolve(process.env.SMOKE_SCREENSHOT)]);
+      else execFileSync('import', ['-window', 'root', resolve(process.env.SMOKE_SCREENSHOT)]);
     } catch (error) {
       console.log(`No screenshot: ${error.message}`);
     }
   }
-  console.log('PASS: the packaged macOS client starts offline and its SSH service runs a script.');
+  console.log('PASS: the packaged client starts offline and its SSH service runs a script.');
 } finally {
   await application.close();
   rmSync(directory, { recursive: true, force: true });
