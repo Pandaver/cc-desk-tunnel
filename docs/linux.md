@@ -10,7 +10,7 @@ Linux 上的客户端与 Windows、macOS 上的是同一套界面和同一条连
 sudo apt install ./CC-Desk-Tunnel-<版本>-linux-amd64.deb
 ```
 
-安装包会带上 `openssh-client` 与 `openssh-sftp-server`。后者只是一个供 SFTP 使用的程序，不包含也不会启动 SSH 服务端，本机不会因此多出监听的端口。卸载用 `sudo apt remove cc-desk-tunnel`。
+安装包会带上 `openssh-client` 与 `openssh-sftp-server`，并推荐安装中文字体 `fonts-noto-cjk`（界面是中文的）。后者只是一个供 SFTP 使用的程序，不包含也不会启动 SSH 服务端，本机不会因此多出监听的端口。卸载用 `sudo apt remove cc-desk-tunnel`。
 
 升级需要手动：下载新版本的安装包再安装一次。两端版本要一致。
 

@@ -59,6 +59,8 @@ const results = await electronBuild({
         'openssh-client',
         'openssh-sftp-server',
       ],
+      // The interface is in Chinese, which a system set up in another language may have no font for.
+      recommends: ['fonts-noto-cjk'],
     },
   },
 });
