@@ -74,8 +74,9 @@ export async function captureShellEnvironment(
     return await new Promise((resolve, reject) => {
       const baseEnvironment = { ...env };
       delete baseEnvironment.ELECTRON_RUN_AS_NODE;
-      const script = `const s=require('node:net').createConnection(${JSON.stringify(socketPath)});s.on('error',()=>process.exit(1));s.once('connect',()=>s.end(JSON.stringify({nonce:${JSON.stringify(nonce)},environment:process.env})));`;
-      const command = `exec /usr/bin/env ELECTRON_RUN_AS_NODE=1 ${quotePosix(process.execPath)} -e ${quotePosix(script)}`;
+      // The path and the nonce are arguments of a fixed program, not text written into it.
+      const script = `const [p,n]=process.argv.slice(-2);const s=require('node:net').createConnection(p);s.on('error',()=>process.exit(1));s.once('connect',()=>s.end(JSON.stringify({nonce:n,environment:process.env})));`;
+      const command = `exec /usr/bin/env ELECTRON_RUN_AS_NODE=1 ${quotePosix(process.execPath)} -e ${quotePosix(script)} ${quotePosix(socketPath)} ${quotePosix(nonce)}`;
       const child = supervisor.spawn(shell, ['-lic', command], {
         env: baseEnvironment,
         cwd,
