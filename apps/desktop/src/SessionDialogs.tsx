@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Check, Plus, Trash2 } from 'lucide-react';
 import type { Session } from '@cc-desk-tunnel/protocol';
 import { folderName } from './paths.ts';
+import { isMac } from './platform.ts';
 import { Modal } from './ui.tsx';
 
 // The dialogs share the window's busy flag and error line, so a failed request stays visible in the open dialog.
@@ -32,11 +33,11 @@ export function AddProjectDialog({
         }}
       >
         <label>
-          Windows 项目目录
+          本机项目目录
           <input
             value={path}
             onChange={(event) => setPath(event.target.value)}
-            placeholder="D:\projects\my-project"
+            placeholder={isMac ? '/Users/me/projects/my-project' : 'D:\\projects\\my-project'}
             maxLength={2048}
             required
             spellCheck={false}
@@ -84,7 +85,7 @@ export function DeleteSessionDialog({
       <p className="delete-question">删除“{session.title}”？</p>
       <p className="muted">
         {native
-          ? '原生 Claude Code 会话及代理展示记录将删除，Windows 项目文件保持不变。'
+          ? '原生 Claude Code 会话及代理展示记录将删除，本机项目文件保持不变。'
           : '会话记录将被删除，项目文件保持不变。'}
       </p>
       {error && (

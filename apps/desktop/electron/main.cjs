@@ -48,6 +48,8 @@ function showWindow() {
   window.focus();
 }
 app.on('second-instance', showWindow);
+// macOS: a click on the Dock icon while the window is hidden.
+app.on('activate', showWindow);
 
 // Window preferences and the optional saved sign-in live in the user's profile, outside the install directory.
 const settingsPath = () => path.join(app.getPath('userData'), 'settings.json');
@@ -171,7 +173,7 @@ handle('external:open', async (event, target) => {
     throw new Error('Unexpected link');
   await shell.openExternal(url.toString());
 });
-// Sessions without a project still need a Windows working directory; they get one under Documents, grouped by
+// Sessions without a project still need a working directory on this computer; they get one under Documents, grouped by
 // day, unless the user chose another folder. Folders used before are remembered: their sessions are still
 // sessions without a project.
 const defaultRoot = () => path.join(app.getPath('documents'), 'CC Desk Tunnel');
@@ -180,8 +182,10 @@ function workspaceRoots() {
   const roots = [...(Array.isArray(saved) ? saved : []), defaultRoot()].filter(
     (root) => typeof root === 'string' && root,
   );
+  // Windows and macOS take a path in any case; Linux tells the cases apart.
+  const key = (root) => (process.platform === 'linux' ? root : root.toLowerCase());
   return roots.filter(
-    (root, index) => roots.findIndex((item) => item.toLowerCase() === root.toLowerCase()) === index,
+    (root, index) => roots.findIndex((item) => key(item) === key(root)) === index,
   );
 }
 handle('workspace:roots', () => workspaceRoots());
@@ -260,7 +264,7 @@ handle('proxy:connect', async (event, config) => {
       // Where Claude finds the scheduled tasks to edit; the service names the variable, not the path.
       environment: { CC_DESK_TUNNEL_SCHEDULES: schedulesPath() },
       log,
-      // The Windows proxy settings (manual, script or automatic detection) as Chromium reads them.
+      // The system's proxy settings (manual, script or automatic detection) as Chromium reads them.
       resolveProxy: (url) => session.defaultSession.resolveProxy(url),
     },
     () => {
@@ -278,7 +282,8 @@ handle('proxy:connect', async (event, config) => {
   keepAwake(true);
   return { url: bridge.url };
 });
-// The service token is kept only when the user asks, encrypted for the current Windows account.
+// The service token is kept only when the user asks, encrypted for the current account of the system (DPAPI on
+// Windows, the login keychain on macOS).
 handle('login:load', () => {
   const { login } = readSettings();
   if (!login) return null;
@@ -413,6 +418,9 @@ handle('notify:show', (event, notice) => {
 // is then the one to fetch, which the service's refusal of this client named.
 handle('update:install', async (event, version) => {
   if (!app.isPackaged) throw new Error('源码运行不支持自升级；请重新打包安装。');
+  // Only the Windows installer can be run over an installation. Elsewhere the user installs a new package.
+  if (process.platform !== 'win32')
+    throw new Error('这个系统上的客户端不能在应用内升级，请到发布页下载新版本。');
   const directory = await mkdtemp(path.join(tmpdir(), 'cc-desk-tunnel-update-'));
   let installer;
   if (version === undefined) {
@@ -453,12 +461,44 @@ app.whenReady().then(() => {
   if (!ownsInstance) return;
   // Shortcuts are the page's, where the user can change them or turn them off; Electron's default menu would
   // add its own on top (zoom, reload, close). A run from source keeps reload and the developer tools.
+  // macOS has one menu bar for every program and takes the keys of copying, pasting, hiding and quitting from
+  // what is in it: without these entries they do nothing. The page's own menus stay in its title bar.
+  const development = app.isPackaged
+    ? []
+    : [{ label: '开发', submenu: [{ role: 'reload' }, { role: 'toggleDevTools' }] }];
   Menu.setApplicationMenu(
-    app.isPackaged
-      ? null
-      : Menu.buildFromTemplate([
-          { label: '开发', submenu: [{ role: 'reload' }, { role: 'toggleDevTools' }] },
-        ]),
+    process.platform === 'darwin'
+      ? Menu.buildFromTemplate([
+          {
+            label: app.name,
+            submenu: [
+              { role: 'about', label: '关于 CC Desk Tunnel' },
+              { type: 'separator' },
+              { role: 'hide', label: '隐藏 CC Desk Tunnel' },
+              { role: 'hideOthers', label: '隐藏其他' },
+              { role: 'unhide', label: '全部显示' },
+              { type: 'separator' },
+              { role: 'quit', label: '退出 CC Desk Tunnel' },
+            ],
+          },
+          {
+            label: '编辑',
+            submenu: [
+              { role: 'undo', label: '撤销' },
+              { role: 'redo', label: '重做' },
+              { type: 'separator' },
+              { role: 'cut', label: '剪切' },
+              { role: 'copy', label: '复制' },
+              { role: 'paste', label: '粘贴' },
+              { role: 'selectAll', label: '全选' },
+            ],
+          },
+          { role: 'windowMenu', label: '窗口' },
+          ...development,
+        ])
+      : development.length
+        ? Menu.buildFromTemplate(development)
+        : null,
   );
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) =>
     callback(false),
@@ -470,9 +510,11 @@ app.whenReady().then(() => {
     minHeight: 560,
     backgroundColor: '#edf0f6',
     title: 'CC Desk Tunnel',
-    // The page draws the title bar; the system adds only its window buttons, over the bar's right end.
+    // The page draws the title bar; the system adds only its window buttons: over the bar's right end on
+    // Windows, at its left end on macOS, where the page leaves them room (see `.titlebar` in style.css).
     titleBarStyle: 'hidden',
     titleBarOverlay: { color: '#edf0f6', symbolColor: '#22262e', height: 40 },
+    trafficLightPosition: { x: 14, y: 13 },
     icon: path.join(__dirname, 'icon.png'),
     autoHideMenuBar: true,
     show: !process.argv.includes('--smoke-test'),
@@ -507,8 +549,13 @@ app.whenReady().then(() => {
 
   // Long tasks keep running with the window closed: closing hides it, and the tray icon brings it back or quits.
   const closeToTray = () => readSettings().closeToTray !== false;
+  // The macOS menu bar takes a small shape in one colour, which it tints itself for light and dark.
   const tray = new Tray(
-    nativeImage.createFromPath(path.join(__dirname, 'icon.png')).resize({ width: 32, height: 32 }),
+    process.platform === 'darwin'
+      ? require('./tray-icon.cjs').terminalTemplate(nativeImage)
+      : nativeImage
+          .createFromPath(path.join(__dirname, 'icon.png'))
+          .resize({ width: 32, height: 32 }),
   );
   const buildMenu = () =>
     tray.setContextMenu(
@@ -537,10 +584,12 @@ app.whenReady().then(() => {
     window.hide();
     if (!readSettings().trayHintShown) {
       writeSettings({ trayHintShown: true });
-      tray.displayBalloon({
-        title: 'CC Desk Tunnel 仍在后台运行',
-        content: '点击托盘图标恢复窗口；右键图标选择“退出”才会结束连接。',
-      });
+      // Balloons are a thing of the Windows tray.
+      if (process.platform === 'win32')
+        tray.displayBalloon({
+          title: 'CC Desk Tunnel 仍在后台运行',
+          content: '点击托盘图标恢复窗口；右键图标选择“退出”才会结束连接。',
+        });
     }
   });
 });

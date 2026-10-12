@@ -433,6 +433,10 @@ button.chip:hover:not(:disabled) {
   -webkit-app-region: drag;
   user-select: none;
 }
+/* macOS draws them at the left end instead. */
+html[data-platform='darwin'] .titlebar {
+  padding: 0 10px 0 78px;
+}
 .titlebar button {
   -webkit-app-region: no-drag;
 }
