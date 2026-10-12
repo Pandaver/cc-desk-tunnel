@@ -28,6 +28,7 @@ const {
 } = require('node:fs');
 const { mkdtemp, stat, writeFile } = require('node:fs/promises');
 const { gitBranch } = require('./git-branch.cjs');
+const { asOnDisk } = require('./disk-path.cjs');
 const { openLog } = require('./client-log.cjs');
 const { hostname, tmpdir } = require('node:os');
 const { randomUUID } = require('node:crypto');
@@ -101,6 +102,7 @@ handle('project:choose', async (event) => {
   });
   return result.canceled ? null : (result.filePaths[0] ?? null);
 });
+handle('project:spelling', (_event, written) => asOnDisk(String(written)));
 // Files the user wants to mention in a message: only their paths go to the page.
 handle('files:choose', async (event) => {
   const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {

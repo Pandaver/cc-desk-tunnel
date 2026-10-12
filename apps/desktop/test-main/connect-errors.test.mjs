@@ -70,5 +70,8 @@ test('an execution channel that never got ready says what stood in the way', () 
     /连接被中断/,
   );
   // They were opened, or none was ever asked for: the probe command itself went unanswered.
-  assert.match(channelFailure(60, undefined, target, null), /60 秒[\s\S]*sshd\.exe 或 PowerShell/);
+  assert.match(
+    channelFailure(60, undefined, target, null),
+    process.platform === 'win32' ? /60 秒[\s\S]*sshd\.exe 或 PowerShell/ : /60 秒[\s\S]*登录 shell/,
+  );
 });

@@ -1445,9 +1445,10 @@ export function App() {
           connected={connected}
           error={error}
           close={() => setRepointProject(null)}
-          add={(path) => {
+          add={(written) => {
             void act(async () => {
-              if (!path) return;
+              if (!written) return;
+              const path = (await window.desktop?.asOnDisk(written)) ?? written;
               await repoint(repointProject, path);
               setRepointProject(null);
             });
@@ -1460,9 +1461,10 @@ export function App() {
           connected={connected}
           error={error}
           close={() => setCreateOpen(false)}
-          add={(path) => {
+          add={(written) => {
             void act(async () => {
-              if (!path) return;
+              if (!written) return;
+              const path = (await window.desktop?.asOnDisk(written)) ?? written;
               setProjects((value) => withProject(value, path));
               setCreateOpen(false);
             });

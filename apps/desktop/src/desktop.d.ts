@@ -6,6 +6,7 @@ declare global {
       dev: boolean;
       platform: 'win32' | 'darwin' | 'linux';
       chooseProject: () => Promise<string | null>;
+      asOnDisk: (path: string) => Promise<string>;
       // Files to mention in a message; the paths of the ones chosen.
       chooseFiles: () => Promise<string[]>;
       pathForFile: (file: File) => string;

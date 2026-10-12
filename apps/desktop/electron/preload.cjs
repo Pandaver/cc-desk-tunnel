@@ -3,6 +3,7 @@ contextBridge.exposeInMainWorld('desktop', {
   dev: process.argv.includes('--cc-desk-tunnel-dev'),
   platform: process.platform,
   chooseProject: () => ipcRenderer.invoke('project:choose'),
+  asOnDisk: (path) => ipcRenderer.invoke('project:spelling', path),
   chooseFiles: () => ipcRenderer.invoke('files:choose'),
   pathForFile: (file) => webUtils.getPathForFile(file),
   saveFile: (name, text) => ipcRenderer.invoke('file:save', name, text),
