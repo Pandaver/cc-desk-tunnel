@@ -322,7 +322,7 @@ function TurnView({ turn, native, live }: { turn: Turn; native: boolean; live: L
               className="turn-process"
               summary={
                 <span>
-                  耗时 {duration(turn.startedAt, turn.endedAt!)}
+                  用时 {duration(turn.startedAt, turn.endedAt!)}
                   {turn.tools > 0 && ` · ${turn.tools} 步`}
                   {notes > 0 && ` · ${notes} 条说明`}
                 </span>
