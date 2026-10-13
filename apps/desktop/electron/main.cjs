@@ -159,6 +159,12 @@ handle('log:open', async () => {
   const failure = await shell.openPath(log('The log folder was opened.'));
   if (failure) throw new Error(failure);
 });
+// The installed program has no menu that opens the developer tools, and none of the page's shortcuts does:
+// they open from the settings page, in a window of their own, for looking into a problem of the interface.
+handle('devtools:open', (event) => {
+  log('The developer tools were opened.');
+  event.sender.openDevTools({ mode: 'detach' });
+});
 handle('git:branch', (_event, directory) => gitBranch(directory));
 handle('clipboard:write', (_event, text) => {
   if (typeof text !== 'string') throw new Error('Expected clipboard text');

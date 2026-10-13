@@ -48,6 +48,17 @@ jobs:
           cache: npm
       - if: matrix.runner == 'ubuntu-24.04-arm'
         run: sudo apt-get install -y --no-install-recommends zsh && npm ci && npm test
+  # A Docker without buildx builds with the older builder, which gives the directories it makes to root whoever
+  # the build runs as. The image is built that way too, so that it goes on working where BuildKit is missing.
+  deploy-legacy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f deploy/docker/Dockerfile -t cc-desk-tunnel:local .
+        env:
+          DOCKER_BUILDKIT: '0'
+      - run: sudo bash deploy/test.sh
   # The parts of the client that only run on Windows. Without the bundled OpenSSH and PowerShell the tests that
   # need them skip themselves; this job is here to learn what a hosted Windows machine can run, and does not
   # hold a change back yet.

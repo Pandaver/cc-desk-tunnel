@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('desktop', {
   saveImage: (type, bytes) => ipcRenderer.invoke('image:save', type, bytes),
   openFolder: (directory) => ipcRenderer.invoke('folder:open', directory),
   openLogs: () => ipcRenderer.invoke('log:open'),
+  openDevTools: () => ipcRenderer.invoke('devtools:open'),
   gitBranch: (directory) => ipcRenderer.invoke('git:branch', directory),
   copyText: (text) => ipcRenderer.invoke('clipboard:write', text),
   openExternal: (url) => ipcRenderer.invoke('external:open', url),

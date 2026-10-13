@@ -36,7 +36,9 @@ COPY deploy/docker/entrypoint.sh /usr/local/bin/proxy-entrypoint
 COPY deploy/docker/healthcheck.mjs /app/healthcheck.mjs
 # What a release needs from this image; a program installed from the client must not ask for more.
 COPY deploy/docker/runtime-level /opt/runtime/level
-RUN chmod 755 /usr/local/bin/proxy-entrypoint && mkdir /data && chown ccdesktunnel:ccdesktunnel /data
+# The working directory is made here with its owner: a builder without BuildKit makes the one WORKDIR names as root.
+RUN chmod 755 /usr/local/bin/proxy-entrypoint && mkdir -p /data/workspace \
+    && chown -R ccdesktunnel:ccdesktunnel /data
 ENV PATH=/opt/runtime/node/bin:/opt/runtime/cli/bin:$PATH \
     HOME=/data/home
 USER ccdesktunnel

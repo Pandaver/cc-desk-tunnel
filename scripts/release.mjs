@@ -82,19 +82,36 @@ if (dryRun) {
   if (exists) throw new Error(`Release ${tag} already exists; raise the version.`);
 
   // Always a draft first: what is published is complete.
-  const url = run(gh, [
-    'release',
-    'create',
-    tag,
-    '--draft',
-    ...(prerelease ? ['--prerelease', '--latest=false'] : []),
-    '--target',
-    commit,
-    '--title',
-    `CC Desk Tunnel ${version}`,
-    '--notes-file',
-    join(output, 'notes.md'),
-  ]).trim();
+  let url;
+  try {
+    url = run(gh, [
+      'release',
+      'create',
+      tag,
+      '--draft',
+      ...(prerelease ? ['--prerelease', '--latest=false'] : []),
+      '--target',
+      commit,
+      '--title',
+      `CC Desk Tunnel ${version}`,
+      '--notes-file',
+      join(output, 'notes.md'),
+    ]).trim();
+  } catch (error) {
+    // gh has reported a failure after GitHub had made the draft; it is looked for before giving up, or the
+    // next attempt would stop at a release that "already exists".
+    let made;
+    try {
+      made = JSON.parse(
+        run(gh, ['release', 'view', tag, '--json', 'url,isDraft'], { stdio: 'pipe' }),
+      );
+    } catch {
+      throw error;
+    }
+    if (!made.isDraft) throw error;
+    console.log(`gh reported an error, but the draft of ${tag} was made; going on with it.`);
+    url = made.url;
+  }
   try {
     const wait = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
     const runs = () =>

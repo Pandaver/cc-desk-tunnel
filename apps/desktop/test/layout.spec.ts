@@ -607,6 +607,20 @@ test('Electron: frameless window, the project branch, files by path and window s
       return window.getContentSize()[1] === window.getSize()[1];
     });
     expect(frame).toBe(true);
+    // The developer tools open from the settings page only: no menu and no shortcut of the page does it.
+    const tools = () =>
+      application.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0].webContents.isDevToolsOpened(),
+      );
+    await page.keyboard.press('Control+Shift+KeyI');
+    await page.keyboard.press('F12');
+    expect(await tools()).toBe(false);
+    await page
+      .getByRole('navigation', { name: '设置分类' })
+      .getByRole('button', { name: '关于与更新', exact: true })
+      .click();
+    await page.getByRole('button', { name: '打开开发者工具', exact: true }).click();
+    await expect.poll(tools).toBe(true);
   } finally {
     await application.close();
   }

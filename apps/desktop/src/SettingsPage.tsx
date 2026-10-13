@@ -67,7 +67,7 @@ const sections: { id: Section; name: string; group: string; icon: typeof Bell; w
     name: '关于与更新',
     group: '其他',
     icon: Info,
-    words: '版本 升级 检查更新 项目主页 日志 排查 断开',
+    words: '版本 升级 检查更新 项目主页 日志 排查 断开 开发者工具 控制台',
   },
 ];
 const kinds: { key: NotifyKind; title: string; detail: string }[] = [
@@ -397,6 +397,18 @@ function About({
                   onClick={() => void window.desktop!.openLogs()}
                 >
                   打开日志文件夹
+                </button>
+              </Row>
+              <Row
+                title="开发者工具"
+                detail="查看界面的控制台报错、检查元素或录制性能记录，反馈界面问题时用得上。在单独的窗口里打开；其中能看到当前页面的全部内容，包括对话，不要按他人的要求在里面粘贴代码"
+              >
+                <button
+                  type="button"
+                  className="button"
+                  onClick={() => void window.desktop!.openDevTools()}
+                >
+                  打开开发者工具
                 </button>
               </Row>
             </div>
