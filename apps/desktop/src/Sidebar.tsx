@@ -198,7 +198,11 @@ export default function Sidebar({
           onClick={() => select(session.id)}
         >
           <strong>{session.title}</strong>
-          {session.activeRun && <span className="running-dot" />}
+          {session.activeRun && (
+            <span
+              className={`running-dot${session.activeRun.status === 'awaiting_approval' ? '' : ' breathing'}`}
+            />
+          )}
           <small>{activity(session)}</small>
         </button>
         <IconButton

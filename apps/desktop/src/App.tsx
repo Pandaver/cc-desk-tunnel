@@ -23,6 +23,7 @@ import {
   PinOff,
   Plus,
   RefreshCw,
+  ScrollText,
   Settings,
   SquareTerminal,
   Trash2,
@@ -74,6 +75,8 @@ import { IconButton, Menu } from './ui.tsx';
 import type { MenuItem, MenuPosition } from './ui.tsx';
 
 const NativeTerminal = lazy(() => import('./NativeTerminal.tsx'));
+// The notes of every version so far are read only when asked for, and stay out of what the window starts with.
+const ReleaseNotes = lazy(() => import('./ReleaseNotes.tsx'));
 
 // The newest event of a kind is the session's current native state.
 function latest<T extends EventPayload['type']>(events: SessionEvent[], type: T) {
@@ -110,6 +113,14 @@ function savedProjects(value: unknown = shared('projects')): string[] {
 // Owns the connection, the selection and every request; the components below render and report user intent.
 export function App() {
   const [client] = useState(() => new ProxyClient());
+  const [clock] = useState(() => ({ now: client.serviceNow, activityAt: client.activityAt }));
+  // The version whose notes are shown, over whichever page is up.
+  const [notes, setNotes] = useState<string | null>(null);
+  const notesDialog = notes && (
+    <Suspense fallback={null}>
+      <ReleaseNotes version={notes} onClose={() => setNotes(null)} />
+    </Suspense>
+  );
   const state = useSyncExternalStore(client.subscribe, client.getSnapshot);
   const [form, setForm] = useState<ConnectionForm>(() => ({
     url: localStorage.getItem('proxy-url') ?? 'ws://127.0.0.1:8787/ws',
@@ -302,6 +313,12 @@ export function App() {
     version &&
     state.service &&
     isNewer(state.service, version)
+      ? state.service
+      : null;
+  // A service of a newer version: what that version changed can be read here, whether or not this system's
+  // client upgrades itself.
+  const ahead =
+    state.mismatch && version && state.service && isNewer(state.service, version)
       ? state.service
       : null;
   // How far an installer being fetched from the release page is, from 0 to 1.
@@ -991,7 +1008,21 @@ export function App() {
         },
       }
     : null;
+  // What an upgrade would bring is read where the upgrade is offered, before it is taken.
+  const newer =
+    upgrade ??
+    ahead ??
+    (update && ['available', 'manual'].includes(update.state) ? (update.latest ?? null) : null);
   const updates = [
+    ...(newer
+      ? [
+          {
+            label: `查看 ${newer} 的更新内容`,
+            icon: <ScrollText />,
+            run: () => setNotes(newer),
+          },
+        ]
+      : []),
     ...(upgradeItem ? [upgradeItem] : []),
     ...(serviceUpdate ? [serviceUpdate] : []),
   ];
@@ -1172,35 +1203,42 @@ export function App() {
           service={null}
           adapterName=""
           updates={[]}
+          showNotes={setNotes}
         />
+        {notesDialog}
       </div>
     ) : (
-      <LoginPage
-        openSettings={() => setLocalSettings('general')}
-        form={form}
-        change={changeForm}
-        error={
-          currentError && state.mismatch && !upgrade && state.service && version
-            ? `${currentError}${
-                isNewer(version, state.service)
-                  ? '此客户端较新，请先升级服务端。'
-                  : !selfUpdating
-                    ? '这个系统上的客户端需要手动升级：请到 GitHub 发布页下载与服务端同一版本的安装包。'
-                    : state.preparing !== null
-                      ? `服务端正在下载这一版的安装包（${Math.floor(state.preparing * 100)}%），稍后重新连接就能从服务端升级；也可以现在直接从 GitHub 发布页下载。`
-                      : '服务端还没有这一版的安装包，它会继续尝试下载；可以直接从 GitHub 发布页下载，或稍后重试。'
-              }`
-            : currentError
-        }
-        upgrade={state.mismatch && window.desktop ? upgrade : null}
-        direct={direct}
-        downloaded={downloaded}
-        install={install}
-        connecting={state.status === 'connecting' || proxyConnecting || busy}
-        submit={() => {
-          void login(form);
-        }}
-      />
+      <>
+        {notesDialog}
+        <LoginPage
+          showNotes={setNotes}
+          newer={upgrade ?? ahead}
+          openSettings={() => setLocalSettings('general')}
+          form={form}
+          change={changeForm}
+          error={
+            currentError && state.mismatch && !upgrade && state.service && version
+              ? `${currentError}${
+                  isNewer(version, state.service)
+                    ? '此客户端较新，请先升级服务端。'
+                    : !selfUpdating
+                      ? '这个系统上的客户端需要手动升级：请到 GitHub 发布页下载与服务端同一版本的安装包。'
+                      : state.preparing !== null
+                        ? `服务端正在下载这一版的安装包（${Math.floor(state.preparing * 100)}%），稍后重新连接就能从服务端升级；也可以现在直接从 GitHub 发布页下载。`
+                        : '服务端还没有这一版的安装包，它会继续尝试下载；可以直接从 GitHub 发布页下载，或稍后重试。'
+                }`
+              : currentError
+          }
+          upgrade={state.mismatch && window.desktop ? upgrade : null}
+          direct={direct}
+          downloaded={downloaded}
+          install={install}
+          connecting={state.status === 'connecting' || proxyConnecting || busy}
+          submit={() => {
+            void login(form);
+          }}
+        />
+      </>
     );
   const menuSession =
     menu?.kind === 'session' ? state.sessions.find((item) => item.id === menu.sessionId) : null;
@@ -1290,6 +1328,7 @@ export function App() {
           service={state.service}
           adapterName={adapterName}
           updates={updates}
+          showNotes={setNotes}
           account={
             <AccountPanel
               client={client}
@@ -1384,6 +1423,8 @@ export function App() {
               connected={connected}
               native={nativeMode}
               ownsRun={ownsRun}
+              clock={clock}
+              progress={selected ? state.progress[selected.id] : undefined}
               busy={busy}
               newSession={() => {
                 void newSession();
@@ -1482,6 +1523,7 @@ export function App() {
             )}
             {selected && !away && !terminalSessionId && (
               <Composer
+                openAccount={() => open('settings', 'account')}
                 session={selected}
                 projectName={
                   isInside(selected.projectPath, workspaceRoots)
@@ -1626,6 +1668,7 @@ export function App() {
           }}
         />
       )}
+      {notesDialog}
     </div>
   );
 }

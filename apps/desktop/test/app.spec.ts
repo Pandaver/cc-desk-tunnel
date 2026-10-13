@@ -665,8 +665,9 @@ test('Electron remembers the sign-in, connects on the next launch and stays in t
     // The schedule file exists from the first launch, and an edit made outside the window reaches it,
     // byte-order mark or not.
     const file = resolve(profile, 'schedules.json');
-    // The window reads the file itself as it starts; the edit below has to come after that.
-    await expect(page.getByLabel('服务凭据')).toBeVisible();
+    // The window reads the file itself as it starts; the edit below has to come after that. It signs in by
+    // itself here, so whichever of the two pages is up tells that it has started.
+    await expect(page.locator('.login-page, .shell')).toBeVisible();
     const loaded = await page.evaluate(() => window.desktop!.loadSchedules(''));
     expect(loaded.path).toBe(file);
     expect(JSON.parse(loaded.text).tasks).toEqual([]);

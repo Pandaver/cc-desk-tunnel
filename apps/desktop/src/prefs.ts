@@ -28,6 +28,8 @@ export type Prefs = {
   // The line under each reply. `summary` holds only the figures the user switched on or off, by key, so a figure
   // added later follows its own default.
   stats: { enabled: boolean; summary: Record<string, boolean> };
+  // Whether the quota used is shown beside the message box.
+  quota: boolean;
 };
 
 const storageKey = 'proxy-prefs';
@@ -51,6 +53,7 @@ const defaults: Prefs = {
   connection: connectionWaits,
   bypassPermissions: false,
   stats: { enabled: false, summary: {} },
+  quota: false,
 };
 
 function stored(): unknown {
@@ -93,6 +96,7 @@ function read(saved: any = shared('prefs') ?? stored()): Prefs {
         }),
       ) as ConnectionWaits,
       bypassPermissions: saved.bypassPermissions === true,
+      quota: saved.quota === true,
       stats: {
         enabled: saved.stats?.enabled === true,
         summary: Object.fromEntries(

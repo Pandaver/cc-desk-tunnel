@@ -56,6 +56,7 @@ contextBridge.exposeInMainWorld('desktop', {
     webFrame.setZoomLevel(direction ? webFrame.getZoomLevel() + Math.sign(direction) * 0.5 : 0),
   quit: (all) => ipcRenderer.invoke('app:quit', all),
   version: () => ipcRenderer.invoke('app:version'),
+  releaseNotes: (version) => ipcRenderer.invoke('release:notes', version),
   device: () => ipcRenderer.invoke('device:get'),
   installUpdate: (version) => ipcRenderer.invoke('update:install', version),
   onUpdateProgress: (callback) => {

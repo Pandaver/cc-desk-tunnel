@@ -70,6 +70,8 @@ declare global {
       // `all` also closes the windows of the other connections.
       quit: (all?: boolean) => Promise<void>;
       version: () => Promise<string>;
+      // The notes of a released version, read from its page on GitHub.
+      releaseNotes: (version: string) => Promise<string>;
       // This computer as the service knows it.
       device: () => Promise<import('@cc-desk-tunnel/protocol').Device>;
       // Fetches and runs an installer: the one the connected service holds, or, given a version, that
