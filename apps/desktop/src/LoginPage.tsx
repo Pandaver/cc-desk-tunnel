@@ -1,5 +1,6 @@
 import { Download, Settings, SquareTerminal, Unplug } from 'lucide-react';
 import { GithubMark, openProject, project } from './project.tsx';
+import { useConnectionName } from './shared.ts';
 
 export type ConnectionForm = {
   url: string;
@@ -39,6 +40,7 @@ export default function LoginPage({
   // This computer's own settings, which need no connection.
   openSettings: () => void;
 }) {
+  const connectionName = useConnectionName();
   return (
     <main className="login-page">
       <div className="window-drag" />
@@ -46,6 +48,7 @@ export default function LoginPage({
         <div className="brand">
           <SquareTerminal />
           <span>CC Desk Tunnel</span>
+          {connectionName && <span className="brand-connection">{connectionName}</span>}
         </div>
         <div className="login-title">
           <h1>连接代理服务</h1>

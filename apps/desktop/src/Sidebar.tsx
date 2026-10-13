@@ -15,6 +15,7 @@ import NoticeBell from './NoticeBell.tsx';
 import type { Notifications } from './notifications.ts';
 import { ago, folderName, isInside, pathKey } from './paths.ts';
 import { setPrefs, toggled, usePrefs } from './prefs.ts';
+import { useConnectionName } from './shared.ts';
 import { IconButton } from './ui.tsx';
 import type { MenuPosition } from './ui.tsx';
 
@@ -65,6 +66,7 @@ export default function Sidebar({
   projectMenu: (path: string, position: MenuPosition) => void;
 }) {
   const prefs = usePrefs();
+  const connectionName = useConnectionName();
   const [search, setSearch] = useState('');
   const [searching, setSearching] = useState(false);
   const { pinned, plain, groups } = useMemo(() => {
@@ -200,7 +202,10 @@ export default function Sidebar({
   return (
     <aside className="sidebar" ref={aside}>
       <div className="sidebar-brand">
-        <span className="brand">CC Desk Tunnel</span>
+        <span className="brand">
+          CC Desk Tunnel
+          {connectionName && <span className="brand-connection">{connectionName}</span>}
+        </span>
         <NoticeBell notifications={notifications} open={select} />
         <IconButton
           title={searching ? '关闭搜索' : '搜索'}

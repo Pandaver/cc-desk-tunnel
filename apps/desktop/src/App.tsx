@@ -51,6 +51,7 @@ import Conversation from './Conversation.tsx';
 import LoginPage from './LoginPage.tsx';
 import type { ConnectionForm } from './LoginPage.tsx';
 import { exportSession } from './exportSession.ts';
+import { onSharedChange, saveShared, shared } from './shared.ts';
 import { useNotifications } from './notifications.ts';
 import { folderName, isInside, isNewer, pathKey, withProject } from './paths.ts';
 import { getPrefs, setPrefs, toggled, usePrefs } from './prefs.ts';
@@ -94,9 +95,10 @@ type OpenMenu = MenuPosition &
     | { kind: 'bar'; label: string }
   );
 const narrow = () => matchMedia('(max-width: 700px)').matches;
-function savedProjects(): string[] {
+// The computer's projects, which the windows of its connections share (see shared.ts).
+function savedProjects(value: unknown = shared('projects')): string[] {
   try {
-    const value = JSON.parse(localStorage.getItem('proxy-projects') ?? '[]');
+    value ??= JSON.parse(localStorage.getItem('proxy-projects') ?? '[]');
     return Array.isArray(value)
       ? value.filter((item): item is string => typeof item === 'string')
       : [];
@@ -381,7 +383,18 @@ export function App() {
   }, [connected]);
   useEffect(() => {
     localStorage.setItem('proxy-projects', JSON.stringify(projects));
+    saveShared('projects', projects);
   }, [projects]);
+  useEffect(
+    () =>
+      onSharedChange('projects', (value) => {
+        const next = savedProjects(value);
+        setProjects((current) =>
+          JSON.stringify(current) === JSON.stringify(next) ? current : next,
+        );
+      }),
+    [],
+  );
   // Each session's native state is read once when it is first shown idle.
   useEffect(() => {
     if (
