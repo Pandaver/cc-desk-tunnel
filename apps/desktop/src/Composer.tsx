@@ -109,6 +109,7 @@ export default function Composer({
   const input = useRef<HTMLTextAreaElement>(null);
   const branch = useBranch(session.projectPath, !!session.activeRun);
   const [dropping, setDropping] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   useLayoutEffect(() => {
     // Grow with the draft; the stylesheet's max-height decides when scrolling takes over.
     if (!input.current) return;
@@ -134,11 +135,18 @@ export default function Composer({
   // Files copied in Explorer have a path. A picture that is only on the clipboard (a screenshot, an image
   // copied from a page) has none: the client saves it on this computer and its path is attached like any other.
   async function paste(files: File[]) {
+    setAttachmentError(null);
     const pasted = session.id;
     const found: string[] = [];
     for (const file of files) {
       const path = window.desktop!.pathForFile(file);
       if (path) found.push(path);
+      else if (window.desktop!.uploadFile)
+        try {
+          found.push(await window.desktop!.uploadFile(file));
+        } catch (reason) {
+          setAttachmentError(reason instanceof Error ? reason.message : '附件上传失败，请重试。');
+        }
       else if (file.type.startsWith('image/'))
         try {
           found.push(
@@ -152,6 +160,11 @@ export default function Composer({
   }
   return (
     <div className="composer-area">
+      {attachmentError && (
+        <p role="alert" className="remote-error">
+          {attachmentError}
+        </p>
+      )}
       {native && slashOpen && (
         <div className="slash-menu" role="listbox" aria-label="会话命令">
           <button
@@ -249,7 +262,8 @@ export default function Composer({
             const text = event.clipboardData.getData('text/plain');
             const usable = files.filter(
               (file) =>
-                window.desktop!.pathForFile(file) || (!text && file.type.startsWith('image/')),
+                window.desktop!.pathForFile(file) ||
+                (!text && (window.desktop!.uploadFile || file.type.startsWith('image/'))),
             );
             if (!usable.length) return;
             event.preventDefault();
@@ -273,7 +287,16 @@ export default function Composer({
               title="添加文件：把文件的路径放进消息"
               className="attach-button"
               disabled={inputDisabled}
-              onClick={() => void window.desktop!.chooseFiles().then(attach)}
+              onClick={() => {
+                setAttachmentError(null);
+                const target = session.id;
+                void window
+                  .desktop!.chooseFiles()
+                  .then((paths) => {
+                    if (shown.current === target) attach(paths);
+                  })
+                  .catch((reason: Error) => setAttachmentError(reason.message));
+              }}
             >
               <Plus />
             </IconButton>

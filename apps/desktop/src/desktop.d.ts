@@ -4,6 +4,15 @@ declare global {
     desktop?: {
       // Run from the source tree, not installed: the login page then also offers the simulation service.
       dev: boolean;
+      remote?: boolean;
+      remoteStatus?: () => Promise<RemoteStatus>;
+      resetRemotePairing?: () => Promise<RemoteStatus>;
+      openRemote?: () => Promise<void>;
+      configureRemote?: (values: {
+        enabled: boolean;
+        lan: boolean;
+        port: number;
+      }) => Promise<RemoteStatus>;
       platform: 'win32' | 'darwin' | 'linux';
       // Which of this computer's connections the window is ('' the first), and what they all share.
       boot: { connection: string; shared: import('./shared.ts').Shared };
@@ -28,6 +37,7 @@ declare global {
       foldersExist: (folders: string[]) => Promise<boolean[]>;
       // Files to mention in a message; the paths of the ones chosen.
       chooseFiles: () => Promise<string[]>;
+      uploadFile?: (file: File) => Promise<string>;
       pathForFile: (file: File) => string;
       // Asks where to save and writes the text there; false when the dialog was cancelled.
       saveFile: (name: string, text: string) => Promise<boolean>;
@@ -51,6 +61,10 @@ declare global {
       saveDrafts: (drafts: Record<string, string>) => Promise<void>;
       loadSchedules: (initial: string) => Promise<{ path: string; text: string }>;
       saveSchedules: (text: string) => Promise<void>;
+      scheduleState?: () => Promise<import('./schedules.ts').ScheduleSnapshot | null>;
+      publishScheduleState?: (
+        snapshot: import('./schedules.ts').ScheduleSnapshot | null,
+      ) => Promise<void>;
       onSchedulesChanged: (callback: (text: string) => void) => () => void;
       windowSettings: () => Promise<{ closeToTray: boolean }>;
       setWindowSettings: (values: { closeToTray: boolean }) => Promise<void>;
@@ -83,11 +97,25 @@ declare global {
       connectProxy: (config: {
         url: string;
         fingerprint: string;
+        token: string;
         // Seconds allowed for reaching the service, for the local SSH service to start, and for the whole.
         waits?: { connect: number; ssh: number; ready: number };
-      }) => Promise<{ url: string }>;
+      }) => Promise<{
+        url: string;
+        failure?: Extract<
+          import('@cc-desk-tunnel/protocol').ServerMessage,
+          { type: 'connection.error' }
+        >;
+      }>;
       disconnectProxy: () => Promise<void>;
       onProxyClosed: (callback: () => void) => () => void;
     };
   }
 }
+export type RemoteStatus = {
+  enabled: boolean;
+  lan: boolean;
+  port: number;
+  url: string | null;
+  token: string | null;
+};

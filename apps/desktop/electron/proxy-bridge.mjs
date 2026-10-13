@@ -62,6 +62,77 @@ async function connectService(address, config, resolveProxy, route) {
     ...controlTlsOptions(config),
   });
 }
+// A read-only view gets its own subscription connection, never its own execution device or SSH tunnel.
+// Resolve only after checking the pin: callers must not send the service token before this promise settles.
+export async function openServiceObserver(config, resolveProxy) {
+  const address = new URL(config.url);
+  if (
+    address.protocol !== 'wss:' ||
+    address.username ||
+    address.password ||
+    address.search ||
+    address.hash
+  )
+    throw new Error('Expected a credential-free WSS address');
+  controlTlsOptions(config);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let transport;
+    const timeout = connectionWaits(config.waits).connect;
+    const socket = new WebSocket(address, {
+      handshakeTimeout: timeout,
+      maxPayload: 16 * 1024 * 1024,
+      createConnection: (_options, created) => {
+        connectService(address, config, async (url) => {
+          const answer = await resolveProxy?.(url);
+          // Proxy lookup may finish after the overall deadline. Do not start another dial then.
+          if (settled) throw new Error('Observer connection already ended');
+          return answer;
+        }).then((tls) => {
+          transport = tls;
+          if (settled) {
+            tls.on('error', () => {});
+            tls.destroy();
+            return;
+          }
+          created(null, tls);
+        }, created);
+      },
+    });
+    // ClientRequest's handshake timeout starts only once it has a socket. This also bounds proxy lookup.
+    const timer = setTimeout(() => fail(new Error('Observer connection timed out')), timeout);
+    function fail(error) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.off('open', opened);
+      reject(error);
+      transport?.destroy();
+      if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
+    }
+    function opened() {
+      if (
+        config.fingerprint &&
+        !certificateMatches(socket._socket.getPeerCertificate().fingerprint256, config.fingerprint)
+      ) {
+        fail(new Error('服务证书指纹不匹配；未发送服务凭据。'));
+      } else {
+        settled = true;
+        clearTimeout(timer);
+        resolve(socket);
+      }
+    }
+    socket.once('open', opened);
+    // Keep an error guard until close, including the microtask between resolve() and the caller taking over.
+    socket.on('error', fail);
+    socket.once('close', () => {
+      fail(new Error('Observer connection closed before its handshake completed'));
+      clearTimeout(timer);
+      socket.off('error', fail);
+      socket.off('open', opened);
+    });
+  });
+}
 // An HTTPS GET carrying the service token. A pinned certificate is checked once the connection stands and before
 // the request, and with it the token, is written to it.
 export async function authorizedGet(address, config, path, token, resolveProxy) {

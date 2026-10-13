@@ -1,6 +1,10 @@
 const { contextBridge, ipcRenderer, webFrame, webUtils } = require('electron');
 contextBridge.exposeInMainWorld('desktop', {
   dev: process.argv.includes('--cc-desk-tunnel-dev'),
+  remoteStatus: () => ipcRenderer.invoke('remote:status'),
+  openRemote: () => ipcRenderer.invoke('remote:open'),
+  configureRemote: (values) => ipcRenderer.invoke('remote:configure', values),
+  resetRemotePairing: () => ipcRenderer.invoke('remote:reset-pairing'),
   platform: process.platform,
   // Read once, before the page draws: see `boot` in main.cjs.
   boot: ipcRenderer.sendSync('boot'),
@@ -39,6 +43,8 @@ contextBridge.exposeInMainWorld('desktop', {
   saveDrafts: (drafts) => ipcRenderer.invoke('drafts:save', drafts),
   loadSchedules: (initial) => ipcRenderer.invoke('schedules:load', initial),
   saveSchedules: (text) => ipcRenderer.invoke('schedules:save', text),
+  scheduleState: () => ipcRenderer.invoke('schedules:state'),
+  publishScheduleState: (snapshot) => ipcRenderer.invoke('schedules:state:publish', snapshot),
   onSchedulesChanged: (callback) => {
     const listener = (_event, text) => callback(text);
     ipcRenderer.on('schedules:changed', listener);

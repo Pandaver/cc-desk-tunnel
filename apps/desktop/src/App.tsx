@@ -41,6 +41,7 @@ import type {
 } from '@cc-desk-tunnel/protocol';
 import AccountPanel from './AccountPanel.tsx';
 import { ProxyClient, RequestInterruptedError } from './client.ts';
+import { bridgeAddress } from './bridge-result.ts';
 import Composer from './Composer.tsx';
 import { isHere, thisDevice } from './device.ts';
 import { isMac, selfUpdating } from './platform.ts';
@@ -205,9 +206,14 @@ export function App() {
     const folders: string[] = JSON.parse(unplaced);
     if (!window.desktop || !folders.length) return;
     let current = true;
-    void window.desktop.foldersExist(folders).then((found) => {
-      if (current) setAbsent(new Set(folders.filter((_, index) => !found[index]).map(pathKey)));
-    });
+    void window.desktop
+      .foldersExist(folders)
+      .then((found) => {
+        if (current) setAbsent(new Set(folders.filter((_, index) => !found[index]).map(pathKey)));
+      })
+      .catch(() => {
+        // A temporarily unavailable Web transport does not prove that the host's folders are absent.
+      });
     return () => {
       current = false;
     };
@@ -519,19 +525,16 @@ export function App() {
       if (form.mode === 'remote') {
         setProxyConnecting(true);
         // The address here only has to be a loopback one; each attempt gets its own from the bridge it opens.
-        client.connect(
-          'ws://127.0.0.1/ws',
-          form.token,
-          await thisDevice(),
-          true,
-          async () =>
-            (
-              await window.desktop!.connectProxy({
-                url: form.url,
-                fingerprint: form.fingerprint,
-                waits: getPrefs().connection,
-              })
-            ).url,
+        client.connect('ws://127.0.0.1/ws', form.token, await thisDevice(), true, async () =>
+          bridgeAddress(
+            client,
+            await window.desktop!.connectProxy({
+              url: form.url,
+              fingerprint: form.fingerprint,
+              token: form.token,
+              waits: getPrefs().connection,
+            }),
+          ),
         );
       } else {
         client.connect(form.url, form.token, await thisDevice());
@@ -552,6 +555,14 @@ export function App() {
     });
   }
   function disconnect() {
+    if (window.desktop?.remote) {
+      void fetch('/api/logout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      }).finally(() => location.reload());
+      return;
+    }
     client.disconnect();
     setForm((current) => (current.remember ? current : { ...current, token: '' }));
     void window.desktop?.disconnectProxy();
@@ -909,7 +920,11 @@ export function App() {
       ...(window.desktop
         ? [
             {
-              label: isMac ? '在访达中打开' : '在资源管理器中打开',
+              label: window.desktop.remote
+                ? '显示项目路径'
+                : isMac
+                  ? '在访达中打开'
+                  : '在资源管理器中打开',
               icon: <FolderOpen />,
               separated: true,
               run: () => {
@@ -1113,7 +1128,7 @@ export function App() {
           checked: place.page === 'settings',
           run: () => open('settings'),
         },
-        ...(window.desktop
+        ...(window.desktop && !window.desktop.remote
           ? [
               {
                 label: '放大',
@@ -1165,9 +1180,9 @@ export function App() {
         place.page === 'chat' &&
         !terminalSessionId &&
         (() => setFindRequest((value) => value + 1)),
-      zoomIn: window.desktop && (() => window.desktop!.zoom(1)),
-      zoomOut: window.desktop && (() => window.desktop!.zoom(-1)),
-      zoomReset: window.desktop && (() => window.desktop!.zoom(0)),
+      zoomIn: window.desktop && !window.desktop.remote && (() => window.desktop!.zoom(1)),
+      zoomOut: window.desktop && !window.desktop.remote && (() => window.desktop!.zoom(-1)),
+      zoomReset: window.desktop && !window.desktop.remote && (() => window.desktop!.zoom(0)),
     };
     const act = run[action];
     if (!act) return;
@@ -1207,6 +1222,16 @@ export function App() {
         />
         {notesDialog}
       </div>
+    ) : window.desktop?.remote ? (
+      <main className="login-page">
+        <div className="login-content">
+          <h1>连接桌面客户端的工作台</h1>
+          <p role="status">{currentError || '正在连接桌面客户端的执行后台…'}</p>
+          <button className="button" onClick={() => location.reload()}>
+            重新连接
+          </button>
+        </div>
+      </main>
     ) : (
       <>
         {notesDialog}
