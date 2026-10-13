@@ -478,6 +478,12 @@ test('a session on another computer is listed apart, read, and taken over with a
   const row = other.locator('.session-row').filter({ hasText: title });
   await expect(row).toHaveCount(0);
   await other.getByRole('button', { name: '展开其他设备的会话', exact: true }).click();
+  // Under the other computer its sessions stand by project, as they do on their own computer.
+  await expect(
+    other
+      .locator('.elsewhere-project:has-text("中文项目") + .session-row')
+      .filter({ hasText: title }),
+  ).toHaveCount(1);
   await row.click();
   await expect(other.getByText('第一台电脑上的话')).toBeVisible();
   const bar = other.locator('.elsewhere-bar');
@@ -491,7 +497,11 @@ test('a session on another computer is listed apart, read, and taken over with a
   if (await elsewhere.isVisible()) await elsewhere.click();
   await expect(bar).toHaveCount(0);
   await expect(
-    other.locator('.project-group').filter({ hasText: '接管目录' }).locator('.session-row'),
+    // The other computers' group names folders as well; a project here is told by its own heading.
+    other
+      .locator('.project-group')
+      .filter({ has: other.locator('h2', { hasText: '接管目录' }) })
+      .locator('.session-row'),
   ).toHaveCount(1);
   await send(other, '第二台电脑上的话');
   await settled(other);

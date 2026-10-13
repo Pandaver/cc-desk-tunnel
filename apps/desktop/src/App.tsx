@@ -51,6 +51,7 @@ import Conversation from './Conversation.tsx';
 import LoginPage from './LoginPage.tsx';
 import type { ConnectionForm } from './LoginPage.tsx';
 import { exportSession } from './exportSession.ts';
+import { onSharedChange, saveShared, shared, useShared } from './shared.ts';
 import { useNotifications } from './notifications.ts';
 import { folderName, isInside, isNewer, pathKey, withProject } from './paths.ts';
 import { getPrefs, setPrefs, toggled, usePrefs } from './prefs.ts';
@@ -94,9 +95,10 @@ type OpenMenu = MenuPosition &
     | { kind: 'bar'; label: string }
   );
 const narrow = () => matchMedia('(max-width: 700px)').matches;
-function savedProjects(): string[] {
+// The computer's projects, which the windows of its connections share (see shared.ts).
+function savedProjects(value: unknown = shared('projects')): string[] {
   try {
-    const value = JSON.parse(localStorage.getItem('proxy-projects') ?? '[]');
+    value ??= JSON.parse(localStorage.getItem('proxy-projects') ?? '[]');
     return Array.isArray(value)
       ? value.filter((item): item is string => typeof item === 'string')
       : [];
@@ -173,12 +175,63 @@ export function App() {
 
   const nativeMode = state.adapter === 'claude-code';
   const connected = state.status === 'connected';
+  const othersBusy = useShared('busy');
   const selected = state.sessions.find((session) => session.id === state.selectedId);
   // What is listed and managed here is what is on this computer. Sessions on the user's other computers are
   // shown apart: they can be read, and taken over or forked into a directory here.
-  const sessions = state.sessions.filter((session) => isHere(session, state.device));
-  const elsewhere = state.sessions.filter((session) => !isHere(session, state.device));
-  const away = !!selected && !isHere(selected, state.device);
+  // Sessions from before computers were told apart name none, and would be listed on every one of the user's
+  // computers. Their folders are looked for here; a session whose folder is not here goes with the other
+  // computers' sessions, from where it can be taken over like any of them.
+  const [absent, setAbsent] = useState<ReadonlySet<string>>(new Set());
+  const unplaced = JSON.stringify(
+    [
+      ...new Set(
+        state.sessions.filter((session) => !session.device).map((session) => session.projectPath),
+      ),
+    ].sort(),
+  );
+  useEffect(() => {
+    const folders: string[] = JSON.parse(unplaced);
+    if (!window.desktop || !folders.length) return;
+    let current = true;
+    void window.desktop.foldersExist(folders).then((found) => {
+      if (current) setAbsent(new Set(folders.filter((_, index) => !found[index]).map(pathKey)));
+    });
+    return () => {
+      current = false;
+    };
+  }, [unplaced]);
+  const onThis = (session: Session) => isHere(session, state.device, absent);
+  const sessions = state.sessions.filter((session) => onThis(session));
+  const elsewhere = state.sessions.filter((session) => !onThis(session));
+  const away = !!selected && !onThis(selected);
+  // Two connections may have Claude working in one folder at once, each unaware of the other. A window tells
+  // the others what it has running, and says so when another's session works where the shown one does. A
+  // session this window lists too is the same service's and no other.
+  const running = JSON.stringify(
+    connected
+      ? sessions
+          .filter((session) => session.activeRun)
+          .map((session) => ({ id: session.id, folder: session.projectPath }))
+      : [],
+  );
+  useEffect(() => {
+    void window.desktop?.setBusy(JSON.parse(running));
+  }, [running]);
+  const overlaps = (one: string, other: string) =>
+    pathKey(one) === pathKey(other) || isInside(one, [other]) || isInside(other, [one]);
+  const beside =
+    selected && !away
+      ? othersBusy
+          .filter((entry) =>
+            entry.runs.some(
+              (run) =>
+                !state.sessions.some((session) => session.id === run.id) &&
+                overlaps(run.folder, selected.projectPath),
+            ),
+          )
+          .map((entry) => `“${entry.name}”`)
+      : [];
   const recorded = selected ? state.events[selected.id] : undefined;
   const unfinished = selected ? state.live[selected.id] : undefined;
   const events = useMemo(
@@ -212,7 +265,7 @@ export function App() {
     !!history?.loading ||
     !!terminalSessionId;
   // A run is that of the computer its session is on, whichever connection of it started the run.
-  const ownsRun = !!selected?.activeRun && isHere(selected, state.device);
+  const ownsRun = !!selected?.activeRun && onThis(selected);
   // A native run accepts follow-up messages from the computer it runs for.
   const inputDisabled =
     !connected ||
@@ -381,7 +434,18 @@ export function App() {
   }, [connected]);
   useEffect(() => {
     localStorage.setItem('proxy-projects', JSON.stringify(projects));
+    saveShared('projects', projects);
   }, [projects]);
+  useEffect(
+    () =>
+      onSharedChange('projects', (value) => {
+        const next = savedProjects(value);
+        setProjects((current) =>
+          JSON.stringify(current) === JSON.stringify(next) ? current : next,
+        );
+      }),
+    [],
+  );
   // Each session's native state is read once when it is first shown idle.
   useEffect(() => {
     if (
@@ -650,7 +714,7 @@ export function App() {
   async function fork(session: Session, before?: { id: string; text: string }) {
     await act(async () => {
       // The copy of a session that is on another computer needs a directory on this one.
-      const projectPath = isHere(session, state.device) ? undefined : await placeHere(session);
+      const projectPath = onThis(session) ? undefined : await placeHere(session);
       if (projectPath === null) return;
       const response = await client.request({
         type: 'session.fork',
@@ -746,7 +810,7 @@ export function App() {
         },
       },
       // A session on another computer is taken over first, with a directory here.
-      ...(isHere(session, state.device)
+      ...(onThis(session)
         ? [
             {
               label: '移到其他项目…',
@@ -854,7 +918,7 @@ export function App() {
   // Every project the session could belong to, the one it is in marked. A session of another computer is in
   // none of them, also when a folder here has the same path: moving it into one takes it over.
   function moveMenu(session: Session): MenuItem[] {
-    const here = isHere(session, state.device);
+    const here = onThis(session);
     return [
       ...herePaths().map((path) => ({
         label: projectLabel(path),
@@ -1142,7 +1206,7 @@ export function App() {
     menu?.kind === 'session' ? state.sessions.find((item) => item.id === menu.sessionId) : null;
   const moved =
     menu?.kind === 'move' ? state.sessions.find((item) => item.id === menu.sessionId) : null;
-  const menuAway = !!moved && !isHere(moved, state.device);
+  const menuAway = !!moved && !onThis(moved);
   const openMenu =
     !menu || (menu.kind === 'session' && !menuSession)
       ? null
@@ -1368,11 +1432,20 @@ export function App() {
                 </button>
               </div>
             )}
+            {beside.length > 0 && (
+              <div className="elsewhere-bar" role="status">
+                <Laptop />
+                <p>
+                  连接{beside.join('、')}
+                  里有会话正在这个文件夹里运行。两边同时改动文件可能互相覆盖，建议等一边做完，或让它们在不同的文件夹里工作。
+                </p>
+              </div>
+            )}
             {selected && away && (
               <div className="elsewhere-bar" role="status">
                 <Laptop />
                 <p>
-                  这个会话在设备“{selected.device!.name}”上，项目目录是{' '}
+                  这个会话在设备“{selected.device?.name ?? '未知设备'}”上，项目目录是{' '}
                   <code>{selected.projectPath}</code>
                   。要在这台电脑上接着做，先选它在这里的项目目录；下一条消息会告诉 Claude 换了电脑。
                 </p>
