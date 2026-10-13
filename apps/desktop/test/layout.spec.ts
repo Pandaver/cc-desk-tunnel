@@ -621,6 +621,14 @@ test('Electron: frameless window, the project branch, files by path and window s
       .click();
     await page.getByRole('button', { name: '打开开发者工具', exact: true }).click();
     await expect.poll(tools).toBe(true);
+    // What this version changed is read here, from the notes the program carries.
+    await page.getByRole('button', { name: '这一版的更新内容', exact: true }).click();
+    const notes = page.getByRole('dialog');
+    await expect(notes.getByRole('heading', { name: /的更新内容$/ })).toBeVisible();
+    await expect(notes).toContainText('升级说明');
+    await page.screenshot({ path: resolve(screenshots, '状态与更新', '08-更新内容.png') });
+    await notes.getByRole('button', { name: '关闭', exact: true }).last().click();
+    await expect(notes).toHaveCount(0);
   } finally {
     await application.close();
   }

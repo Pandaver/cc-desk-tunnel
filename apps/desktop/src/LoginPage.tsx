@@ -21,6 +21,7 @@ export default function LoginPage({
   direct,
   downloaded,
   install,
+  showNotes,
   submit,
   openSettings,
 }: {
@@ -36,6 +37,8 @@ export default function LoginPage({
   downloaded: number | null;
   // Fetches and runs the installer the service holds, or the given version's from the release page.
   install: (version?: string) => void;
+  // Shows what a version changed.
+  showNotes: (version: string) => void;
   submit: () => void;
   // This computer's own settings, which need no connection.
   openSettings: () => void;
@@ -156,6 +159,15 @@ export default function LoginPage({
             >
               <Download />
               升级客户端到 {upgrade}
+            </button>
+          )}
+          {(direct ?? upgrade) && (
+            <button
+              className="button login-submit"
+              type="button"
+              onClick={() => showNotes((direct ?? upgrade)!)}
+            >
+              查看 {direct ?? upgrade} 的更新内容
             </button>
           )}
           {direct && (

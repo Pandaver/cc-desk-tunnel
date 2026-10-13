@@ -49,7 +49,7 @@ const sections: { id: Section; name: string; group: string; icon: typeof Bell; w
     group: '客户端',
     icon: SlidersHorizontal,
     words:
-      '托盘 后台 记住凭据 自动登录 启动 普通会话 文件夹 连接 超时 等待 SSH 回复小结 用量 首字 速度 缓存 多开 多个连接 窗口 服务端',
+      '额度 输入框 托盘 后台 记住凭据 自动登录 启动 普通会话 文件夹 连接 超时 等待 SSH 回复小结 用量 首字 速度 缓存 多开 多个连接 窗口 服务端',
   },
   {
     id: 'notifications',
@@ -350,7 +350,7 @@ function General({
   chooseWorkspace: (reset: boolean) => void;
 }) {
   const [closeToTray, setCloseToTray] = useState<boolean | null>(null);
-  const { connection, bypassPermissions } = usePrefs();
+  const { connection, bypassPermissions, quota } = usePrefs();
   useEffect(() => {
     void window.desktop?.windowSettings().then((values) => setCloseToTray(values.closeToTray));
   }, []);
@@ -393,6 +393,19 @@ function General({
                     恢复默认
                   </button>
                 </span>
+              </Row>
+            </div>
+            <h2 className="page-heading">输入框</h2>
+            <div className="card">
+              <Row
+                title="在输入框旁显示额度"
+                detail="5 小时和每周额度的已用比例，取自最近一次读数；点它打开“账号与额度”"
+              >
+                <Switch
+                  label="在输入框旁显示额度"
+                  checked={quota}
+                  onChange={(value) => setPrefs((prefs) => ({ ...prefs, quota: value }))}
+                />
               </Row>
             </div>
             <h2 className="page-heading">连接</h2>
@@ -537,11 +550,13 @@ function About({
   service,
   adapterName,
   updates,
+  showNotes,
 }: {
   version: string;
   service: string | null;
   adapterName: string;
   updates: MenuItem[];
+  showNotes: (version: string) => void;
 }) {
   return (
     <section className="page" aria-label="关于与更新">
@@ -549,7 +564,14 @@ function About({
         <h1 className="page-title">关于与更新</h1>
         <div className="card">
           <Row title="客户端版本">
-            <span className="setting-value">{version || '浏览器开发入口'}</span>
+            <span className="setting-actions">
+              <span className="setting-value">{version || '浏览器开发入口'}</span>
+              {version && (
+                <button type="button" className="button" onClick={() => showNotes(version)}>
+                  这一版的更新内容
+                </button>
+              )}
+            </span>
           </Row>
           <Row title="服务端版本">
             <span className="setting-value">{service ?? '未知'}</span>
@@ -639,6 +661,7 @@ export default function SettingsPage({
   service,
   adapterName,
   updates,
+  showNotes,
   back,
 }: {
   // Given before a connection exists: only this computer's own settings are shown, and this leaves them.
@@ -657,6 +680,7 @@ export default function SettingsPage({
   service: string | null;
   adapterName: string;
   updates: MenuItem[];
+  showNotes: (version: string) => void;
 }) {
   const [search, setSearch] = useState('');
   const term = search.trim().toLowerCase();
@@ -733,7 +757,13 @@ export default function SettingsPage({
         ) : section === 'help' ? (
           <Help />
         ) : (
-          <About version={version} service={service} adapterName={adapterName} updates={updates} />
+          <About
+            version={version}
+            service={service}
+            adapterName={adapterName}
+            updates={updates}
+            showNotes={showNotes}
+          />
         )}
       </main>
     </>

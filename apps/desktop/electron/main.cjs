@@ -410,6 +410,17 @@ handle('schedules:save', (_event, text) => {
   replaceFile(schedulesPath(), schedules);
 });
 handle('app:version', () => app.getVersion());
+// The notes of a release as its page on GitHub has them, for a version newer than this program, whose notes
+// it cannot carry itself.
+handle('release:notes', async (_event, version) => {
+  if (!/^\d+\.\d+\.\d+$/.test(String(version))) throw new Error('Unexpected version');
+  const response = await net.fetch(
+    `https://api.github.com/repos/sun168567/cc-desk-tunnel/releases/tags/v${version}`,
+    { headers: { Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(15000) },
+  );
+  if (!response.ok) throw new Error(`GitHub ${response.status}`);
+  return String((await response.json()).body ?? '').slice(0, 100_000);
+});
 // Which of the user's computers this is to the service: an ID made once and kept, under the computer's name.
 handle('device:get', () => ({
   id: readComputer().deviceId ?? writeComputer({ deviceId: randomUUID() }).deviceId,

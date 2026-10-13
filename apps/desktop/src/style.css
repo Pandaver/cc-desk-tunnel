@@ -517,6 +517,59 @@ html[data-platform='darwin'] .titlebar {
   border-radius: 50%;
   background: var(--warn);
 }
+/* A run that is alive breathes; one that waits for the user, or of which there is no word, rests. */
+.running-dot.breathing {
+  animation: breathe 2.4s ease-in-out infinite;
+}
+@keyframes breathe {
+  50% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+}
+@keyframes appear {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .running-dot.breathing,
+  .background-tasks li {
+    animation: none;
+  }
+}
+.quota-note {
+  padding: 2px 6px;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: none;
+  color: var(--faint);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.quota-note:hover {
+  background: var(--hover);
+  color: var(--muted);
+}
+.quota-note.warn {
+  color: var(--warn);
+}
+.quota-note.danger {
+  color: var(--danger);
+}
+@media (max-width: 700px) {
+  .quota-note {
+    display: none;
+  }
+}
+.release-notes {
+  width: min(680px, 80vw);
+  max-height: 62vh;
+  margin-bottom: 14px;
+  overflow-y: auto;
+  font-size: 13.5px;
+}
 .connection-dot.online {
   background: var(--ok);
 }
@@ -1866,6 +1919,15 @@ details[open] > summary > .fold-chevron {
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-s);
   font-size: 13px;
+}
+.background-tasks li {
+  animation: appear 0.2s ease-out;
+}
+.background-tasks li small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
 }
 .background-tasks li span {
   flex: 1;
