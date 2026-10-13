@@ -563,11 +563,15 @@ html[data-platform='darwin'] .titlebar {
     display: none;
   }
 }
+/* A version's notes are read, not answered: their dialog is wider than the ones that ask a question. */
+dialog:has(.release-notes) {
+  width: min(720px, calc(100vw - 32px));
+}
 .release-notes {
-  width: min(680px, 80vw);
   max-height: 62vh;
   margin-bottom: 14px;
   overflow-y: auto;
+  overflow-wrap: anywhere;
   font-size: 13.5px;
 }
 .connection-dot.online {
