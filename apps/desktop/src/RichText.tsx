@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { isValidElement, useRef, useState } from 'react';
+import { isValidElement, memo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Code, Image } from 'lucide-react';
 import { CopyButton } from './copy.tsx';
@@ -125,7 +125,7 @@ const rehypePlugins: [typeof rehypeKatex, { strict: boolean }][] = [
   [rehypeKatex, { strict: false }],
 ];
 
-export default function RichText({ text }: { text: string }) {
+export default memo(function RichText({ text }: { text: string }) {
   return (
     <Markdown
       remarkPlugins={remarkPlugins}
@@ -136,4 +136,4 @@ export default function RichText({ text }: { text: string }) {
       {dollars(text)}
     </Markdown>
   );
-}
+});
