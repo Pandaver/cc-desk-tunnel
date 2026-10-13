@@ -1879,6 +1879,31 @@ details[open] > summary > .fold-chevron {
 .work > .tool {
   margin-left: 19px;
 }
+.work-flat {
+  margin: -6px 0 18px;
+}
+.work-flat > .tool {
+  margin-left: 0;
+}
+.thinking-preview {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 12px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.turn-process > summary .failed {
+  color: #b4532f;
+}
+.thinking-block .tool-verb {
+  flex: none;
+  white-space: nowrap;
+}
+.thinking-block[open] .thinking-preview {
+  display: none;
+}
 .tool-heading > svg {
   color: #658077;
 }

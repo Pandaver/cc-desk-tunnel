@@ -35,6 +35,8 @@ import { RunStatus, TaskLine } from './RunStatus.tsx';
 import type { Clock } from './RunStatus.tsx';
 import QuestionCard, { questionsOf } from './QuestionCard.tsx';
 import { conversation } from './transcript.ts';
+import { usePrefs } from './prefs.ts';
+import { firstLine, viewPolicy } from './transcriptView.ts';
 import type { TranscriptItem, Turn, Work } from './transcript.ts';
 import { CopyButton, copyText } from './copy.tsx';
 import { messageTime } from './messageTime.ts';
@@ -193,6 +195,47 @@ function ToolRow({ tool, active, live }: { tool: Tool; active: boolean; live: Li
   );
 }
 
+// The calls and thoughts of a run, one under another.
+function WorkItems({
+  work,
+  active,
+  live,
+  preview,
+}: {
+  work: Work;
+  active: boolean;
+  live: Live;
+  preview?: boolean;
+}) {
+  return (
+    <>
+      {work.items.map((item) =>
+        item.kind === 'tool' ? (
+          <ToolRow key={item.id} tool={item} active={active} live={live} />
+        ) : (
+          <Fold
+            key={item.id}
+            className="tool thinking-block"
+            summary={
+              <span className="tool-heading">
+                <Brain />
+                <span className="tool-verb">思考</span>
+                {preview && <span className="thinking-preview">{firstLine(item.text)}</span>}
+              </span>
+            }
+          >
+            {() => (
+              <div className="message-content tool-detail" data-search-content>
+                <Rich text={item.text} />
+              </div>
+            )}
+          </Fold>
+        ),
+      )}
+    </>
+  );
+}
+
 function WorkGroup({
   work,
   active,
@@ -217,30 +260,7 @@ function WorkGroup({
         </span>
       }
     >
-      {() =>
-        work.items.map((item) =>
-          item.kind === 'tool' ? (
-            <ToolRow key={item.id} tool={item} active={active} live={live} />
-          ) : (
-            <Fold
-              key={item.id}
-              className="tool thinking-block"
-              summary={
-                <span className="tool-heading">
-                  <Brain />
-                  <span className="tool-verb">思考</span>
-                </span>
-              }
-            >
-              {() => (
-                <div className="message-content tool-detail" data-search-content>
-                  <Rich text={item.text} />
-                </div>
-              )}
-            </Fold>
-          ),
-        )
-      }
+      {() => <WorkItems work={work} active={active} live={live} />}
     </Fold>
   );
 }
@@ -322,29 +342,49 @@ function Message({
     </article>
   );
 }
+
+// A question put in while the run goes on closes the turn before it, but the run has not finished: that turn and the
+// ones joined to it stay as they were until it has.
+function heldOpen(turns: Turn[], index: number) {
+  let last = index;
+  while (turns[last + 1]?.joined) last++;
+  return last > index && !turns[last].endedAt;
+}
+
 function TurnView({
   turn,
   native,
   live,
   latest,
+  held,
 }: {
   turn: Turn;
   native: boolean;
   live: Live;
   latest: boolean;
+  held: boolean;
 }) {
   const active = !turn.endedAt;
+  const { view } = usePrefs();
+  const policy = viewPolicy(view.mode);
   const notes = turn.steps.filter((step) => step.kind === 'assistant').length;
+  const flat = policy.flat;
   const steps = () =>
     turn.steps.map((step, index) =>
       step.kind === 'work' ? (
-        <WorkGroup
-          key={step.id}
-          work={step}
-          active={active}
-          latest={index === turn.steps.length - 1}
-          live={live}
-        />
+        flat ? (
+          <div key={step.id} className="work-flat">
+            <WorkItems work={step} active={active} live={live} preview={policy.preview} />
+          </div>
+        ) : (
+          <WorkGroup
+            key={step.id}
+            work={step}
+            active={active}
+            latest={index === turn.steps.length - 1}
+            live={live}
+          />
+        )
       ) : (
         <Message key={step.id} item={step} native={native} />
       ),
@@ -365,13 +405,15 @@ function TurnView({
           />
         )
       )}
-      {active
+      {active || held || !policy.fold
         ? steps()
         : turn.steps.length > 0 && (
             <Fold
               className="turn-process"
               summary={
-                <span>
+                <span className={turn.outcome}>
+                  {turn.outcome === 'cancelled' && '已停止 · '}
+                  {turn.outcome === 'failed' && '处理失败 · '}
                   用时 {duration(turn.startedAt, turn.endedAt!)}
                   {turn.tools > 0 && ` · ${turn.tools} 步`}
                   {notes > 0 && ` · ${notes} 条说明`}
@@ -696,6 +738,7 @@ export default function Conversation({
                 native={native}
                 live={live}
                 latest={index === turns.length - 1}
+                held={heldOpen(turns, index)}
               />
             ))}
             {session.activeRun && background && (
