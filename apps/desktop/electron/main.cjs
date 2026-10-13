@@ -424,7 +424,8 @@ function launch(id, ...flags) {
     [
       ...(app.isPackaged ? [] : [app.getAppPath()]),
       ...process.argv.filter(
-        (item) => item.startsWith('--user-data-dir=') || item === '--smoke-test',
+        (item) =>
+          item.startsWith('--user-data-dir=') || item === '--smoke-test' || item === '--no-sandbox',
       ),
       ...(id ? [`--connection=${id}`] : []),
       ...flags,
@@ -440,9 +441,13 @@ function dismissOthers() {
 // connection's window looks at the files every two seconds and takes what another one wrote.
 const sharedKeys = ['prefs', 'projects'];
 const snapshot = (key) =>
-  key === 'connections' ? connections.list(base) : connections.readShared(base, key);
+  key === 'connections'
+    ? connections.list(base)
+    : key === 'busy'
+      ? connections.busy(base, connectionId)
+      : connections.readShared(base, key);
 const seen = Object.fromEntries(
-  [...sharedKeys, 'connections'].map((key) => [key, JSON.stringify(snapshot(key))]),
+  [...sharedKeys, 'connections', 'busy'].map((key) => [key, JSON.stringify(snapshot(key))]),
 );
 let renamed = () => {};
 function takeShared() {
@@ -472,6 +477,17 @@ handle('shared:save', (_event, key, value) => {
   if (text.length > 1 << 20) throw new Error('Shared value too large');
   connections.writeShared(base, key, value);
   seen[key] = text;
+});
+// The sessions this connection has running, with their folders: see `busy` in connections.cjs.
+handle('busy:set', (_event, runs) => {
+  connections.mark(
+    base,
+    connectionId,
+    true,
+    (Array.isArray(runs) ? runs : [])
+      .slice(0, 200)
+      .map((run) => ({ id: String(run?.id), folder: String(run?.folder) })),
+  );
 });
 handle('connections:list', listed);
 handle('connections:create', (_event, name) => {

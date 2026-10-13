@@ -51,7 +51,7 @@ import Conversation from './Conversation.tsx';
 import LoginPage from './LoginPage.tsx';
 import type { ConnectionForm } from './LoginPage.tsx';
 import { exportSession } from './exportSession.ts';
-import { onSharedChange, saveShared, shared } from './shared.ts';
+import { onSharedChange, saveShared, shared, useShared } from './shared.ts';
 import { useNotifications } from './notifications.ts';
 import { folderName, isInside, isNewer, pathKey, withProject } from './paths.ts';
 import { getPrefs, setPrefs, toggled, usePrefs } from './prefs.ts';
@@ -175,12 +175,40 @@ export function App() {
 
   const nativeMode = state.adapter === 'claude-code';
   const connected = state.status === 'connected';
+  const othersBusy = useShared('busy');
   const selected = state.sessions.find((session) => session.id === state.selectedId);
   // What is listed and managed here is what is on this computer. Sessions on the user's other computers are
   // shown apart: they can be read, and taken over or forked into a directory here.
   const sessions = state.sessions.filter((session) => isHere(session, state.device));
   const elsewhere = state.sessions.filter((session) => !isHere(session, state.device));
   const away = !!selected && !isHere(selected, state.device);
+  // Two connections may have Claude working in one folder at once, each unaware of the other. A window tells
+  // the others what it has running, and says so when another's session works where the shown one does. A
+  // session this window lists too is the same service's and no other.
+  const running = JSON.stringify(
+    connected
+      ? sessions
+          .filter((session) => session.activeRun)
+          .map((session) => ({ id: session.id, folder: session.projectPath }))
+      : [],
+  );
+  useEffect(() => {
+    void window.desktop?.setBusy(JSON.parse(running));
+  }, [running]);
+  const overlaps = (one: string, other: string) =>
+    pathKey(one) === pathKey(other) || isInside(one, [other]) || isInside(other, [one]);
+  const beside =
+    selected && !away
+      ? othersBusy
+          .filter((entry) =>
+            entry.runs.some(
+              (run) =>
+                !state.sessions.some((session) => session.id === run.id) &&
+                overlaps(run.folder, selected.projectPath),
+            ),
+          )
+          .map((entry) => `“${entry.name}”`)
+      : [];
   const recorded = selected ? state.events[selected.id] : undefined;
   const unfinished = selected ? state.live[selected.id] : undefined;
   const events = useMemo(
@@ -1379,6 +1407,15 @@ export function App() {
                 <button type="button" className="button" onClick={disconnect}>
                   断开并回到登录页
                 </button>
+              </div>
+            )}
+            {beside.length > 0 && (
+              <div className="elsewhere-bar" role="status">
+                <Laptop />
+                <p>
+                  连接{beside.join('、')}
+                  里有会话正在这个文件夹里运行。两边同时改动文件可能互相覆盖，建议等一边做完，或让它们在不同的文件夹里工作。
+                </p>
               </div>
             )}
             {selected && away && (

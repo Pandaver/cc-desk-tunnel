@@ -44,8 +44,15 @@ test('a connection is removed with its profile, unless its window is open', (con
   connections.mark(base, id, true);
   assert.equal(connections.running(base, id), true);
   assert.throws(() => connections.remove(base, id), /还开着/);
+  // What it has running is told to the other connections, not to itself.
+  connections.mark(base, id, true, [{ id: 's1', folder: 'D:\\work' }, { folder: 1 }]);
+  assert.deepEqual(connections.busy(base, ''), [
+    { name: '工作', runs: [{ id: 's1', folder: 'D:\\work' }] },
+  ]);
+  assert.deepEqual(connections.busy(base, id), []);
   connections.mark(base, id, false);
   assert.equal(connections.running(base, id), false);
+  assert.deepEqual(connections.busy(base, ''), []);
   assert.throws(() => connections.remove(base, ''), /不存在/);
   connections.remove(base, id);
   assert.equal(existsSync(connections.directory(base, id)), false);

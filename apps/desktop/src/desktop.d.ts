@@ -11,6 +11,8 @@ declare global {
       onSharedChanged: (
         callback: (key: keyof import('./shared.ts').Shared, value: unknown) => void,
       ) => () => void;
+      // The sessions running in this window, for the other connections' windows to warn about.
+      setBusy: (runs: import('./shared.ts').Run[]) => Promise<void>;
       // Each connection is a window of its own; `open` tells whether it is running now.
       connections: () => Promise<import('./shared.ts').ListedConnection[]>;
       createConnection: (name: string) => Promise<import('./shared.ts').ListedConnection[]>;

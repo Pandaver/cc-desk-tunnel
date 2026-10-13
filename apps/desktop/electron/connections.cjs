@@ -90,9 +90,28 @@ function running(base, id) {
     return false;
   }
 }
-function mark(base, id, on) {
-  if (on) writeFileSync(instanceFile(base, id), JSON.stringify({ pid: process.pid }));
+// With it go the sessions the connection has running and the folders they work in.
+function mark(base, id, on, runs = []) {
+  if (on) writeFileSync(instanceFile(base, id), JSON.stringify({ pid: process.pid, runs }));
   else rmSync(instanceFile(base, id), { force: true });
+}
+// What the other connections have running now, for a window to warn of two sessions in one folder.
+function busy(base, except) {
+  return list(base)
+    .filter((entry) => entry.id !== except && running(base, entry.id))
+    .map((entry) => {
+      let runs = [];
+      try {
+        runs = JSON.parse(readFileSync(instanceFile(base, entry.id), 'utf8')).runs;
+      } catch {}
+      return {
+        name: entry.name,
+        runs: (Array.isArray(runs) ? runs : []).filter(
+          (run) => typeof run?.id === 'string' && typeof run?.folder === 'string',
+        ),
+      };
+    })
+    .filter((entry) => entry.runs.length);
 }
 // Removing a connection removes what it kept on this computer: its saved sign-in, drafts, scheduled tasks and
 // log. Sessions are the service's and stay there.
@@ -114,6 +133,7 @@ function requested(argv, base) {
 }
 
 module.exports = {
+  busy,
   create,
   directory,
   list,

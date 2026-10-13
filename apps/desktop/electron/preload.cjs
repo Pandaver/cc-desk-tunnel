@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('desktop', {
     ipcRenderer.on('shared:changed', listener);
     return () => ipcRenderer.removeListener('shared:changed', listener);
   },
+  setBusy: (runs) => ipcRenderer.invoke('busy:set', runs),
   connections: () => ipcRenderer.invoke('connections:list'),
   createConnection: (name) => ipcRenderer.invoke('connections:create', name),
   openConnection: (id) => ipcRenderer.invoke('connections:open', id),

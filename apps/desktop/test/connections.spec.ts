@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
-import { login } from './helpers.ts';
+import { login, send, settled } from './helpers.ts';
 
 async function general(page: Page) {
   await page.getByRole('button', { name: '设置与账号', exact: true }).click();
@@ -78,6 +78,38 @@ test('Electron: a second connection is a window of its own and shares what is th
     expect(await device(other)).toEqual(await device(page));
     await login(other);
     await expect(other.locator('.brand-connection')).toHaveText('工作');
+
+    // What runs here is told with its folder. Another connection's session in that folder, or above it, is
+    // warned of over the conversation.
+    const runs = () =>
+      (JSON.parse(readFileSync(instance, 'utf8')).runs as { folder: string }[]).map(
+        (run) => run.folder,
+      );
+    // This repository stands in for the user's project.
+    const repository = resolve('.');
+    await second.evaluate(({ dialog }, chosen) => {
+      dialog.showOpenDialog = (async () => ({
+        canceled: false,
+        filePaths: [chosen],
+      })) as unknown as typeof dialog.showOpenDialog;
+    }, repository);
+    await other.getByRole('button', { name: '添加项目', exact: true }).click();
+    await other.getByRole('button', { name: `新建会话 · ${repository}`, exact: true }).click();
+    await send(other, '检查目录', 'tool');
+    await expect.poll(runs).toEqual([repository]);
+    await other.getByRole('button', { name: '停止运行', exact: true }).click();
+    await settled(other);
+    await expect.poll(runs).toEqual([]);
+    await expect(other.locator('.elsewhere-bar')).toHaveCount(0);
+    await page.evaluate(
+      (folder) => window.desktop!.setBusy([{ id: 'another', folder }]),
+      resolve('..'),
+    );
+    await expect(other.locator('.elsewhere-bar')).toContainText(
+      '连接“主连接”里有会话正在这个文件夹里运行',
+    );
+    await page.evaluate(() => window.desktop!.setBusy([]));
+    await expect(other.locator('.elsewhere-bar')).toHaveCount(0);
 
     // A choice made in one window is the other's within seconds; how the window closes is the computer's too.
     await general(other);

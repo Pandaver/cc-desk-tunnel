@@ -5,10 +5,18 @@ import { useSyncExternalStore } from 'react';
 // window reaches the others within seconds. A browser has one window and shares nothing.
 export type Connection = { id: string; name: string };
 export type ListedConnection = Connection & { current: boolean; open: boolean };
-export type Shared = { prefs?: unknown; projects?: unknown; connections: Connection[] };
+// A running session of a connection and the folder on this computer it works in.
+export type Run = { id: string; folder: string };
+export type Shared = {
+  prefs?: unknown;
+  projects?: unknown;
+  connections: Connection[];
+  // What the other connections have running now, by their names.
+  busy: { name: string; runs: Run[] }[];
+};
 
 const boot = window.desktop?.boot;
-const values: Shared = { connections: [], ...boot?.shared };
+const values: Shared = { connections: [], busy: [], ...boot?.shared };
 const listeners = new Set<() => void>();
 window.desktop?.onSharedChanged((key, value) => {
   values[key] = value as never;
