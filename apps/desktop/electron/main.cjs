@@ -122,6 +122,17 @@ handle('project:choose', async (event) => {
   return result.canceled ? null : (result.filePaths[0] ?? null);
 });
 handle('project:spelling', (_event, written) => asOnDisk(String(written)));
+// Which of these folders are on this computer: a session that names no computer is here when its folder is.
+handle('folders:exist', (_event, folders) =>
+  Promise.all(
+    (Array.isArray(folders) ? folders : []).slice(0, 500).map((folder) =>
+      stat(String(folder)).then(
+        (found) => found.isDirectory(),
+        () => false,
+      ),
+    ),
+  ),
+);
 // Files the user wants to mention in a message: only their paths go to the page.
 handle('files:choose', async (event) => {
   const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {

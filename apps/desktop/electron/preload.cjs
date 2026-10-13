@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('desktop', {
   removeConnection: (id) => ipcRenderer.invoke('connections:remove', id),
   chooseProject: () => ipcRenderer.invoke('project:choose'),
   asOnDisk: (path) => ipcRenderer.invoke('project:spelling', path),
+  foldersExist: (folders) => ipcRenderer.invoke('folders:exist', folders),
   chooseFiles: () => ipcRenderer.invoke('files:choose'),
   pathForFile: (file) => webUtils.getPathForFile(file),
   saveFile: (name, text) => ipcRenderer.invoke('file:save', name, text),

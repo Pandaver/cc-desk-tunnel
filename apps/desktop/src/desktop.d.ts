@@ -24,6 +24,8 @@ declare global {
       removeConnection: (id: string) => Promise<import('./shared.ts').ListedConnection[]>;
       chooseProject: () => Promise<string | null>;
       asOnDisk: (path: string) => Promise<string>;
+      // Whether each folder is on this computer, in the order given.
+      foldersExist: (folders: string[]) => Promise<boolean[]>;
       // Files to mention in a message; the paths of the ones chosen.
       chooseFiles: () => Promise<string[]>;
       pathForFile: (file: File) => string;
