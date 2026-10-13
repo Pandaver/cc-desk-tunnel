@@ -486,6 +486,9 @@ test('a session on another computer is listed apart, read, and taken over with a
   await other.screenshot({ path: resolve(screenshots, 'desktop-elsewhere.png') });
   other.once('dialog', (dialog) => void dialog.accept('E:\\另一台\\接管目录'));
   await bar.getByRole('button', { name: '在本机继续…', exact: true }).click();
+  // A computer that already has projects offers them first; the folder is then chosen from that list.
+  const elsewhere = other.getByRole('menuitem', { name: '选择其他文件夹…', exact: true });
+  if (await elsewhere.isVisible()) await elsewhere.click();
   await expect(bar).toHaveCount(0);
   await expect(
     other.locator('.project-group').filter({ hasText: '接管目录' }).locator('.session-row'),
@@ -495,6 +498,18 @@ test('a session on another computer is listed apart, read, and taken over with a
   // The computer it was taken from still has it open, and now as one of another's.
   await expect(page.locator('.elsewhere-bar')).toContainText('接管目录');
   await expect(page.getByText('第二台电脑上的话')).toBeVisible();
+  // This computer has projects, so the session comes back into one of them without a folder being asked for.
+  await page.locator('.elsewhere-bar').getByRole('button', { name: '在本机继续…' }).click();
+  const menu = page.getByRole('menu', { name: '会话所在的项目' });
+  await expect(menu).toContainText('这台电脑上的项目');
+  const choice = menu.getByRole('menuitemradio', { name: /中文项目/ });
+  await expect(choice).toHaveAttribute('aria-checked', 'false');
+  await expect(menu.getByRole('menuitem', { name: '选择其他文件夹…' })).toBeVisible();
+  await choice.click();
+  await expect(page.locator('.elsewhere-bar')).toHaveCount(0);
+  await expect(
+    page.locator('.project-group').filter({ hasText: '中文项目' }).locator('.session-row.selected'),
+  ).toContainText(title);
   await context.close();
 });
 

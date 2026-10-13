@@ -840,8 +840,8 @@ export function App() {
     ];
   }
   const projectLabel = (path: string) => prefs.projectNames[pathKey(path)] || folderName(path);
-  // Every project the session could belong to, the one it is in marked.
-  function moveMenu(session: Session): MenuItem[] {
+  // The projects of this computer: the ones listed here and the folders its sessions are in.
+  function herePaths() {
     const paths = [...projects];
     for (const item of sessions)
       if (
@@ -849,13 +849,19 @@ export function App() {
         !paths.some((path) => pathKey(path) === pathKey(item.projectPath))
       )
         paths.push(item.projectPath);
+    return paths;
+  }
+  // Every project the session could belong to, the one it is in marked. A session of another computer is in
+  // none of them, also when a folder here has the same path: moving it into one takes it over.
+  function moveMenu(session: Session): MenuItem[] {
+    const here = isHere(session, state.device);
     return [
-      ...paths.map((path) => ({
+      ...herePaths().map((path) => ({
         label: projectLabel(path),
         detail: path,
-        checked: pathKey(path) === pathKey(session.projectPath),
+        checked: here && pathKey(path) === pathKey(session.projectPath),
         run: () => {
-          if (pathKey(path) !== pathKey(session.projectPath))
+          if (!here || pathKey(path) !== pathKey(session.projectPath))
             void act(async () => {
               await client.request({
                 type: 'session.move',
@@ -1134,6 +1140,9 @@ export function App() {
     );
   const menuSession =
     menu?.kind === 'session' ? state.sessions.find((item) => item.id === menu.sessionId) : null;
+  const moved =
+    menu?.kind === 'move' ? state.sessions.find((item) => item.id === menu.sessionId) : null;
+  const menuAway = !!moved && !isHere(moved, state.device);
   const openMenu =
     !menu || (menu.kind === 'session' && !menuSession)
       ? null
@@ -1144,10 +1153,10 @@ export function App() {
           : menu.kind === 'move'
             ? {
                 label: '会话所在的项目',
-                heading: '把会话移到另一个项目；下一条消息会告诉 Claude 项目已变更',
-                items: state.sessions.some((item) => item.id === menu.sessionId)
-                  ? moveMenu(state.sessions.find((item) => item.id === menu.sessionId)!)
-                  : [],
+                heading: menuAway
+                  ? '选这个会话在这台电脑上的项目；下一条消息会告诉 Claude 换了电脑'
+                  : '把会话移到另一个项目；下一条消息会告诉 Claude 项目已变更',
+                items: moved ? moveMenu(moved) : [],
               }
             : menu.kind === 'settings'
               ? { label: '设置与账号', items: settingsMenu }
@@ -1371,8 +1380,17 @@ export function App() {
                   type="button"
                   className="button primary"
                   disabled={controlsDisabled}
-                  onClick={() => {
-                    void takeOver(selected);
+                  onClick={(event) => {
+                    // With projects here the session goes into one of them, or into a folder chosen there.
+                    if (!herePaths().length) return void takeOver(selected);
+                    const box = event.currentTarget.getBoundingClientRect();
+                    setMenu({
+                      kind: 'move',
+                      sessionId: selected.id,
+                      x: box.left,
+                      y: box.top - 6,
+                      above: true,
+                    });
                   }}
                 >
                   在本机继续…
