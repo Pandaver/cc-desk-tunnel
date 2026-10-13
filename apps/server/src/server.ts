@@ -326,6 +326,39 @@ export function createProxyServer(options: ServerOptions) {
     if (payload.type === 'native.compact') store.compacted(run.sessionId);
     if (payload.type === 'run.status') updated(run.sessionId);
   }
+  // The CLI reports its model requests a moment after the turn ends. Wait for as many as the turn made, then
+  // record what they add up to; whatever has not come by then is left out and the figures are marked partial.
+  async function turnStats(
+    run: Run,
+    turn: {
+      messageId?: string;
+      startedAt: number;
+      endedAt: number;
+      requests: number;
+      outputTokens: number;
+      promptIds: string[];
+    },
+  ) {
+    // Complete once every request of the main loop is there and the records add up to the output the CLI counted for the
+    // turn, which includes its subagents. Subagent records must not stand in for a main request that is still on its way.
+    const complete = (stats: { mainRequests: number; outputTokens: number }) =>
+      stats.mainRequests >= turn.requests && stats.outputTokens >= turn.outputTokens;
+    let stats = usage.turnStats(run.sessionId, turn);
+    // Without a count of requests to wait for, give the usual export delay one chance.
+    for (let waited = 0; waited < 8000; waited += 500) {
+      if (turn.requests ? complete(stats) : waited >= 3000) break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      stats = usage.turnStats(run.sessionId, turn);
+    }
+    const { mainRequests, ...figures } = stats;
+    if (figures.requests)
+      emit(run, {
+        type: 'turn.stats',
+        messageId: turn.messageId,
+        ...figures,
+        partial: !complete(stats),
+      });
+  }
   function finish(run: Run, status: 'completed' | 'cancelled' | 'failed', reason?: string) {
     if (runs.get(run.sessionId) !== run) return;
     run.input?.close();
@@ -382,6 +415,7 @@ export function createProxyServer(options: ServerOptions) {
             connectionId: run.connectionId,
             ...(background ? { waiting: 'background' as const } : {}),
           }),
+        turnEnded: (turn) => track(turnStats(run, turn).catch(() => {})),
         dataDir: store.directory,
         resume: store.hasNativeContext(run.sessionId),
         signal: run.controller.signal,

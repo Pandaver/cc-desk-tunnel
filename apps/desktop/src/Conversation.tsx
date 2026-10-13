@@ -35,6 +35,7 @@ import { conversation } from './transcript.ts';
 import type { TranscriptItem, Turn, Work } from './transcript.ts';
 import { CopyButton, copyText } from './copy.tsx';
 import { messageTime } from './messageTime.ts';
+import TurnStats from './TurnStats.tsx';
 import ConversationFind, { SearchExpanded } from './ConversationFind.tsx';
 import { IconButton, Menu } from './ui.tsx';
 import type { MenuItem, MenuPosition } from './ui.tsx';
@@ -321,7 +322,7 @@ function TurnView({ turn, native, live }: { turn: Turn; native: boolean; live: L
               className="turn-process"
               summary={
                 <span>
-                  用时 {duration(turn.startedAt, turn.endedAt!)}
+                  耗时 {duration(turn.startedAt, turn.endedAt!)}
                   {turn.tools > 0 && ` · ${turn.tools} 步`}
                   {notes > 0 && ` · ${notes} 条说明`}
                 </span>
@@ -331,6 +332,7 @@ function TurnView({ turn, native, live }: { turn: Turn; native: boolean; live: L
             </Fold>
           )}
       {turn.answer && <Message item={turn.answer} native={native} />}
+      {turn.stats && <TurnStats stats={turn.stats} />}
       {turn.notices.map((item) => (
         <div
           key={item.id}

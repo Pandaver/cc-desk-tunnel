@@ -1620,6 +1620,91 @@ details[open] > summary > .fold-chevron {
 .turn-process[open] > summary {
   margin-bottom: 14px;
 }
+/* The button under a reply; it opens a card above it with the figures, like the usage card in other chat apps. */
+.turn-stats {
+  position: relative;
+  margin: -10px 0 22px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.turn-stats > button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.turn-stats > button:hover,
+.turn-stats > button[aria-expanded='true'] {
+  background: var(--hover, rgba(0, 0, 0, 0.05));
+}
+.turn-stats svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+.turn-stats-card {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + 6px);
+  left: 0;
+  width: min(280px, 90vw);
+  padding: 12px 16px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--muted);
+}
+.turn-stats-card.below {
+  top: calc(100% + 6px);
+  bottom: auto;
+}
+.turn-stats-card header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+}
+.turn-stats-card header strong {
+  font-weight: 500;
+  color: var(--text);
+}
+.turn-stats-card header b {
+  margin-left: auto;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.turn-stats-card dl {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 16px;
+  margin: 12px 0 0;
+}
+.turn-stats-card dl > div:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+.turn-stats-card dt {
+  color: var(--faint);
+}
+.turn-stats-card dd {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.turn-stats-card p {
+  margin: 10px 0 0;
+  color: var(--faint);
+}
 .work {
   margin: -6px 0 18px;
 }
@@ -3039,4 +3124,34 @@ dialog {
 }
 .menu-label small {
   overflow-wrap: anywhere;
+}
+
+/* The choice of what the reply summary shows: one row of toggle chips under the switch. */
+.stat-picks {
+  display: block;
+}
+.stat-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.stat-chip {
+  padding: 4px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.stat-chip[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent-soft, rgba(37, 99, 235, 0.1));
+  color: var(--accent);
+}
+.stat-chip:disabled {
+  opacity: 0.5;
+  cursor: default;
 }

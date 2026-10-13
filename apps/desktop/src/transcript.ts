@@ -1,4 +1,4 @@
-import type { SessionEvent } from '@cc-desk-tunnel/protocol';
+import type { SessionEvent, TurnStats } from '@cc-desk-tunnel/protocol';
 
 export type ToolState =
   | 'requested'
@@ -212,6 +212,8 @@ export type Turn = {
   startedAt: string;
   endedAt?: string;
   tools: number;
+  // What the turn used, reported by the service a moment after it ended.
+  stats?: TurnStats;
 };
 
 export function conversation(events: SessionEvent[]): Turn[] {
@@ -255,6 +257,15 @@ export function conversation(events: SessionEvent[]): Turn[] {
   }
   const last = turns.at(-1);
   if (last && !last.endedAt) last.endedAt = ended.get(runId);
+  const answered = new Map(
+    turns.flatMap((turn) => (turn.question ? [[turn.question.id, turn]] : [])),
+  );
+  // A page of history may start after the question a report belongs to.
+  for (const { payload } of events) {
+    const turn =
+      payload.type === 'turn.stats' && payload.messageId && answered.get(payload.messageId);
+    if (turn) turn.stats = payload as TurnStats;
+  }
   for (const turn of turns) {
     if (!turn.endedAt) continue;
     const final = turn.steps.at(-1);

@@ -57,6 +57,15 @@ export type ClaudeRun = {
   ssh: SshConnection;
   // Told when Claude has finished its turn and the run goes on only for background tasks, and when it resumes.
   waiting: (background: boolean) => void;
+  // Told when a turn ends: the user message it answered, its time window, and how many model requests it made.
+  turnEnded: (turn: {
+    messageId?: string;
+    startedAt: number;
+    endedAt: number;
+    requests: number;
+    outputTokens: number;
+    promptIds: string[];
+  }) => void;
   // Filled in while the CLI is running, so the service can ask it for fresh account quota mid-run and end
   // one of its background tasks.
   controls: { refresh?: () => Promise<void>; stopTask?: (taskId: string) => Promise<void> };
@@ -125,6 +134,11 @@ export async function runClaude(
   let stderr = '',
     failure: Error | undefined;
   let session: Query | undefined;
+  // The prompts the CLI took since the last turn ended; the OpenTelemetry records of their requests carry the same ids.
+  let promptIds: string[] = [];
+  // Output tokens of every model call so far, subagents included, as the CLI's running total counts them; a turn's
+  // share is the step from one result to the next. A resumed session's total already holds earlier runs.
+  let outputSoFar: number | undefined = run.resume ? undefined : 0;
   let settle: ReturnType<typeof setTimeout> | undefined;
   let settled = false;
   try {
@@ -153,6 +167,19 @@ export async function runClaude(
         extraArgs: thinkingShown() ? { 'thinking-display': 'summarized' } : {},
         settings: options.settingsPath,
         settingSources: ['user', 'project', 'local'],
+        hooks: {
+          UserPromptSubmit: [
+            {
+              hooks: [
+                async (input) => {
+                  if (input.hook_event_name === 'UserPromptSubmit' && input.prompt_id)
+                    promptIds.push(input.prompt_id);
+                  return {};
+                },
+              ],
+            },
+          ],
+        },
         maxTurns: options.maxTurns,
         env: { ...process.env, ...options.environment },
         stderr: (text) => {
@@ -208,6 +235,7 @@ export async function runClaude(
     let background = 0;
     let idle = false;
     let told = false;
+    let turnStartedAt = Date.now();
     for await (const message of session) {
       if (message.type === 'system' && message.subtype === 'background_tasks_changed') {
         const tasks = message.tasks.filter((task) => !task.ambient);
@@ -269,8 +297,33 @@ export async function runClaude(
           });
       }
       if (message.type === 'result') {
+        const endedAt = Date.now();
         await refresh;
         const done = run.input.endTurn(message, background > 0);
+        const outputTotal = Object.values(message.modelUsage ?? {}).reduce(
+          (sum, model) => sum + model.outputTokens,
+          0,
+        );
+        const turnOutput =
+          outputSoFar === undefined || outputTotal < outputSoFar
+            ? (message.usage?.output_tokens ?? 0)
+            : outputTotal - outputSoFar;
+        outputSoFar = outputTotal;
+        if (!run.signal.aborted) {
+          // A turn that merged several messages answers them all; the last one is where the reply is shown.
+          const answered = message.user_message_uuids ?? [message.user_message_uuid];
+          run.turnEnded({
+            messageId: answered.filter((id) => id).at(-1),
+            startedAt: turnStartedAt,
+            endedAt,
+            requests: mapper.requests,
+            outputTokens: turnOutput,
+            promptIds,
+          });
+        }
+        turnStartedAt = endedAt;
+        mapper.requests = 0;
+        promptIds = [];
         if (!run.signal.aborted) {
           try {
             const payload = await nativeMetrics(session, message);

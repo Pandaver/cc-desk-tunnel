@@ -188,3 +188,14 @@ test('native compact metadata and effective effort are forwarded without local s
     ),
   );
 });
+
+test('the model requests of a turn are counted from their start events', () => {
+  const stream = new ClaudeStream(() => {});
+  stream.accept({ type: 'stream_event', event: { type: 'message_start' } });
+  stream.accept({ type: 'stream_event', event: { type: 'message_stop' } });
+  stream.accept({ type: 'stream_event', event: { type: 'message_start' } });
+  assert.equal(stream.requests, 2);
+  stream.requests = 0;
+  stream.accept({ type: 'stream_event', event: { type: 'message_start' } });
+  assert.equal(stream.requests, 1);
+});

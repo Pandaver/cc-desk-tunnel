@@ -21,7 +21,7 @@ export const tokens = (value: number) =>
   value < 10000 ? value.toLocaleString('zh-CN') : compact.format(value);
 export const dollars = (value: number) =>
   `$${value >= 100 ? value.toFixed(0) : value >= 1 ? value.toFixed(2) : value.toFixed(value >= 0.01 || value === 0 ? 2 : 4)}`;
-const seconds = (ms: number | null) =>
+export const seconds = (ms: number | null) =>
   ms == null ? '—' : ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
 const total = (item: {
   inputTokens: number;

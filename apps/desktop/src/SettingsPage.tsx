@@ -16,6 +16,7 @@ import Help from './Help.tsx';
 import type { ConnectionForm } from './LoginPage.tsx';
 import { connectionWaits, setPrefs, usePrefs, waitRange } from './prefs.ts';
 import type { ConnectionWaits, NotifyKind } from './prefs.ts';
+import { inSummary, sampleStats, statFields, summaryText } from './turnStats.ts';
 import { GithubMark, openProject, project } from './project.tsx';
 import SettingsPanel from './SettingsPanel.tsx';
 import ShortcutSettings from './ShortcutSettings.tsx';
@@ -45,7 +46,8 @@ const sections: { id: Section; name: string; group: string; icon: typeof Bell; w
     name: '常规',
     group: '客户端',
     icon: SlidersHorizontal,
-    words: '托盘 后台 记住凭据 自动登录 启动 普通会话 文件夹 连接 超时 等待 SSH',
+    words:
+      '托盘 后台 记住凭据 自动登录 启动 普通会话 文件夹 连接 超时 等待 SSH 回复小结 用量 首字 速度 缓存',
   },
   {
     id: 'notifications',
@@ -104,6 +106,60 @@ const waits: { step: keyof ConnectionWaits; title: string; detail: string }[] = 
     detail: '从连上服务端到隧道接通的总时间；至少比上一项多 35 秒',
   },
 ];
+// The line under each reply is a choice of this computer's window, so it works outside the desktop app too.
+function ReplyStats() {
+  const { stats } = usePrefs();
+  const set = (values: Partial<typeof stats>) =>
+    setPrefs((prefs) => ({ ...prefs, stats: { ...prefs.stats, ...values } }));
+  return (
+    <>
+      <h2 className="page-heading">回复小结</h2>
+      <div className="card">
+        <Row title="显示回复小结" detail="每轮回复末尾一个小按钮，点开看全部明细">
+          <Switch
+            label="显示回复小结"
+            checked={stats.enabled}
+            onChange={(enabled) => set({ enabled })}
+          />
+        </Row>
+        <div className="setting-row stat-picks">
+          <span>
+            <strong>小结里显示</strong>
+            <small>{summaryText(sampleStats, stats.summary) || '都不选时只显示“用量明细”'}</small>
+          </span>
+          <div className="stat-chips" role="group" aria-label="小结里显示">
+            {statFields.map((field) => {
+              const on = inSummary(field, stats.summary);
+              return (
+                <button
+                  type="button"
+                  key={field.key}
+                  className="stat-chip"
+                  aria-pressed={on}
+                  disabled={!stats.enabled}
+                  onClick={() => set({ summary: { ...stats.summary, [field.key]: !on } })}
+                >
+                  {field.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <Row title="恢复默认" detail="明细里的数据不受这里的选择影响">
+          <button
+            type="button"
+            className="button"
+            disabled={Object.keys(stats.summary).length === 0}
+            onClick={() => set({ summary: {} })}
+          >
+            恢复默认
+          </button>
+        </Row>
+      </div>{' '}
+    </>
+  );
+}
+
 // A number of seconds, taken when the field is left or Enter is pressed; anything out of range is put back.
 function Seconds({
   label,
@@ -162,7 +218,7 @@ function General({
     <section className="page" aria-label="常规">
       <div className="page-body">
         <h1 className="page-title">常规</h1>
-        {!window.desktop && <p className="muted">这些设置只在桌面客户端里有。</p>}
+        {!window.desktop && <p className="muted">窗口、会话和连接的设置只在桌面客户端里有。</p>}
         {window.desktop && (
           <>
             <h2 className="page-heading">窗口</h2>
@@ -266,6 +322,7 @@ function General({
             />
           </Row>
         </div>
+        <ReplyStats />
       </div>
     </section>
   );

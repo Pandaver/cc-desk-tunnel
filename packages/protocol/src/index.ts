@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const PROTOCOL_VERSION = 16;
+export const PROTOCOL_VERSION = 17;
 export const MAX_FRAME_BYTES = 256 * 1024;
 const id = z.uuid();
 const timestamp = z.iso.datetime();
@@ -257,6 +257,23 @@ export const eventPayloadSchema = z.discriminatedUnion('type', [
     trigger: z.string(),
     previousTokens: z.number().nonnegative().nullable(),
   }),
+  // What one turn cost, summed from the model requests the CLI reported for it; the figures are the call log's.
+  z.object({
+    type: z.literal('turn.stats'),
+    // The user message the turn answered; a turn that a background task started has none.
+    messageId: id.optional(),
+    requests: z.number().int().nonnegative(),
+    inputTokens: z.number().nonnegative(),
+    outputTokens: z.number().nonnegative(),
+    cacheReadTokens: z.number().nonnegative(),
+    cacheCreationTokens: z.number().nonnegative(),
+    modelMs: z.number().nonnegative(),
+    // Averages over the requests that report a first-token time; null when none does.
+    ttftMs: z.number().nonnegative().nullable(),
+    outputPerSecond: z.number().nonnegative().nullable(),
+    // Fewer requests were reported than the turn made when this was written.
+    partial: z.boolean(),
+  }),
   z.object({ type: z.literal('tool.requested'), ...toolSchema.shape }),
   z.object({ type: z.literal('tool.input'), toolId: z.string().min(1), input: z.string() }),
   z.object({ type: z.literal('tool.input.delta'), toolId: z.string().min(1), text: z.string() }),
@@ -308,6 +325,7 @@ export function continues(open: Fragment, next: Fragment) {
   if (open.toolId !== (next as typeof open).toolId) return false;
   return open.type !== 'tool.output' || open.stream === (next as typeof open).stream;
 }
+export type TurnStats = Payload<'turn.stats'>;
 export const eventSchema = z.object({
   sessionId: id,
   runId: id,

@@ -23,6 +23,9 @@ export type Prefs = {
   connection: ConnectionWaits;
   // Whether the approval modes include the one that asks about nothing.
   bypassPermissions: boolean;
+  // The line under each reply. `summary` holds only the figures the user switched on or off, by key, so a figure
+  // added later follows its own default.
+  stats: { enabled: boolean; summary: Record<string, boolean> };
 };
 
 const storageKey = 'proxy-prefs';
@@ -45,6 +48,7 @@ const defaults: Prefs = {
   shortcuts: { enabled: true, keys: {} },
   connection: connectionWaits,
   bypassPermissions: false,
+  stats: { enabled: false, summary: {} },
 };
 
 function read(): Prefs {
@@ -80,6 +84,14 @@ function read(): Prefs {
         }),
       ) as ConnectionWaits,
       bypassPermissions: saved.bypassPermissions === true,
+      stats: {
+        enabled: saved.stats?.enabled === true,
+        summary: Object.fromEntries(
+          Object.entries(saved.stats?.summary ?? {}).filter(
+            (entry): entry is [string, boolean] => typeof entry[1] === 'boolean',
+          ),
+        ),
+      },
     };
   } catch {
     return defaults;
