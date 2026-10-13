@@ -626,6 +626,11 @@ test('Electron: frameless window, the project branch, files by path and window s
     const notes = page.getByRole('dialog');
     await expect(notes.getByRole('heading', { name: /的更新内容$/ })).toBeVisible();
     await expect(notes).toContainText('升级说明');
+    // A link into the repository goes to that file on GitHub, and from there to the user's browser.
+    await expect(notes.getByRole('link', { name: 'macOS 说明' })).toHaveAttribute(
+      'href',
+      /^https:\/\/github\.com\/[^/]+\/[^/]+\/blob\/v[\d.]+\/docs\/macos\.md$/,
+    );
     // The notes wrap inside their dialog and scroll downwards only.
     expect(
       await notes.evaluate((dialog) =>
@@ -634,7 +639,10 @@ test('Electron: frameless window, the project branch, files by path and window s
         ),
       ),
     ).toBe(true);
-    await page.screenshot({ path: resolve(screenshots, '状态与更新', '08-更新内容弹窗.png') });
+    // The picture is for the eye; one that is open in a viewer cannot be written over.
+    await page
+      .screenshot({ path: resolve(screenshots, '状态与更新', '08-更新内容弹窗.png') })
+      .catch(() => {});
     await notes.getByRole('button', { name: '关闭', exact: true }).last().click();
     await expect(notes).toHaveCount(0);
   } finally {

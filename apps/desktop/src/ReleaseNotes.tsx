@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import changelog from '../../../CHANGELOG.md?raw';
-import { releaseSection } from './notes.ts';
+import { absoluteLinks, releaseSection } from './notes.ts';
 import { project } from './project.tsx';
 import RichText from './RichText.tsx';
 import { Modal } from './ui.tsx';
@@ -30,11 +30,20 @@ export default function ReleaseNotes({
       current = false;
     };
   }, [carried, version]);
-  const text = carried ?? fetched;
+  const text = carried ? absoluteLinks(carried, project.url, version) : fetched;
   const page = `${project.url}/releases/tag/v${version}`;
   return (
     <Modal title={`${version} 的更新内容`} onClose={onClose}>
-      <div className="release-notes">
+      <div
+        className="release-notes"
+        // The window opens no page itself: a link goes to the user's browser.
+        onClick={(event) => {
+          const link = (event.target as HTMLElement).closest('a');
+          if (!link?.href || !window.desktop) return;
+          event.preventDefault();
+          void window.desktop.openExternal(link.href).catch(() => {});
+        }}
+      >
         {text ? (
           <RichText text={text} />
         ) : (

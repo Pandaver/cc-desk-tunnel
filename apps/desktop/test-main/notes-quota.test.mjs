@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
-import { releaseSection } from '../src/notes.ts';
+import { absoluteLinks, releaseSection } from '../src/notes.ts';
 import { quotaFigures } from '../src/quota.ts';
 
 test('a version’s notes are its section of the changelog, without the heading', () => {
@@ -22,6 +22,21 @@ test('a version’s notes are its section of the changelog, without the heading'
     ),
     /###/,
   );
+});
+
+test('links into the repository point at the version’s files on GitHub', () => {
+  const repository = 'https://github.com/o/r';
+  assert.equal(
+    absoluteLinks(
+      '见 [macOS 说明](docs/macos.md) 与 [部署](./deploy/README.md#升级)。',
+      repository,
+      '0.3.1',
+    ),
+    `见 [macOS 说明](${repository}/blob/v0.3.1/docs/macos.md) 与 [部署](${repository}/blob/v0.3.1/deploy/README.md#升级)。`,
+  );
+  const kept =
+    '[议题](https://github.com/o/r/issues) [上面](#新增功能) [信](mailto:a@b.c) 价格（$5）';
+  assert.equal(absoluteLinks(kept, repository, '0.3.1'), kept);
 });
 
 test('the quota beside the message box is the five hours and the fullest week', () => {

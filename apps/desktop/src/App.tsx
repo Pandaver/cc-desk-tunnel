@@ -315,6 +315,12 @@ export function App() {
     isNewer(state.service, version)
       ? state.service
       : null;
+  // A service of a newer version: what that version changed can be read here, whether or not this system's
+  // client upgrades itself.
+  const ahead =
+    state.mismatch && version && state.service && isNewer(state.service, version)
+      ? state.service
+      : null;
   // How far an installer being fetched from the release page is, from 0 to 1.
   const [downloaded, setDownloaded] = useState<number | null>(null);
   useEffect(
@@ -1005,7 +1011,7 @@ export function App() {
   // What an upgrade would bring is read where the upgrade is offered, before it is taken.
   const newer =
     upgrade ??
-    direct ??
+    ahead ??
     (update && ['available', 'manual'].includes(update.state) ? (update.latest ?? null) : null);
   const updates = [
     ...(newer
@@ -1206,6 +1212,7 @@ export function App() {
         {notesDialog}
         <LoginPage
           showNotes={setNotes}
+          newer={upgrade ?? ahead}
           openSettings={() => setLocalSettings('general')}
           form={form}
           change={changeForm}
