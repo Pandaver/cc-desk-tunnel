@@ -9,6 +9,10 @@ import { TUNNEL_CLOSE } from '@cc-desk-tunnel/protocol';
 import { openChannels } from '../electron/tunnel-channels.mjs';
 
 const offer = { connectionId: randomUUID(), secret: 's'.repeat(43) };
+// A connection that is reset as the other side goes is closed all the same; `once` would take the error that
+// comes before its close for a failure.
+const closed = (socket) =>
+  new Promise((resolve) => socket.on('error', () => {}).once('close', resolve));
 // A service end that records what each channel connection says first, and a local "SSH service" that greets.
 async function fixture(t, options = {}) {
   const wss = new WebSocketServer({ port: 0, host: '127.0.0.1', ...options });
@@ -74,11 +78,11 @@ test('a requested channel signs in with the tunnel secret and joins the local SS
   await f.until(() => heard === 'SSH-2.0-remote\r\n', 'bytes from the service');
   // The service ends the SSH connection: the local one ends with it, and the reverse.
   f.arrivals[0].socket.close();
-  await once(f.locals[0], 'close');
+  await closed(f.locals[0]);
   channels.open(randomUUID());
   await f.until(() => f.locals.length === 2 && f.arrivals.length === 2);
   f.locals[1].end();
-  await once(f.arrivals[1].socket, 'close');
+  await closed(f.arrivals[1].socket);
   await f.until(() => channels.size === 0, 'channels to be forgotten');
   assert.deepEqual(failures, []);
 });
@@ -173,7 +177,7 @@ test('a channel that stops answering is given up with its local connection; one 
   lost.open(randomUUID());
   kept.open(randomUUID());
   await silent.until(() => silent.locals.length === 1 && answering.locals.length === 1);
-  const localClosed = once(silent.locals[0], 'close');
+  const localClosed = closed(silent.locals[0]);
   const started = Date.now();
   await silent.until(() => lost.size === 0, 'the silent channel to be given up');
   // Two unanswered askings are allowed for; the third interval ends it.
@@ -190,8 +194,8 @@ test('closing ends every channel and its local connection; a local service that 
   channels.open(randomUUID());
   await f.until(() => f.locals.length === 2 && f.arrivals.length === 2);
   const ended = Promise.all([
-    ...f.locals.map((socket) => once(socket, 'close')),
-    ...f.arrivals.map((arrival) => once(arrival.socket, 'close')),
+    ...f.locals.map(closed),
+    ...f.arrivals.map((arrival) => closed(arrival.socket)),
   ]);
   channels.close();
   await ended;
