@@ -15,6 +15,8 @@ async function open(
   joined = false,
   // How the last run ends.
   ending = 'completed',
+  // With `joined`: Claude answers the first question and only background tasks go on when the second is put in.
+  background = false,
 ) {
   await page.addInitScript(
     (saved) => localStorage.setItem('proxy-prefs', JSON.stringify(saved)),
@@ -49,7 +51,7 @@ async function open(
       createdAt: createdAt.toISOString(),
       payload,
     });
-    const turn = (n: number, at: number, done: boolean, status = 'completed') => {
+    const turn = (n: number, at: number, done: boolean, status = 'completed', waiting = false) => {
       const thought = randomUUID();
       runId = runs[n];
       return [
@@ -62,7 +64,7 @@ async function open(
         event(minutesAgo(at - 0.1), {
           type: 'thinking.delta',
           messageId: thought,
-          text: `**先看看目录${n + 1}**\n再决定怎么做`,
+          text: `**${n + 1} 号目录先看看**\n再决定怎么做`,
         }),
         event(minutesAgo(at - 0.2), {
           type: 'tool.requested',
@@ -89,7 +91,12 @@ async function open(
                 messageId: randomUUID(),
                 text: `第${n + 1}答。`,
               }),
-              event(minutesAgo(at - 0.5), { type: 'run.status', status, connectionId }),
+              event(minutesAgo(at - 0.5), {
+                type: 'run.status',
+                status,
+                connectionId,
+                ...(waiting ? { waiting: 'background' } : {}),
+              }),
             ]
           : [
               event(minutesAgo(at - 0.35), {
@@ -130,7 +137,10 @@ async function open(
           firstSequence: 1,
           lastSequence: sequence,
           hasEarlier: false,
-          events: [...turn(0, 40, !joined), ...turn(1, 10, !running, ending)],
+          events: [
+            ...turn(0, 40, !joined || background, background ? 'running' : 'completed', background),
+            ...turn(1, 10, !running, ending),
+          ],
         });
       }
       reply({ type: 'response', requestId: message.requestId, ok: true });
@@ -173,6 +183,8 @@ test('expanded folds nothing and groups nothing', async ({ page }) => {
   await expect(page.locator('.work')).toHaveCount(0);
   await expect(page.locator('.work-flat')).toHaveCount(2);
   await expect(page.locator('.work-flat .tool-subject')).toHaveText(['列目录1', '列目录2']);
+  // The first line of each thought, without its Markdown; a number it starts with stays.
+  await expect(page.locator('.thinking-preview')).toHaveText(['1 号目录先看看', '2 号目录先看看']);
 });
 
 test('the settings choose how much of the work is shown', async ({ page }) => {
@@ -199,6 +211,15 @@ test('a question put in while the run goes on does not fold what came before it'
 test('once that run is over, both turns fold as usual', async ({ page }) => {
   await open(page, { mode: 'standard' }, false, true);
   await expect(page.locator('.turn-process')).toHaveCount(2);
+  // The first turn took until the second question, not until the end of the run.
+  await expect(page.locator('.turn-process > summary').nth(0)).toContainText('用时 30 分 0 秒');
+});
+
+test('a question put in while only background tasks go on ends the turn before it where Claude stopped', async ({
+  page,
+}) => {
+  await open(page, { mode: 'standard' }, false, true, 'completed', true);
+  await expect(page.locator('.turn-process > summary').nth(0)).toContainText('用时 30 秒');
 });
 test('a turn that was stopped, or failed, says so on its folded line', async ({ page }) => {
   await open(page, undefined, false, false, 'cancelled');

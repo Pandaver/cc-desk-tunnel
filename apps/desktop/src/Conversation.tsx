@@ -36,7 +36,7 @@ import type { Clock } from './RunStatus.tsx';
 import QuestionCard, { questionsOf } from './QuestionCard.tsx';
 import { conversation } from './transcript.ts';
 import { usePrefs } from './prefs.ts';
-import { firstLine, viewPolicy } from './transcriptView.ts';
+import { firstLine } from './transcriptView.ts';
 import type { TranscriptItem, Turn, Work } from './transcript.ts';
 import { CopyButton, copyText } from './copy.tsx';
 import { messageTime } from './messageTime.ts';
@@ -365,16 +365,14 @@ function TurnView({
   held: boolean;
 }) {
   const active = !turn.endedAt;
-  const { view } = usePrefs();
-  const policy = viewPolicy(view.mode);
+  const expanded = usePrefs().view.mode === 'expanded';
   const notes = turn.steps.filter((step) => step.kind === 'assistant').length;
-  const flat = policy.flat;
   const steps = () =>
     turn.steps.map((step, index) =>
       step.kind === 'work' ? (
-        flat ? (
+        expanded ? (
           <div key={step.id} className="work-flat">
-            <WorkItems work={step} active={active} live={live} preview={policy.preview} />
+            <WorkItems work={step} active={active} live={live} preview />
           </div>
         ) : (
           <WorkGroup
@@ -405,7 +403,7 @@ function TurnView({
           />
         )
       )}
-      {active || held || !policy.fold
+      {active || held || expanded
         ? steps()
         : turn.steps.length > 0 && (
             <Fold
