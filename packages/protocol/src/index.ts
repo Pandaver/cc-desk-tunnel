@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const PROTOCOL_VERSION = 17;
+export const PROTOCOL_VERSION = 18;
 export const MAX_FRAME_BYTES = 256 * 1024;
 const id = z.uuid();
 const timestamp = z.iso.datetime();
@@ -460,6 +460,7 @@ export const commandSchema = z.discriminatedUnion('type', [
     })
     .strict(),
   z.object({ type: z.literal('usage.summary'), ...request }).strict(),
+  z.object({ type: z.literal('session.stats'), ...request, sessionId: id }).strict(),
   z.object({ type: z.literal('service.update.check'), ...request }).strict(),
   z
     .object({ type: z.literal('service.update.install'), ...request, version: versionSchema })
@@ -669,6 +670,24 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('settings.state'), requestId: id, values: nativeSettingsSchema }),
   z.object({ type: z.literal('usage.summary'), requestId: id, ...usageSummarySchema.shape }),
   z.object({ type: z.literal('usage.page'), requestId: id, ...usagePageSchema.shape }),
+  // What a whole session has cost so far, summed from the model requests the call log holds for it.
+  z.object({
+    type: z.literal('session.stats'),
+    requestId: id,
+    sessionId: id,
+    // Distinct prompts, which is how many turns the log has seen, and the model requests they made.
+    turns: z.number().int().nonnegative(),
+    requests: z.number().int().nonnegative(),
+    inputTokens: z.number().nonnegative(),
+    outputTokens: z.number().nonnegative(),
+    cacheReadTokens: z.number().nonnegative(),
+    cacheCreationTokens: z.number().nonnegative(),
+    modelMs: z.number().nonnegative(),
+    ttftMs: z.number().nonnegative().nullable(),
+    outputPerSecond: z.number().nonnegative().nullable(),
+    // The oldest record the call log holds at all. The log is pruned, so a session older than this is counted from here.
+    firstRecordAt: timestamp.nullable(),
+  }),
   z.object({ type: z.literal('terminal.opened'), sessionId: id, terminalId: id }),
   z.object({
     type: z.literal('terminal.data'),

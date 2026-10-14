@@ -74,6 +74,7 @@ export class UsageLog {
     if (!columns.some((column) => column.name === 'prompt_id'))
       database.exec('ALTER TABLE api_requests ADD COLUMN prompt_id TEXT');
     database.exec('CREATE INDEX IF NOT EXISTS api_requests_prompt ON api_requests(prompt_id)');
+    database.exec('CREATE INDEX IF NOT EXISTS api_requests_session ON api_requests(session_id)');
     this.restoreStarts();
     this.prune();
   }
@@ -405,6 +406,36 @@ export class UsageLog {
       ttftMs: number | null;
     };
     return { ...sums, outputPerSecond: perSecond(streamedTokens, streamedMs) };
+  }
+  // A whole session's requests, subagents included, summed the way turnStats sums a turn. Turns are the distinct
+  // prompts; a request without one belongs to no turn.
+  sessionStats(sessionId: string) {
+    const { streamedTokens, streamedMs, costUsd, ...sums } = this.database
+      .prepare(
+        `SELECT ${totals}, COUNT(DISTINCT prompt_id) AS turns, COALESCE(SUM(duration_ms), 0) AS modelMs, ${streaming}
+      FROM api_requests WHERE session_id = ?`,
+      )
+      .get(sessionId) as {
+      turns: number;
+      requests: number;
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheCreationTokens: number;
+      modelMs: number;
+      ttftMs: number | null;
+      streamedTokens: number | null;
+      streamedMs: number | null;
+      costUsd: number;
+    };
+    const first = this.database.prepare('SELECT MIN(at) AS at FROM api_requests').get() as {
+      at: number | null;
+    };
+    return {
+      ...sums,
+      outputPerSecond: perSecond(streamedTokens, streamedMs),
+      firstRecordAt: first.at ? new Date(first.at).toISOString() : null,
+    };
   }
   prune(now = Date.now()) {
     this.database

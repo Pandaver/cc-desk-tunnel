@@ -386,6 +386,53 @@ test('a turn is summed over its time window with the figures the call log shows'
   );
 });
 
+test('a session is summed over all its requests, turns being its distinct prompts', () => {
+  const log = new UsageLog(new DatabaseSync(':memory:'));
+  const session = '4f0c9d0e-1111-4222-8333-444455556666';
+  assert.deepEqual(log.sessionStats(session), {
+    turns: 0,
+    requests: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    modelMs: 0,
+    ttftMs: null,
+    outputPerSecond: null,
+    firstRecordAt: null,
+  });
+  log.ingest(
+    batch(
+      request(base, 'a1', { 'prompt.id': 'p1' }),
+      request(base + 1000, 'a2', {
+        'prompt.id': 'p1',
+        output_tokens: 400,
+        ttft_ms: 500,
+        duration_ms: 2500,
+      }),
+      request(base + 2000, 'b1', { 'prompt.id': 'p2' }),
+      request(base + 3000, 'unnamed'),
+      request(base + 4000, 'elsewhere', {
+        'session.id': 'ffffffff-1111-4222-8333-444455556666',
+        'prompt.id': 'p3',
+      }),
+    ),
+  );
+  // Streamed time is what is left after the first token: 2000, 2000 and 2000 ms for 800 and 200 tokens.
+  assert.deepEqual(log.sessionStats(session), {
+    turns: 2,
+    requests: 4,
+    inputTokens: 40,
+    outputTokens: 1000,
+    cacheReadTokens: 4000,
+    cacheCreationTokens: 200,
+    modelMs: 11500,
+    ttftMs: 875,
+    outputPerSecond: 1000 / ((2000 * 4) / 1000),
+    firstRecordAt: new Date(base).toISOString(),
+  });
+});
+
 test('a turn is summed over the requests of its prompts, whatever the time', () => {
   const log = new UsageLog(new DatabaseSync(':memory:'));
   const session = '4f0c9d0e-1111-4222-8333-444455556666';

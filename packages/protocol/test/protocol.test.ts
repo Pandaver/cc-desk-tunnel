@@ -6,6 +6,7 @@ import {
   authSchema,
   commandSchema,
   eventSchema,
+  serverMessageSchema,
   terminalControlSchema,
 } from '../src/index.ts';
 
@@ -113,6 +114,34 @@ test('a run waiting only for background tasks, its task list and the request to 
   };
   assert.ok(commandSchema.safeParse(stop).success);
   assert.equal(commandSchema.safeParse({ ...stop, taskId: '' }).success, false);
+});
+
+test('a session report is asked for by session and answers with its figures', () => {
+  const requestId = randomUUID();
+  const sessionId = randomUUID();
+  assert.ok(commandSchema.safeParse({ type: 'session.stats', requestId, sessionId }).success);
+  assert.equal(commandSchema.safeParse({ type: 'session.stats', requestId }).success, false);
+  const stats = {
+    type: 'session.stats',
+    requestId,
+    sessionId,
+    turns: 2,
+    requests: 4,
+    inputTokens: 40,
+    outputTokens: 1000,
+    cacheReadTokens: 4000,
+    cacheCreationTokens: 200,
+    modelMs: 11500,
+    ttftMs: null,
+    outputPerSecond: null,
+    firstRecordAt: null,
+  };
+  assert.equal(serverMessageSchema.safeParse(stats).success, true);
+  assert.equal(serverMessageSchema.safeParse({ ...stats, turns: -1 }).success, false);
+  assert.equal(
+    serverMessageSchema.safeParse({ ...stats, firstRecordAt: 'yesterday' }).success,
+    false,
+  );
 });
 
 test('a turn report names the message it answered, or none for a turn a background task started', () => {
