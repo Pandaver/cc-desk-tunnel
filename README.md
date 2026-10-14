@@ -170,6 +170,7 @@ macOS 与 Linux 的安装包在同一个发布页，安装方法见 [macOS 客�
 | [Windows 客户端](apps/desktop/README.md) · [Linux 服务](apps/server/README.md) · [消息契约](packages/protocol/README.md) | 各模块的实现说明 |
 | [macOS 客户端（实验性）](docs/macos.md) · [Linux 客户端（实验性）](docs/linux.md) | 安装、与 Windows 的不同、已验证与未验证 |
 | [路线与现状](docs/roadmap.md) · [变更记录](CHANGELOG.md) | 已完成、待验证、计划；各版本的变化 |
+| [远程操作与无头执行端研究](docs/research/remote-access.md) | 从其他客户端或 Web 操作原开发机、无头 Linux 的思路来源、边界与待验证事项 |
 | [开发约定](docs/development.md) | 分支、提交、检查、发布 |
 
 文档目前只有中文。
