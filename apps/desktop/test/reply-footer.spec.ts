@@ -12,7 +12,8 @@ const clock = new Intl.DateTimeFormat('zh-CN', {
 const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000);
 
 // Two finished turns. The first reply is written over 25 minutes, so the time under it must be the one of its last
-// text, not of its first. Unfinished, only the first turn is there, still running, its figures already reported.
+// text, not of its first. The second question is put in on the same run, and its delivery was never confirmed.
+// Unfinished, only the first turn is there, still running, its figures already reported.
 async function open(page: import('@playwright/test').Page, finished = true) {
   await page.addInitScript(() =>
     localStorage.setItem('proxy-prefs', JSON.stringify({ stats: { enabled: true } })),
@@ -77,6 +78,11 @@ async function open(page: import('@playwright/test').Page, finished = true) {
             text: '第一问',
             scenario: 'chat',
           }),
+          event(minutesAgo(40), {
+            type: 'message.delivery',
+            messageId: questions[0],
+            status: 'received',
+          }),
           event(minutesAgo(30), {
             type: 'text.delta',
             messageId: replies[0],
@@ -91,10 +97,15 @@ async function open(page: import('@playwright/test').Page, finished = true) {
             text: '第二问',
             scenario: 'chat',
           }),
+          event(minutesAgo(3), {
+            type: 'message.delivery',
+            messageId: questions[1],
+            status: 'unconfirmed',
+          }),
           event(minutesAgo(2), { type: 'text.delta', messageId: replies[1], text: '第二答。' }),
           event(minutesAgo(1), { type: 'turn.stats', messageId: questions[1], ...stats }),
         ];
-        const shown = finished ? events : [events[0], events[1], events[4]];
+        const shown = finished ? events : [events[0], events[1], events[2], events[5]];
         reply({
           type: 'session.snapshot',
           requestId: message.requestId,
@@ -134,8 +145,34 @@ test('a reply has no heading; copy, figures and time are under it', async ({ pag
   // The time is when the reply was done, not when it began.
   await expect(footer.locator('.message-time')).toContainText(clock.format(minutesAgo(5)));
   await expect(footer.locator('.message-time')).not.toContainText(clock.format(minutesAgo(30)));
-  // The user's own message keeps its heading.
-  await expect(page.locator('.message.user .message-label')).toHaveCount(2);
+});
+
+test('a question has no heading either; its line is under it at the right', async ({ page }) => {
+  await open(page);
+  await expect(page.locator('.message.user .message-label')).toHaveCount(0);
+  const [first, second] = await page.locator('.message.user').all();
+  const line = first.locator('.message-footer');
+  await expect(line.locator('.message-time')).toContainText(clock.format(minutesAgo(40)));
+  await expect(line.getByRole('button', { name: '编辑重发', exact: true })).toHaveCount(1);
+  await expect(line.locator('.copy-button')).toHaveCount(1);
+  const bubble = (await first.locator('.message-content').boundingBox())!;
+  const under = (await line.boundingBox())!;
+  expect(Math.abs(bubble.x + bubble.width - (under.x + under.width))).toBeLessThanOrEqual(2);
+  // A question put in on the running run is a smaller bubble, and cannot be edited.
+  await expect(second).toHaveClass(/joined/);
+  await expect(second.getByRole('button', { name: '编辑重发', exact: true })).toHaveCount(0);
+  await page.mouse.move(2, 2);
+  // Plainly received is quiet; a delivery left unconfirmed stays in sight without the pointer.
+  await expect(line.locator('.message-delivery')).toHaveText('原生已接收');
+  await expect(line.locator('.message-delivery')).toHaveCSS('opacity', '0');
+  await expect(line.locator('.copy-button')).toHaveCSS('opacity', '0');
+  const unconfirmed = second.locator('.message-delivery');
+  await expect(unconfirmed).toHaveText('接收未确认');
+  await expect(unconfirmed).toHaveCSS('opacity', '1');
+  await expect(second.locator('.copy-button')).toHaveCSS('opacity', '0');
+  await first.locator('.message-content').hover();
+  await expect(line.locator('.copy-button')).toHaveCSS('opacity', '1');
+  await page.screenshot({ path: resolve('.local/screenshots/question-footer.png') });
 });
 
 test('the line under a reply shows on the latest one, and on another while the pointer is over it', async ({
@@ -149,15 +186,15 @@ test('the line under a reply shows on the latest one, and on another while the p
   expect(gap - (end!.y + end!.height)).toBeLessThanOrEqual(6);
   expect((await first.locator('.message-footer').boundingBox())!.height).toBeLessThanOrEqual(30);
   await page.mouse.move(2, 2);
-  await expect(last.locator('.message-footer')).toHaveCSS('opacity', '1');
-  await expect(first.locator('.message-footer')).toHaveCSS('opacity', '0');
+  await expect(last.locator('.message-footer .copy-button')).toHaveCSS('opacity', '1');
+  await expect(first.locator('.message-footer .copy-button')).toHaveCSS('opacity', '0');
   await first.locator('.message-content').hover();
-  await expect(first.locator('.message-footer')).toHaveCSS('opacity', '1');
+  await expect(first.locator('.message-footer .copy-button')).toHaveCSS('opacity', '1');
   // An open card keeps its line shown, even with the pointer away.
   await first.locator('.turn-stats button').click();
   await page.mouse.move(2, 2);
   await expect(first.getByRole('dialog', { name: '本轮用量' })).toBeVisible();
-  await expect(first.locator('.message-footer')).toHaveCSS('opacity', '1');
+  await expect(first.locator('.message-footer .copy-button')).toHaveCSS('opacity', '1');
   await page.screenshot({ path: resolve('.local/screenshots/reply-footer.png') });
 });
 

@@ -245,9 +245,11 @@ function WorkGroup({
   );
 }
 
-// A reply has no heading. The one that closes a turn has under it copy, the turn's figures and the time, shown while the
-// pointer is over it and always on the latest; the ones said along the way have nothing under them. Replies of the
-// simulated service keep the heading, which says they are not real.
+// No message has a heading; what belongs to it is in a line under it, shown while the pointer is over the message. Under
+// a question: how it was delivered, its time, editing and copy, at the right like the question. Under the reply that
+// closes a turn: copy, the turn's figures and the time, always shown on the latest. Replies said along the way have
+// nothing under them. A delivery that did not plainly arrive stays in sight. Replies of the simulated service keep the
+// heading, which says they are not real.
 function Message({
   item,
   native,
@@ -255,6 +257,7 @@ function Message({
   footer,
   closing = false,
   latest = false,
+  joined = false,
 }: {
   item: Text;
   native: boolean;
@@ -262,13 +265,39 @@ function Message({
   footer?: ReactNode;
   closing?: boolean;
   latest?: boolean;
+  // A question put in while the run went on.
+  joined?: boolean;
 }) {
   const time = messageTime(item.kind === 'assistant' ? (item.doneAt ?? item.at) : item.at);
-  const underneath = item.kind === 'assistant' && native;
+  const user = item.kind === 'user';
+  const stamp = time && (
+    <time className="message-time" dateTime={item.at} title={time.full}>
+      {time.short}
+    </time>
+  );
   return (
-    <article className={`message ${item.kind}${latest ? ' latest' : ''}`}>
-      {!underneath && (
+    <article className={`message ${item.kind}${latest ? ' latest' : ''}${joined ? ' joined' : ''}`}>
+      {!user && !native && (
         <div className="message-label">
+          CC Desk Tunnel
+          <span>模拟</span>
+          {stamp}
+          <CopyButton text={item.text} />
+        </div>
+      )}
+      <div className="message-content" data-search-content data-copy-text={item.text}>
+        {user ? <p>{item.text}</p> : <Rich text={item.text} />}
+      </div>
+      {user && (
+        <div className="message-footer">
+          {item.delivery && (
+            <span
+              className={`message-delivery${item.delivery === '原生已接收' ? '' : ' unsettled'}`}
+            >
+              {item.delivery}
+            </span>
+          )}
+          {stamp}
           {edit && (
             <button
               type="button"
@@ -280,35 +309,19 @@ function Message({
               <Pencil />
             </button>
           )}
-          {item.kind === 'user' ? '你' : native ? 'Claude Code' : 'CC Desk Tunnel'}
-          {item.kind === 'assistant' && !native && <span>模拟</span>}
-          {item.kind === 'user' && item.delivery && <span>{item.delivery}</span>}
-          {time && (
-            <time className="message-time" dateTime={item.at} title={time.full}>
-              {time.short}
-            </time>
-          )}
           <CopyButton text={item.text} />
         </div>
       )}
-      <div className="message-content" data-search-content data-copy-text={item.text}>
-        {item.kind === 'user' ? <p>{item.text}</p> : <Rich text={item.text} />}
-      </div>
-      {underneath && closing && (
+      {!user && native && closing && (
         <div className="message-footer">
           <CopyButton text={item.text} />
           {footer}
-          {time && (
-            <time className="message-time" dateTime={item.at} title={time.full}>
-              {time.short}
-            </time>
-          )}
+          {stamp}
         </div>
       )}
     </article>
   );
 }
-
 function TurnView({
   turn,
   native,
@@ -348,6 +361,7 @@ function TurnView({
             item={turn.question}
             native={native}
             edit={turn.joined ? undefined : live.edit}
+            joined={turn.joined}
           />
         )
       )}
