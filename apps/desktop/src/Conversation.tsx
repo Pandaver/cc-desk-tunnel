@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from 'react';
 import {
   ArrowUpToLine,
@@ -34,6 +35,8 @@ import { RunStatus, TaskLine } from './RunStatus.tsx';
 import type { Clock } from './RunStatus.tsx';
 import QuestionCard, { questionsOf } from './QuestionCard.tsx';
 import { conversation } from './transcript.ts';
+import { usePrefs } from './prefs.ts';
+import { firstLine, viewPolicy } from './transcriptView.ts';
 import type { TranscriptItem, Turn, Work } from './transcript.ts';
 import { CopyButton, copyText } from './copy.tsx';
 import { messageTime } from './messageTime.ts';
@@ -192,6 +195,47 @@ function ToolRow({ tool, active, live }: { tool: Tool; active: boolean; live: Li
   );
 }
 
+// The calls and thoughts of a run, one under another.
+function WorkItems({
+  work,
+  active,
+  live,
+  preview,
+}: {
+  work: Work;
+  active: boolean;
+  live: Live;
+  preview?: boolean;
+}) {
+  return (
+    <>
+      {work.items.map((item) =>
+        item.kind === 'tool' ? (
+          <ToolRow key={item.id} tool={item} active={active} live={live} />
+        ) : (
+          <Fold
+            key={item.id}
+            className="tool thinking-block"
+            summary={
+              <span className="tool-heading">
+                <Brain />
+                <span className="tool-verb">思考</span>
+                {preview && <span className="thinking-preview">{firstLine(item.text)}</span>}
+              </span>
+            }
+          >
+            {() => (
+              <div className="message-content tool-detail" data-search-content>
+                <Rich text={item.text} />
+              </div>
+            )}
+          </Fold>
+        ),
+      )}
+    </>
+  );
+}
+
 function WorkGroup({
   work,
   active,
@@ -216,88 +260,131 @@ function WorkGroup({
         </span>
       }
     >
-      {() =>
-        work.items.map((item) =>
-          item.kind === 'tool' ? (
-            <ToolRow key={item.id} tool={item} active={active} live={live} />
-          ) : (
-            <Fold
-              key={item.id}
-              className="tool thinking-block"
-              summary={
-                <span className="tool-heading">
-                  <Brain />
-                  <span className="tool-verb">思考</span>
-                </span>
-              }
-            >
-              {() => (
-                <div className="message-content tool-detail" data-search-content>
-                  <Rich text={item.text} />
-                </div>
-              )}
-            </Fold>
-          ),
-        )
-      }
+      {() => <WorkItems work={work} active={active} live={live} />}
     </Fold>
   );
 }
 
+// No message has a heading; what belongs to it is in a line under it, shown while the pointer is over the message. Under
+// a question: how it was delivered, its time, editing and copy, at the right like the question. Under the reply that
+// closes a turn: copy, the turn's figures and the time, always shown on the latest. Replies said along the way have
+// nothing under them. A delivery that did not plainly arrive stays in sight. Replies of the simulated service keep the
+// heading, which says they are not real.
 function Message({
   item,
   native,
   edit,
+  footer,
+  closing = false,
+  latest = false,
+  joined = false,
 }: {
   item: Text;
   native: boolean;
   edit?: (item: Text) => void;
+  footer?: ReactNode;
+  closing?: boolean;
+  latest?: boolean;
+  // A question put in while the run went on.
+  joined?: boolean;
 }) {
-  const time = messageTime(item.at);
+  const time = messageTime(item.kind === 'assistant' ? (item.doneAt ?? item.at) : item.at);
+  const user = item.kind === 'user';
+  const stamp = time && (
+    <time className="message-time" dateTime={item.at} title={time.full}>
+      {time.short}
+    </time>
+  );
   return (
-    <article className={`message ${item.kind}`}>
-      <div className="message-label">
-        {edit && (
-          <button
-            type="button"
-            className="message-action"
-            aria-label="编辑重发"
-            title="编辑重发：从这条消息之前分叉出新会话，原会话保留"
-            onClick={() => edit(item)}
-          >
-            <Pencil />
-          </button>
-        )}
-        {item.kind === 'user' ? '你' : native ? 'Claude Code' : 'CC Desk Tunnel'}
-        {item.kind === 'assistant' && !native && <span>模拟</span>}
-        {item.kind === 'user' && item.delivery && <span>{item.delivery}</span>}
-        {time && (
-          <time className="message-time" dateTime={item.at} title={time.full}>
-            {time.short}
-          </time>
-        )}
-        <CopyButton text={item.text} />
-      </div>
+    <article className={`message ${item.kind}${latest ? ' latest' : ''}${joined ? ' joined' : ''}`}>
+      {!user && !native && (
+        <div className="message-label">
+          CC Desk Tunnel
+          <span>模拟</span>
+          {stamp}
+          <CopyButton text={item.text} />
+        </div>
+      )}
       <div className="message-content" data-search-content data-copy-text={item.text}>
-        {item.kind === 'user' ? <p>{item.text}</p> : <Rich text={item.text} />}
+        {user ? <p>{item.text}</p> : <Rich text={item.text} />}
       </div>
+      {user && (
+        <div className="message-footer">
+          {item.delivery && (
+            <span
+              className={`message-delivery${item.delivery === '原生已接收' ? '' : ' unsettled'}`}
+            >
+              {item.delivery}
+            </span>
+          )}
+          {stamp}
+          {edit && (
+            <button
+              type="button"
+              className="message-action"
+              aria-label="编辑重发"
+              title="编辑重发：从这条消息之前分叉出新会话，原会话保留"
+              onClick={() => edit(item)}
+            >
+              <Pencil />
+            </button>
+          )}
+          <CopyButton text={item.text} />
+        </div>
+      )}
+      {!user && native && closing && (
+        <div className="message-footer">
+          <CopyButton text={item.text} />
+          {footer}
+          {stamp}
+        </div>
+      )}
     </article>
   );
 }
 
-function TurnView({ turn, native, live }: { turn: Turn; native: boolean; live: Live }) {
+// A question put in while the run goes on closes the turn before it, but the run has not finished: that turn and the
+// ones joined to it stay as they were until it has.
+function heldOpen(turns: Turn[], index: number) {
+  let last = index;
+  while (turns[last + 1]?.joined) last++;
+  return last > index && !turns[last].endedAt;
+}
+
+function TurnView({
+  turn,
+  native,
+  live,
+  latest,
+  held,
+}: {
+  turn: Turn;
+  native: boolean;
+  live: Live;
+  latest: boolean;
+  held: boolean;
+}) {
   const active = !turn.endedAt;
+  const { view } = usePrefs();
+  const policy = viewPolicy(view.mode);
   const notes = turn.steps.filter((step) => step.kind === 'assistant').length;
+  const flat = policy.flat;
   const steps = () =>
     turn.steps.map((step, index) =>
       step.kind === 'work' ? (
-        <WorkGroup
-          key={step.id}
-          work={step}
-          active={active}
-          latest={index === turn.steps.length - 1}
-          live={live}
-        />
+        flat ? (
+          <div key={step.id} className="work-flat">
+            <WorkItems work={step} active={active} live={live} preview={policy.preview} />
+          </div>
+        ) : (
+          <WorkGroup
+            key={step.id}
+            work={step}
+            active={active}
+            latest={index === turn.steps.length - 1}
+            live={live}
+          />
+        )
       ) : (
         <Message key={step.id} item={step} native={native} />
       ),
@@ -314,16 +401,19 @@ function TurnView({ turn, native, live }: { turn: Turn; native: boolean; live: L
             item={turn.question}
             native={native}
             edit={turn.joined ? undefined : live.edit}
+            joined={turn.joined}
           />
         )
       )}
-      {active
+      {active || held || !policy.fold
         ? steps()
         : turn.steps.length > 0 && (
             <Fold
               className="turn-process"
               summary={
-                <span>
+                <span className={turn.outcome}>
+                  {turn.outcome === 'cancelled' && '已停止 · '}
+                  {turn.outcome === 'failed' && '处理失败 · '}
                   用时 {duration(turn.startedAt, turn.endedAt!)}
                   {turn.tools > 0 && ` · ${turn.tools} 步`}
                   {notes > 0 && ` · ${notes} 条说明`}
@@ -333,8 +423,24 @@ function TurnView({ turn, native, live }: { turn: Turn; native: boolean; live: L
               {steps}
             </Fold>
           )}
-      {turn.answer && <Message item={turn.answer} native={native} />}
-      {turn.stats && <TurnStats stats={turn.stats} />}
+      {turn.answer ? (
+        <Message
+          item={turn.answer}
+          native={native}
+          closing
+          latest={latest}
+          footer={turn.stats && <TurnStats stats={turn.stats} />}
+        />
+      ) : (
+        turn.stats &&
+        turn.endedAt && (
+          <div className={`message assistant${latest ? ' latest' : ''}`}>
+            <div className="message-footer">
+              <TurnStats stats={turn.stats} />
+            </div>
+          </div>
+        )
+      )}
       {turn.notices.map((item) => (
         <div
           key={item.id}
@@ -625,8 +731,15 @@ export default function Conversation({
                 <span className="empty-project">{session.projectPath}</span>
               </div>
             )}
-            {turns.map((turn) => (
-              <TurnView key={turn.id} turn={turn} native={native} live={live} />
+            {turns.map((turn, index) => (
+              <TurnView
+                key={turn.id}
+                turn={turn}
+                native={native}
+                live={live}
+                latest={index === turns.length - 1}
+                held={heldOpen(turns, index)}
+              />
             ))}
             {session.activeRun && background && (
               <div className="background-tasks">

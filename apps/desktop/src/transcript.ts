@@ -19,6 +19,8 @@ export type TranscriptItem =
       // Stands for the "continue" button: there is no message of the user's to show, edit or copy.
       continued?: boolean;
       at: string;
+      // A reply: when its last text arrived, which is when it was done (`at` is when it began).
+      doneAt?: string;
     }
   | { kind: 'notice'; id: string; runId: string; text: string; error: boolean; at: string }
   | {
@@ -73,8 +75,10 @@ export function transcript(events: SessionEvent[]): TranscriptItem[] {
     }
     if (payload.type === 'text.delta') {
       const existing = byId.get(payload.messageId);
-      if (existing?.kind === 'assistant') existing.text += payload.text;
-      else add({ kind: 'assistant', id: payload.messageId, runId, text: payload.text, at });
+      if (existing?.kind === 'assistant') {
+        existing.text += payload.text;
+        existing.doneAt = at;
+      } else add({ kind: 'assistant', id: payload.messageId, runId, text: payload.text, at });
     }
     // Sessions recorded before summaries were requested hold thinking with nothing in it.
     if (payload.type === 'thinking.delta' && payload.text) {
@@ -214,20 +218,28 @@ export type Turn = {
   tools: number;
   // What the turn used, reported by the service a moment after it ended.
   stats?: TurnStats;
+  // How the run that ended the turn ended, when it did not finish: stopped by the user, or failed.
+  outcome?: 'cancelled' | 'failed';
 };
 
 export function conversation(events: SessionEvent[]): Turn[] {
   // A run that goes on only for its background tasks has finished its turn; the turn a task starts reopens it.
   const ended = new Map<string, string>();
+  const endedHow = new Map<string, string>();
   for (const { runId, createdAt, payload } of events)
     if (payload.type !== 'run.status') continue;
     else if (
       ['completed', 'cancelled', 'failed'].includes(payload.status) ||
       payload.waiting === 'background'
-    )
+    ) {
       ended.set(runId, createdAt);
-    else if (payload.status === 'running') ended.delete(runId);
+      endedHow.set(runId, payload.status);
+    } else if (payload.status === 'running') {
+      ended.delete(runId);
+      endedHow.delete(runId);
+    }
   const turns: Turn[] = [];
+  const runOf = new Map<Turn, string>();
   let runId = '';
   for (const item of transcript(events)) {
     let turn = turns.at(-1);
@@ -243,6 +255,7 @@ export function conversation(events: SessionEvent[]): Turn[] {
         tools: 0,
       };
       turns.push(turn);
+      runOf.set(turn, item.runId);
     }
     runId = item.runId;
     if (item.kind === 'user') turn.question = item;
@@ -266,10 +279,13 @@ export function conversation(events: SessionEvent[]): Turn[] {
       payload.type === 'turn.stats' && payload.messageId && answered.get(payload.messageId);
     if (turn) turn.stats = payload as TurnStats;
   }
-  for (const turn of turns) {
+  for (const [index, turn] of turns.entries()) {
     if (!turn.endedAt) continue;
     const final = turn.steps.at(-1);
     if (final?.kind === 'assistant') turn.answer = turn.steps.pop() as Text;
+    // A turn that a question put in while the run went on had closed is not the one the run ended with.
+    const how = endedHow.get(runOf.get(turn) ?? '');
+    if (!turns[index + 1]?.joined && (how === 'cancelled' || how === 'failed')) turn.outcome = how;
   }
   return turns;
 }
