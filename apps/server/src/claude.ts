@@ -209,14 +209,26 @@ export async function runClaude(
       },
     });
     const initialized = await session.initializationResult();
-    run.emit(
-      nativeCapabilities(
+    // The commands change while the run goes on: each turn's `init` names those bound to the CLI's terminal, and
+    // skills found on the way bring a new list. A change is passed on once.
+    let commands = initialized.commands;
+    let terminal: string[] = [];
+    let offered = '';
+    const offer = () => {
+      const payload = nativeCapabilities(
         initialized.models,
         initialized.account,
-        initialized.commands.map((command) => command.name),
+        commands,
         run.model ?? options.model,
-      ),
-    );
+        terminal,
+      );
+      const key =
+        payload.type === 'native.capabilities' ? JSON.stringify(payload.commandDetails) : '';
+      if (key === offered || run.signal.aborted) return;
+      offered = key;
+      run.emit(payload);
+    };
+    offer();
     let metrics: NativeMetrics | undefined;
     let refresh: Promise<void> | undefined;
     let refreshedAt = 0;
@@ -239,6 +251,14 @@ export async function runClaude(
     // What each background task last said of itself, and when it was passed on.
     const progress = new Map<string, { said: string; at: number }>();
     for await (const message of session) {
+      if (message.type === 'system' && message.subtype === 'init') {
+        terminal = message.terminal_slash_commands ?? [];
+        offer();
+      }
+      if (message.type === 'system' && message.subtype === 'commands_changed') {
+        commands = message.commands;
+        offer();
+      }
       if (message.type === 'system' && message.subtype === 'task_progress' && !run.signal.aborted) {
         const tool = message.last_tool_name?.slice(0, 100);
         const summary = message.summary?.slice(0, 300);
@@ -452,7 +472,7 @@ export async function readNativeStatus(
       nativeCapabilities(
         initialized.models,
         initialized.account,
-        initialized.commands.map((command) => command.name),
+        initialized.commands,
         options.model,
       ),
       await nativeMetrics(process),

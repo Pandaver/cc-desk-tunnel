@@ -85,6 +85,13 @@ export class ClaudeStream {
           trigger: String(metadata.trigger ?? 'unknown'),
           previousTokens: typeof metadata.pre_tokens === 'number' ? metadata.pre_tokens : null,
         });
+      } else if (message.subtype === 'local_command_output') {
+        // What a command such as /context or /usage printed. Claude Code shows it as a reply of its own.
+        this.emit({
+          type: 'text.delta',
+          messageId: randomUUID(),
+          text: String(message.content ?? '').replace(/\u001b\[[\d;]*m/g, ''),
+        });
       } else if (['status', 'informational'].includes(String(message.subtype))) {
         const text =
           typeof message.content === 'string'

@@ -3,6 +3,7 @@ import type {
   ModelInfo,
   Query,
   SDKResultMessage,
+  SlashCommand,
 } from '@anthropic-ai/claude-agent-sdk';
 import { eventPayloadSchema } from '@cc-desk-tunnel/protocol';
 import type {
@@ -16,9 +17,12 @@ type ContextUsage = Awaited<ReturnType<Query['getContextUsage']>>;
 export function nativeCapabilities(
   models: ModelInfo[],
   account: AccountInfo,
-  commands: string[],
+  commands: SlashCommand[],
   configuredModel?: string,
+  // Commands whose use is bound to the CLI's own terminal, as the CLI names them.
+  terminal: string[] = [],
 ): EventPayload {
+  const usable = commands.filter((command) => !terminal.includes(command.name));
   const catalog: NativeCapabilities['models'] = models.map((model) => ({
     value: model.value,
     resolvedModel: model.resolvedModel,
@@ -46,7 +50,13 @@ export function nativeCapabilities(
   return eventPayloadSchema.parse({
     type: 'native.capabilities',
     models: catalog,
-    commands,
+    commands: usable.map((command) => command.name),
+    commandDetails: usable.map(({ name, description, argumentHint, aliases }) => ({
+      name,
+      description: description ?? '',
+      argumentHint: argumentHint ?? '',
+      ...(aliases?.length ? { aliases } : {}),
+    })),
     account: {
       email: account.email,
       organization: account.organization,

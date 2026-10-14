@@ -744,12 +744,12 @@ export function App() {
       show(response.sessionId);
     });
   }
-  async function send() {
-    if (!selected || !draft.trim() || inputDisabled) return;
+  async function send(text = draft) {
+    if (!selected || !text.trim() || inputDisabled) return;
     const sessionId = selected.id;
     setSlashOpen(false);
     await act(async () => {
-      await client.request({ type: 'message.send', sessionId, text: draft, scenario });
+      await client.request({ type: 'message.send', sessionId, text, scenario });
       setDraft(sessionId, '');
     });
   }
@@ -1553,8 +1553,8 @@ export function App() {
                 capabilities={capabilities}
                 nativeSession={nativeSession}
                 metrics={metrics}
-                send={() => {
-                  void send();
+                send={(text) => {
+                  void send(text);
                 }}
                 resume={stopped && !inputDisabled ? resume : undefined}
                 compact={() => {

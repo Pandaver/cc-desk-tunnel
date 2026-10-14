@@ -1,5 +1,16 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { ArrowUp, Folder, GitBranch, Play, Plus, RefreshCw, Shrink, Square } from 'lucide-react';
+import type { ReactNode } from 'react';
+import {
+  ArrowUp,
+  Folder,
+  GitBranch,
+  Play,
+  Plus,
+  RefreshCw,
+  Shrink,
+  Square,
+  SquareSlash,
+} from 'lucide-react';
 import type {
   Effort,
   NativeCapabilities,
@@ -8,6 +19,7 @@ import type {
   PermissionMode,
   Session,
 } from '@cc-desk-tunnel/protocol';
+import { slashCommands } from './commands.ts';
 import ComposerControls from './ComposerControls.tsx';
 import PermissionMenu from './PermissionMenu.tsx';
 import { IconButton } from './ui.tsx';
@@ -16,7 +28,6 @@ import type { MenuPosition } from './ui.tsx';
 export type Scenario = 'chat' | 'tool' | 'question' | 'error';
 // A draft that is only a slash and an optional command name opens the command menu.
 const slashDraft = /^[/\\][^ \n]*$/;
-const compactDraft = /^[/\\](compact)?$/;
 
 // The branch the project's working tree is on, read from the project by the desktop; it is looked at again
 // whenever the window comes back to the front or a run ends, the moments it may have changed.
@@ -94,7 +105,8 @@ export default function Composer({
   nativeSession: NativeSession | null;
   metrics: NativeMetrics | null;
   openAccount: () => void;
-  send: () => void;
+  // Sends the draft, or the text given instead of it.
+  send: (text?: string) => void;
   // Present when the session's last turn was stopped or cut off: takes it up again without a message.
   resume?: () => void;
   compact: () => void;
@@ -109,6 +121,80 @@ export default function Composer({
   const input = useRef<HTMLTextAreaElement>(null);
   const branch = useBranch(session.projectPath, !!session.activeRun);
   const [dropping, setDropping] = useState(false);
+  // The command menu: this window's own actions, then Claude Code's commands that fit what follows the slash. Enter
+  // runs the one picked; Tab or a click puts a command in the box, to be given its arguments.
+  // Until the keys pick one, the first that can be used is picked.
+  const [pick, setPick] = useState<number | null>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  const typed = slashOpen ? draft.slice(1).toLowerCase() : '';
+  const items: {
+    key: string;
+    icon: ReactNode;
+    title: ReactNode;
+    detail: ReactNode;
+    disabled: boolean;
+    run: () => void;
+    fill?: string;
+  }[] = [
+    ...('compact'.startsWith(typed)
+      ? [
+          {
+            key: 'compact',
+            icon: <Shrink />,
+            title: '压缩上下文',
+            detail: metrics?.context ? `已使用 ${metrics.context.percentage}%` : '/compact',
+            disabled: controlsDisabled || !canCompact,
+            run: compact,
+          },
+        ]
+      : []),
+    ...('refresh'.startsWith(typed)
+      ? [
+          {
+            key: 'refresh',
+            icon: <RefreshCw />,
+            title: '刷新原生状态',
+            detail: '上下文与订阅额度',
+            disabled: controlsDisabled || refreshing,
+            run: () => {
+              setSlashOpen(false);
+              setDraft('');
+              refresh();
+            },
+          },
+        ]
+      : []),
+    ...(slashOpen ? slashCommands(capabilities, typed) : []).map((command) => ({
+      key: `/${command.name}`,
+      icon: <SquareSlash />,
+      title: (
+        <>
+          /{command.name}
+          {command.argumentHint && <em>{command.argumentHint}</em>}
+        </>
+      ),
+      detail: command.description,
+      disabled: inputDisabled,
+      run: () => send(`/${command.name}`),
+      fill: `/${command.name} `,
+    })),
+  ];
+  const menuShown = native && slashOpen && items.length > 0;
+  const at =
+    pick === null
+      ? Math.max(
+          0,
+          items.findIndex((item) => !item.disabled),
+        )
+      : Math.min(pick, items.length - 1);
+  useEffect(() => {
+    menu.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
+  }, [at, menuShown]);
+  function fill(text: string) {
+    setDraft(text);
+    setSlashOpen(false);
+    input.current?.focus();
+  }
   useLayoutEffect(() => {
     // Grow with the draft; the stylesheet's max-height decides when scrolling takes over.
     if (!input.current) return;
@@ -152,39 +238,27 @@ export default function Composer({
   }
   return (
     <div className="composer-area">
-      {native && slashOpen && (
-        <div className="slash-menu" role="listbox" aria-label="会话命令">
-          <button
-            type="button"
-            role="option"
-            aria-selected={true}
-            disabled={controlsDisabled || !canCompact}
-            onClick={compact}
-          >
-            <Shrink />
-            <span>
-              压缩上下文
-              <small>
-                {metrics?.context ? `已使用 ${metrics.context.percentage}%` : '/compact'}
-              </small>
-            </span>
-          </button>
-          <button
-            type="button"
-            role="option"
-            aria-selected={false}
-            disabled={controlsDisabled || refreshing}
-            onClick={() => {
-              setSlashOpen(false);
-              setDraft('');
-              refresh();
-            }}
-          >
-            <RefreshCw />
-            <span>
-              刷新原生状态<small>上下文与订阅额度</small>
-            </span>
-          </button>
+      {menuShown && (
+        <div className="slash-menu" role="listbox" aria-label="会话命令" ref={menu}>
+          {items.map((item, index) => (
+            <button
+              key={item.key}
+              type="button"
+              role="option"
+              aria-selected={index === at}
+              disabled={item.disabled}
+              // The message box keeps the focus, and with it the keys.
+              onMouseDown={(event) => event.preventDefault()}
+              onMouseEnter={() => setPick(index)}
+              onClick={() => (item.fill ? fill(item.fill) : item.run())}
+            >
+              {item.icon}
+              <span>
+                {item.title}
+                <small>{item.detail}</small>
+              </span>
+            </button>
+          ))}
         </div>
       )}
       <div className="composer-context">
@@ -241,6 +315,7 @@ export default function Composer({
           onChange={(event) => {
             setDraft(event.target.value);
             setSlashOpen(native && slashDraft.test(event.target.value));
+            setPick(null);
           }}
           onPaste={(event) => {
             // Pasted text is left to the browser, also when a program put a picture of it beside the text.
@@ -260,10 +335,21 @@ export default function Composer({
               setSlashOpen(false);
               return;
             }
+            if (menuShown && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+              event.preventDefault();
+              setPick((at + (event.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length);
+              return;
+            }
+            if (menuShown && event.key === 'Tab' && !event.shiftKey) {
+              event.preventDefault();
+              const command = items[at].fill;
+              if (command) fill(command);
+              return;
+            }
             if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
-              if (slashOpen && compactDraft.test(draft)) compact();
-              else send();
+              if (!menuShown) send();
+              else if (!items[at].disabled) items[at].run();
             }
           }}
         />

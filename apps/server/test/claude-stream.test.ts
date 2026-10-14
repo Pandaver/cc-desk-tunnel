@@ -199,3 +199,18 @@ test('the model requests of a turn are counted from their start events', () => {
   stream.accept({ type: 'stream_event', event: { type: 'message_start' } });
   assert.equal(stream.requests, 1);
 });
+
+test('what a local command printed becomes a reply of its own, without terminal colours', () => {
+  const events: EventPayload[] = [];
+  const stream = new ClaudeStream((event) => events.push(event));
+  stream.accept({
+    type: 'system',
+    subtype: 'local_command_output',
+    content: '\u001b[1mContext\u001b[0m 12%',
+    uuid: randomUUID(),
+    session_id: randomUUID(),
+  });
+  assert.equal(events.length, 1);
+  assert.ok(events[0].type === 'text.delta');
+  assert.equal(events[0].text, 'Context 12%');
+});
