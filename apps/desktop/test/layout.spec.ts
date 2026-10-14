@@ -626,11 +626,17 @@ test('Electron: frameless window, the project branch, files by path and window s
     const notes = page.getByRole('dialog');
     await expect(notes.getByRole('heading', { name: /的更新内容$/ })).toBeVisible();
     await expect(notes).toContainText('升级说明');
-    // A link into the repository goes to that file on GitHub, and from there to the user's browser.
-    await expect(notes.getByRole('link', { name: 'macOS 说明' })).toHaveAttribute(
-      'href',
-      /^https:\/\/github\.com\/[^/]+\/[^/]+\/blob\/v[\d.]+\/docs\/macos\.md$/,
-    );
+    // A link into the repository goes to that file on GitHub (see notes-quota.test.mjs), and from there to the
+    // user's browser: whatever this version's notes link to, no link is left relative to the program's page.
+    expect(
+      await notes
+        .locator('.release-notes a')
+        .evaluateAll((links) =>
+          links
+            .map((link) => link.getAttribute('href') ?? '')
+            .filter((href) => !/^(https?:|mailto:|#)/.test(href)),
+        ),
+    ).toEqual([]);
     // The notes wrap inside their dialog and scroll downwards only.
     expect(
       await notes.evaluate((dialog) =>
