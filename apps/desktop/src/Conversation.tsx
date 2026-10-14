@@ -783,6 +783,11 @@ export default function Conversation({
                   已答完，任务结束后会接着处理
                   {!ownsRun && ' · 另一连接'}
                 </div>
+                {/* The run is still on, so the controls that need it over are greyed out; this says why. */}
+                <p className="background-hint">
+                  任务结束前不能更改模型、思考强度和审批模式，也不能改名、分叉或编辑重发
+                  {ownsRun && '；消息可以照常发送'}。
+                </p>
                 <ul>
                   {tasks.map((task) => (
                     <li key={task.id}>
