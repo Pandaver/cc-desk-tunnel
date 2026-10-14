@@ -46,6 +46,7 @@ import type { NativeLogin } from './native-account.ts';
 import { NativeInput } from './native-input.ts';
 import { completeOnboarding } from './native-onboarding.ts';
 import { readNativeSettings, updateNativeSettings } from './native-settings.ts';
+import { readInstructions, writeInstructions } from './native-instructions.ts';
 import type { NativeTerminal } from './native-terminal.ts';
 import { simulate } from './simulation.ts';
 import { SessionStore } from './store.ts';
@@ -884,6 +885,21 @@ export function createProxyServer(options: ServerOptions) {
             'settings_failed',
             '原生设置文件无法读取或写入；请在原生终端用 /config 检查。',
           );
+        }
+        return undefined;
+      }
+      case 'instructions.get':
+      case 'instructions.update': {
+        if (!options.claude) throw new DomainError('native_unavailable', '离线模拟没有全局说明。');
+        try {
+          const state =
+            command.type === 'instructions.get'
+              ? readInstructions()
+              : writeInstructions(command.text, command.version);
+          send(peer, { type: 'instructions.state', requestId: command.requestId, ...state });
+        } catch (error) {
+          if (error instanceof DomainError) throw error;
+          throw new DomainError('instructions_failed', '全局说明文件无法读取或写入。');
         }
         return undefined;
       }

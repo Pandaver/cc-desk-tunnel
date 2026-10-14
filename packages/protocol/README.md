@@ -6,7 +6,7 @@
 
 - WebSocket `/ws` 建立后，首帧必须是 `auth`：协议版本、代理服务 token、设备名称。5 秒内不认证则关闭；token 不进入会话事件。服务回传 `ready`、连接 ID 和会话目录。
 - `requestId`、会话/运行/消息/审批 ID 为 UUID；工具 ID 保留原生 opaque ID。请求收到 `response` 只表示接纳/拒绝，不表示运行完成。
-- 请求包括 `session.create/delete/rename/move/subscribe/history/configure/compact/status`、`message.send`、`run.cancel`、`approval.reply`。`message.send.scenario` 是模拟器专用场景选择，原生适配不据此构造虚假能力。
+- 请求包括 `session.create/delete/rename/move/subscribe/history/configure/compact/status`、`message.send`、`run.cancel`、`approval.reply`；`instructions.get/update` 读写云端 CLI 的用户级 `CLAUDE.md`，以 `instructions.state` 回复，更新带上读取时的版本，文件已变则拒绝。`message.send.scenario` 是模拟器专用场景选择，原生适配不据此构造虚假能力。
 - 原生运行的所属连接可继续 `message.send`，同一 run / 原生进程接入 streaming input，不要求停止。`message.delivery` 按 messageId 更新提交 / 等待处理 / 原生回执 / 未送达 / 未确认；response 不等于原生采纳。消息合并和处理时机交给 CLI，未知状态不自动重放；每运行传输等待上限 32 条。
 - 服务事件为 `session.event`，包含会话 ID、运行 ID、时间和从 1 起的会话内递增 `sequence`。每个事件落盘后才广播。实时与历史可按 sequence 去重。
 - 分片到达的输出（`text.delta`、`thinking.delta`、`tool.input.delta`、`tool.output`）在到达时以 `session.fragment` 发给订阅者：不落盘、没有 `sequence`。一段输出结束（同一运行记下任何别的事件之前，或累计满 64K 字符）时，才作为一条同类型、含全部文字的 `session.event` 落盘并广播；客户端以它取代此前拼起来的片段。`session.subscribe` 的快照之后，服务端把运行当前未结束的那一段整段补发一次。
