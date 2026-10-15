@@ -1203,6 +1203,29 @@ dialog:has(.release-notes) {
   overflow-wrap: anywhere;
   text-align: right;
 }
+.instructions-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+}
+.instructions-card p {
+  margin: 0;
+}
+.instructions-editor {
+  width: 100%;
+  min-height: 220px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  background: var(--surface);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  resize: vertical;
+}
+.instructions-card .setting-actions > span {
+  margin-right: auto;
+}
 .setting-actions {
   display: flex;
   align-items: center;

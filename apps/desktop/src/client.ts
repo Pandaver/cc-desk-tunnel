@@ -21,7 +21,7 @@ import type {
 type Response = Extract<ServerMessage, { type: 'response' }>;
 type DataMessage = Extract<
   ServerMessage,
-  { type: 'usage.summary' | 'usage.page' | 'settings.state' }
+  { type: 'usage.summary' | 'usage.page' | 'settings.state' | 'instructions.state' }
 >;
 // Commands answered with a data frame, and the frame each one gets.
 type Replies = {
@@ -29,6 +29,8 @@ type Replies = {
   'usage.query': 'usage.page';
   'settings.get': 'settings.state';
   'settings.update': 'settings.state';
+  'instructions.get': 'instructions.state';
+  'instructions.update': 'instructions.state';
 };
 type TerminalMessage = Extract<
   ServerMessage,
@@ -52,6 +54,7 @@ export class RequestInterruptedError extends Error {
       'usage.summary',
       'usage.query',
       'settings.get',
+      'instructions.get',
       'service.update.check',
     ].includes(type);
     super(
@@ -353,7 +356,8 @@ export class ProxyClient {
       } else if (
         message.type === 'usage.summary' ||
         message.type === 'usage.page' ||
-        message.type === 'settings.state'
+        message.type === 'settings.state' ||
+        message.type === 'instructions.state'
       ) {
         if (this.pending.has(message.requestId)) this.results.set(message.requestId, message);
       } else if (message.type === 'service.update') {

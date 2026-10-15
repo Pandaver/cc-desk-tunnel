@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { NativeSettings } from '@cc-desk-tunnel/protocol';
 import type { ProxyClient } from './client.ts';
+import GlobalInstructions from './GlobalInstructions.tsx';
 
 type Key = keyof NativeSettings;
 type Value = NativeSettings[Key];
@@ -330,6 +331,7 @@ export default function SettingsPanel({ client }: { client: ProxyClient }) {
               </div>
             </div>
           ))}
+        <GlobalInstructions client={client} />
       </div>
     </section>
   );

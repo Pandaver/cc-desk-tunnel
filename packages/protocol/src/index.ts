@@ -1,7 +1,9 @@
 import { z } from 'zod';
 
-export const PROTOCOL_VERSION = 17;
+export const PROTOCOL_VERSION = 18;
 export const MAX_FRAME_BYTES = 256 * 1024;
+// The longest global instructions edited here, in characters; it keeps a frame of them within MAX_FRAME_BYTES.
+export const INSTRUCTIONS_LIMIT = 64_000;
 const id = z.uuid();
 const timestamp = z.iso.datetime();
 // `bypassPermissions` asks about nothing at all; the client offers it only once the user allowed that.
@@ -470,6 +472,16 @@ export const commandSchema = z.discriminatedUnion('type', [
       values: nativeSettingsSchema.partial().strict(),
     })
     .strict(),
+  z.object({ type: z.literal('instructions.get'), ...request }).strict(),
+  z
+    .object({
+      type: z.literal('instructions.update'),
+      ...request,
+      text: z.string().max(INSTRUCTIONS_LIMIT),
+      // The version the text was edited from; the file is written only if it is still that one.
+      version: z.string().max(100),
+    })
+    .strict(),
   z.object({ type: z.literal('usage.summary'), ...request }).strict(),
   z.object({ type: z.literal('service.update.check'), ...request }).strict(),
   z
@@ -678,6 +690,12 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('account.state'), ...accountStateSchema.shape }),
   z.object({ type: z.literal('settings.state'), requestId: id, values: nativeSettingsSchema }),
+  z.object({
+    type: z.literal('instructions.state'),
+    requestId: id,
+    text: z.string(),
+    version: z.string(),
+  }),
   z.object({ type: z.literal('usage.summary'), requestId: id, ...usageSummarySchema.shape }),
   z.object({ type: z.literal('usage.page'), requestId: id, ...usagePageSchema.shape }),
   z.object({ type: z.literal('terminal.opened'), sessionId: id, terminalId: id }),
