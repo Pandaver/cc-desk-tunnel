@@ -114,7 +114,7 @@ function TranscriptViewSettings() {
   const { view } = usePrefs();
   const set = (values: Partial<typeof view>) =>
     setPrefs((prefs) => ({ ...prefs, view: { ...prefs.view, ...values } }));
-  const current = viewModes.find((entry) => entry.mode === view.mode) ?? viewModes[1];
+  const current = viewModes.find((entry) => entry.mode === view.mode) ?? viewModes[0];
   return (
     <>
       <h2 className="page-heading">工作步骤展示</h2>
