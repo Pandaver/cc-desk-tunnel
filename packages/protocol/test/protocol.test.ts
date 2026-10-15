@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import {
+  PROTOCOL_HISTORY,
   PROTOCOL_VERSION,
   authSchema,
   commandSchema,
@@ -25,6 +26,9 @@ test('protocol validates UTF-8 text, IDs and bounded input', () => {
   assert.equal(commandSchema.safeParse({ ...command, token: 'unexpected' }).success, false);
 });
 
+test('the protocol history ends with the current version', () => {
+  assert.equal(Object.values(PROTOCOL_HISTORY).at(-1), PROTOCOL_VERSION);
+});
 test('authentication version and event ordering are explicit', () => {
   const auth = {
     type: 'auth',
