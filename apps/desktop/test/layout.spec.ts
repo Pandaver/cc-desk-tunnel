@@ -363,6 +363,9 @@ test('a run that goes on only for background tasks looks finished, lists them an
   await row.locator('.session-select').click();
   const panel = page.locator('.background-tasks');
   await expect(panel.getByRole('status')).toContainText('后台任务 2 个');
+  // Why the model, the approval mode and forking are greyed out while the tasks go on.
+  await expect(panel).toContainText('任务结束前不能更改模型');
+  await expect(panel).toContainText('消息可以照常发送');
   await expect(panel.getByRole('listitem')).toHaveText([/完整渲染/, /开发服务器/]);
   // The turn itself is over: its answer shows as final, and the composer offers sending, not stopping.
   await expect(page.locator('.message.assistant')).toContainText('渲染已在后台开始。');

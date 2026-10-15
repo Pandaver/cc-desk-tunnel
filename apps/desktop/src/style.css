@@ -1999,6 +1999,11 @@ details[open] > summary > .fold-chevron {
   justify-items: start;
   gap: 8px;
 }
+.background-hint {
+  margin: 0;
+  color: var(--faint);
+  font-size: 12px;
+}
 .background-tasks ul {
   display: grid;
   gap: 6px;

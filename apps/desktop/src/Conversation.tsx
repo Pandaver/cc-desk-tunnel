@@ -575,6 +575,9 @@ export default function Conversation({
   // Earlier history is inserted above; the anchor keeps the lines being read where they were.
   const prependAnchor = useRef<{ sessionId: string; height: number; top: number } | null>(null);
   const lastTop = useRef(0);
+  // A button is held on the conversation: on its scrollbar, or selecting text past its edge.
+  const held = useRef(false);
+  const toEnd = () => scroll.current?.scrollTo(0, scroll.current.scrollHeight);
   const loadMore = () => {
     if (!session || !connected || !history?.hasEarlier || history.loadingEarlier || history.loading)
       return;
@@ -590,7 +593,7 @@ export default function Conversation({
   useLayoutEffect(() => {
     prependAnchor.current = null;
     follow.current = true;
-    scroll.current?.scrollTo(0, scroll.current.scrollHeight);
+    toEnd();
   }, [session?.id]);
   useLayoutEffect(() => {
     const anchor = prependAnchor.current;
@@ -601,8 +604,20 @@ export default function Conversation({
       return;
     }
     if (anchor) return;
-    if (follow.current && !findOpen) scroll.current?.scrollTo(0, scroll.current.scrollHeight);
+    if (follow.current && !findOpen) toEnd();
   }, [events, history?.loadingEarlier, session?.id]);
+  // Heights keep changing after that scroll with nothing new said: a reply's Markdown drawn late, messages the page
+  // had only estimated until they came into view (`content-visibility`), a resized window. While following, the
+  // view keeps to the end through them.
+  useEffect(() => {
+    if (!scroll.current || !transcriptRoot.current) return;
+    const observer = new ResizeObserver(() => {
+      if (follow.current && !findOpen && !prependAnchor.current) toEnd();
+    });
+    observer.observe(scroll.current);
+    observer.observe(transcriptRoot.current);
+    return () => observer.disconnect();
+  }, [session?.id, findOpen]);
 
   return (
     <SearchExpanded.Provider value={searching}>
@@ -675,12 +690,33 @@ export default function Conversation({
         onScroll={() => {
           if (!scroll.current) return;
           const top = scroll.current.scrollTop;
-          follow.current = scroll.current.scrollHeight - top - scroll.current.clientHeight < 80;
+          // Reaching the end follows again. Only the reader leaves it: settling heights move the view too.
+          if (scroll.current.scrollHeight - top - scroll.current.clientHeight < 80)
+            follow.current = true;
+          else if (held.current && top < lastTop.current) follow.current = false;
           // Reading on upwards past what is loaded brings the page before it; a failed load waits for the button.
           if (top < lastTop.current && top < 240 && !loadError) loadMore();
           lastTop.current = top;
         }}
+        onPointerDown={(event) => {
+          held.current = true;
+          const release = () => {
+            held.current = false;
+            window.removeEventListener('pointerup', release);
+            window.removeEventListener('pointercancel', release);
+          };
+          window.addEventListener('pointerup', release);
+          window.addEventListener('pointercancel', release);
+          // Steps opened or closed are being read where they are.
+          if ((event.target as HTMLElement).closest('summary')) follow.current = false;
+        }}
+        onKeyDown={(event) => {
+          if ((event.target as HTMLElement).closest('input, textarea, [contenteditable="true"]'))
+            return;
+          if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) follow.current = false;
+        }}
         onWheel={(event) => {
+          if (event.deltaY < 0) follow.current = false;
           // A loaded page shorter than the window cannot scroll, so the wheel itself asks for more.
           if (event.deltaY < 0 && scroll.current?.scrollTop === 0 && !loadError) loadMore();
         }}
@@ -747,6 +783,11 @@ export default function Conversation({
                   已答完，任务结束后会接着处理
                   {!ownsRun && ' · 另一连接'}
                 </div>
+                {/* The run is still on, so the controls that need it over are greyed out; this says why. */}
+                <p className="background-hint">
+                  任务结束前不能更改模型、思考强度和审批模式，也不能改名、分叉或编辑重发
+                  {ownsRun && '；消息可以照常发送'}。
+                </p>
                 <ul>
                   {tasks.map((task) => (
                     <li key={task.id}>
