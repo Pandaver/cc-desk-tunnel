@@ -214,3 +214,35 @@ test('what a local command printed becomes a reply of its own, without terminal 
   assert.ok(events[0].type === 'text.delta');
   assert.equal(events[0].text, 'Context 12%');
 });
+
+test('a local command answered after a streamed reply is shown as a reply of its own', () => {
+  const events: EventPayload[] = [];
+  const stream = new ClaudeStream((event) => events.push(event));
+  stream.accept({ type: 'stream_event', event: { type: 'message_start' } });
+  stream.accept({
+    type: 'stream_event',
+    event: { type: 'content_block_delta', delta: { type: 'text_delta', text: '模型的回答' } },
+  });
+  stream.accept({
+    type: 'assistant',
+    message: { content: [{ type: 'text', text: '模型的回答' }] },
+  });
+  stream.accept({ type: 'result', subtype: 'success', is_error: false, result: '模型的回答' });
+  // Claude Code 2.1.293 answers /context and /usage with a whole message, and no model request before it.
+  stream.accept({
+    type: 'assistant',
+    message: { content: [{ type: 'text', text: '## Context Usage' }] },
+  });
+  stream.accept({
+    type: 'result',
+    subtype: 'success',
+    is_error: false,
+    result: '## Context Usage',
+  });
+  const texts = events.filter((event) => event.type === 'text.delta');
+  assert.deepEqual(
+    texts.map((event) => event.text),
+    ['模型的回答', '## Context Usage'],
+  );
+  assert.notEqual(texts[0].messageId, texts[1].messageId);
+});

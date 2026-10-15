@@ -86,7 +86,8 @@ export class ClaudeStream {
           previousTokens: typeof metadata.pre_tokens === 'number' ? metadata.pre_tokens : null,
         });
       } else if (message.subtype === 'local_command_output') {
-        // What a command such as /context or /usage printed. Claude Code shows it as a reply of its own.
+        // What a local command printed, where the CLI reports it this way; Claude Code 2.1.293 answers /context and
+        // /usage with a whole assistant message instead (see `result`). Either is a reply of its own.
         this.emit({
           type: 'text.delta',
           messageId: randomUUID(),
@@ -203,6 +204,11 @@ export class ClaudeStream {
       }
     }
     if (message.type === 'result') {
+      // The turn is over. What comes next may be a whole message with no request streamed before it: the
+      // answer of a local command such as /context or /usage.
+      this.streamed = false;
+      this.thinkingStreamed = false;
+      this.messageId = randomUUID();
       this.result = {
         failed: message.is_error === true || message.subtype !== 'success',
         text: String(
