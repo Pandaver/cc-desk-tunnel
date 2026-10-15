@@ -1237,6 +1237,14 @@ export function App() {
               : currentError
           }
           upgrade={state.mismatch && window.desktop ? upgrade : null}
+          older={
+            form.mode === 'remote' &&
+            state.mismatch &&
+            state.service &&
+            isNewer(version, state.service)
+              ? state.service
+              : null
+          }
           direct={direct}
           downloaded={downloaded}
           install={install}

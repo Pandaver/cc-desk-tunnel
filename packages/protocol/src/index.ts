@@ -1,6 +1,19 @@
 import { z } from 'zod';
 
 export const PROTOCOL_VERSION = 18;
+// The release each protocol version began with, from 0.2.4 on: a client newer than its service signs in with
+// the service's number to have it upgrade (see the README). A new number adds its line here.
+export const PROTOCOL_HISTORY: Readonly<Record<string, number>> = {
+  '0.2.4': 10,
+  '0.2.6': 11,
+  '0.2.9': 12,
+  '0.2.10': 13,
+  '0.2.11': 14,
+  '0.2.12': 15,
+  '0.3.0': 16,
+  '0.3.2': 17,
+  '0.3.3': 18,
+};
 export const MAX_FRAME_BYTES = 256 * 1024;
 // The longest global instructions edited here, in characters; it keeps a frame of them within MAX_FRAME_BYTES.
 export const INSTRUCTIONS_LIMIT = 64_000;

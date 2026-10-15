@@ -68,6 +68,7 @@ Electron 选择“远程代理”，输入可信 WSS 地址、代理 token；自
 | `src/ui.tsx`、`paths.ts` | 图标按钮 / 对话框 / 菜单；Windows 路径比较 |
 | `electron/connections.cjs` | 这台电脑上的多个连接：名单、各自的用户目录、共用的值 |
 | `electron/main.cjs`、`preload.cjs` | 窗口、托盘、系统通知、IPC（选目录与文件、保存导出、普通会话目录、打开授权页、连接）和暴露给页面的 `window.desktop` |
+| `electron/service-upgrade.mjs` | 让比客户端旧、因此拒绝它的服务端升级：以那一版的协议版本登录，发检查与安装更新，跟着进度直到它重启 |
 | `electron/connect-errors.mjs` | 连接失败时给用户的说明：按系统错误码、TLS 错误和组件的输出区分原因，第一行是原因，其后是该检查的地方 |
 | `electron/git-branch.cjs` | 从仓库文件读出项目当前所在的分支，不依赖本机安装 git |
 | `electron/client-log.cjs` | 连接日志：每次连接的建立、断开与原因，写在用户配置目录的 `logs/` 下，不含凭据和内容 |
