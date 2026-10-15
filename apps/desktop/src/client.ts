@@ -21,12 +21,16 @@ import type {
 type Response = Extract<ServerMessage, { type: 'response' }>;
 type DataMessage = Extract<
   ServerMessage,
-  { type: 'usage.summary' | 'usage.page' | 'settings.state' | 'instructions.state' }
+  {
+    type:
+      'usage.summary' | 'usage.page' | 'session.stats' | 'settings.state' | 'instructions.state';
+  }
 >;
 // Commands answered with a data frame, and the frame each one gets.
 type Replies = {
   'usage.summary': 'usage.summary';
   'usage.query': 'usage.page';
+  'session.stats': 'session.stats';
   'settings.get': 'settings.state';
   'settings.update': 'settings.state';
   'instructions.get': 'instructions.state';
@@ -53,6 +57,7 @@ export class RequestInterruptedError extends Error {
       'account.status',
       'usage.summary',
       'usage.query',
+      'session.stats',
       'settings.get',
       'instructions.get',
       'service.update.check',
@@ -362,6 +367,7 @@ export class ProxyClient {
       } else if (
         message.type === 'usage.summary' ||
         message.type === 'usage.page' ||
+        message.type === 'session.stats' ||
         message.type === 'settings.state' ||
         message.type === 'instructions.state'
       ) {

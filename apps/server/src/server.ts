@@ -952,6 +952,15 @@ export function createProxyServer(options: ServerOptions) {
       case 'usage.summary':
         send(peer, { type: 'usage.summary', requestId: command.requestId, ...usage.summary() });
         return undefined;
+      case 'session.stats':
+        store.get(command.sessionId);
+        send(peer, {
+          type: 'session.stats',
+          requestId: command.requestId,
+          sessionId: command.sessionId,
+          ...usage.sessionStats(command.sessionId),
+        });
+        return undefined;
       case 'service.update.check':
         if (!updates) throw new DomainError('updates_unavailable', '此服务未启用版本跟踪。');
         await updates.check();
