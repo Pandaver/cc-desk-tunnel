@@ -283,10 +283,12 @@ export const eventPayloadSchema = z.discriminatedUnion('type', [
     trigger: z.string(),
     previousTokens: z.number().nonnegative().nullable(),
   }),
-  // What one turn cost, summed from the model requests the CLI reported for it; the figures are the call log's.
+  // What one question cost, summed from the model requests the CLI reported for it; the figures are the call log's.
+  // A question runs on through the turns its background tasks start, and each of those turns sends the figures so far
+  // under the same messageId; the last one received is the current one.
   z.object({
     type: z.literal('turn.stats'),
-    // The user message the turn answered; a turn that a background task started has none.
+    // The user message the figures answer; a run that resumed without one reports under none.
     messageId: id.optional(),
     requests: z.number().int().nonnegative(),
     inputTokens: z.number().nonnegative(),
@@ -297,7 +299,7 @@ export const eventPayloadSchema = z.discriminatedUnion('type', [
     // Averages over the requests that report a first-token time; null when none does.
     ttftMs: z.number().nonnegative().nullable(),
     outputPerSecond: z.number().nonnegative().nullable(),
-    // Fewer requests were reported than the turn made when this was written.
+    // Fewer requests were reported than the question made, or a background task is still running and may add more.
     partial: z.boolean(),
   }),
   z.object({ type: z.literal('tool.requested'), ...toolSchema.shape }),
