@@ -212,7 +212,24 @@ test('what a local command printed becomes a reply of its own, without terminal 
   });
   assert.equal(events.length, 1);
   assert.ok(events[0].type === 'text.delta');
-  assert.equal(events[0].text, 'Context 12%');
+  assert.equal(events[0].text, '```text\nContext 12%\n```');
+});
+
+test('a local command that prints plain text is shown as printed, its dollars no formula', () => {
+  const events: EventPayload[] = [];
+  const stream = new ClaudeStream((event) => events.push(event));
+  const usage =
+    'Total cost:            $0.0919 (costs may be inaccurate)\nUsage by model:\n  gpt-5.6-terra:  16.2k input ($0.0919)';
+  stream.accept({ type: 'assistant', message: { content: [{ type: 'text', text: usage }] } });
+  stream.accept({ type: 'result', subtype: 'success', is_error: false, result: usage });
+  // A reply of the model that is plain text stays as it came.
+  stream.accept({ type: 'stream_event', event: { type: 'message_start' } });
+  stream.accept({
+    type: 'assistant',
+    message: { content: [{ type: 'text', text: '$x$ 是变量' }] },
+  });
+  const texts = events.flatMap((event) => (event.type === 'text.delta' ? [event.text] : []));
+  assert.deepEqual(texts, ['```text\n' + usage + '\n```', '$x$ 是变量']);
 });
 
 test('a local command answered after a streamed reply is shown as a reply of its own', () => {

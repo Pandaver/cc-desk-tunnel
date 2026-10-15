@@ -3,6 +3,17 @@ import { z } from 'zod';
 import type { Effort, EventPayload, PermissionMode } from '@cc-desk-tunnel/protocol';
 
 const jsonObject = z.record(z.string(), z.unknown());
+// What a local command printed, for the page's Markdown. /context prints Markdown of its own; /usage and the like
+// print lines laid out in columns, whose dollar amounts would be taken for formulas and whose line breaks would be
+// lost: those are kept as they are, in a block of plain text.
+export function printed(output: string) {
+  const text = output.replace(/\u001b\[[\d;]*m/g, '').trimEnd();
+  if (/^\s*(#|\|)/m.test(text)) return text;
+  const fence = '`'.repeat(
+    Math.max(3, ...[...text.matchAll(/`+/g)].map(([run]) => run.length + 1)),
+  );
+  return `${fence}text\n${text}\n${fence}`;
+}
 export type NativeTool = {
   id: string;
   name: string;
@@ -16,6 +27,8 @@ export class ClaudeStream {
   messageId = randomUUID();
   streamed = false;
   thinkingStreamed = false;
+  // A model request began in this turn. A turn without one is a local command's: its answer is what it printed.
+  requested = false;
   // Model requests seen since the counter was last cleared; the service waits for as many call-log records.
   requests = 0;
   result: { failed: boolean; text: string } | null = null;
@@ -91,7 +104,7 @@ export class ClaudeStream {
         this.emit({
           type: 'text.delta',
           messageId: randomUUID(),
-          text: String(message.content ?? '').replace(/\u001b\[[\d;]*m/g, ''),
+          text: printed(String(message.content ?? '')),
         });
       } else if (['status', 'informational'].includes(String(message.subtype))) {
         const text =
@@ -114,6 +127,7 @@ export class ClaudeStream {
       const event = jsonObject.parse(message.event);
       if (event.type === 'message_start') {
         this.requests++;
+        this.requested = true;
         this.messageId = randomUUID();
         this.streamed = false;
         this.thinkingStreamed = false;
@@ -163,12 +177,14 @@ export class ClaudeStream {
     if (message.type === 'assistant') {
       const assistant = jsonObject.parse(message.message);
       for (const value of z.array(jsonObject).parse(assistant.content)) {
-        if (value.type === 'text' && !this.streamed)
+        if (value.type === 'text' && !this.streamed) {
+          const text = z.string().parse(value.text);
           this.emit({
             type: 'text.delta',
             messageId: this.messageId,
-            text: z.string().parse(value.text),
+            text: this.requested ? text : printed(text),
           });
+        }
         if (
           value.type === 'thinking' &&
           !this.thinkingStreamed &&
@@ -208,6 +224,7 @@ export class ClaudeStream {
       // answer of a local command such as /context or /usage.
       this.streamed = false;
       this.thinkingStreamed = false;
+      this.requested = false;
       this.messageId = randomUUID();
       this.result = {
         failed: message.is_error === true || message.subtype !== 'success',
