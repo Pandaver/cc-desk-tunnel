@@ -378,20 +378,20 @@ export class UsageLog {
       })),
     };
   }
-  // One turn's model requests, summed with the figures the call log shows: the requests of the turn's prompts, or,
-  // when the CLI named none, those inside its time window.
+  // One question's model requests, summed with the figures the call log shows: the requests of its prompts, which
+  // include a subagent's long after the turn, and those inside its time window, which include the ones made under a
+  // prompt the CLI never told us of.
   turnStats(sessionId: string, turn: { promptIds: string[]; startedAt: number; endedAt: number }) {
-    const prompts = turn.promptIds.length > 0;
     const { streamedTokens, streamedMs, costUsd, ...sums } = this.database
       .prepare(
         `SELECT ${totals}, COALESCE(SUM(duration_ms), 0) AS modelMs, COALESCE(SUM(source = 'sdk'), 0) AS mainRequests, ${streaming}
-      FROM api_requests WHERE session_id = ? AND ${
-        prompts
-          ? `prompt_id IN (${turn.promptIds.map(() => '?').join(',')})`
-          : 'at >= ? AND at <= ?'
-      }`,
+      FROM api_requests WHERE session_id = ? AND (at >= ? AND at <= ?${
+        turn.promptIds.length > 0
+          ? ` OR prompt_id IN (${turn.promptIds.map(() => '?').join(',')})`
+          : ''
+      })`,
       )
-      .get(sessionId, ...(prompts ? turn.promptIds : [turn.startedAt, turn.endedAt])) as Record<
+      .get(sessionId, turn.startedAt, turn.endedAt, ...turn.promptIds) as Record<
       string,
       number | null
     > & {
