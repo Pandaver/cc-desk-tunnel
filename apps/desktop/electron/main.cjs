@@ -323,7 +323,7 @@ handle('proxy:connect', async (event, config) => {
 // A service older than this client refuses it at sign-in; it is asked to upgrade over a connection of its own.
 handle('service:upgrade', async (event, config) => {
   const { upgradeService } = await import(
-    pathToFileURL(path.join(__dirname, 'service-upgrade.mjs')).href
+    pathToFileURL(path.join(__dirname, 'proxy-bridge.mjs')).href
   );
   return upgradeService(config, {
     resolveProxy: (url) => session.defaultSession.resolveProxy(url),
