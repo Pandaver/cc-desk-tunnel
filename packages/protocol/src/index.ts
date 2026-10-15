@@ -243,6 +243,17 @@ export const eventPayloadSchema = z.discriminatedUnion('type', [
     models: z.array(modelInfoSchema),
     account: nativeAccountSchema,
     commands: z.array(z.string()),
+    // What each command does and takes, in Claude Code's words; those bound to its own terminal are left out.
+    commandDetails: z
+      .array(
+        z.object({
+          name: z.string(),
+          description: z.string(),
+          argumentHint: z.string(),
+          aliases: z.array(z.string()).optional(),
+        }),
+      )
+      .optional(),
   }),
   z.object({
     type: z.literal('native.metrics'),
