@@ -3,20 +3,26 @@ import type { NativeCapabilities } from '@cc-desk-tunnel/protocol';
 // A Claude Code command offered after "/" in the message box. It is sent as the message itself, as the CLI takes it.
 export type SlashCommand = { name: string; description: string; argumentHint: string };
 
-// Commands this window does with its own controls (compacting, the model, approvals, the account), and those that
-// would put the CLI in another session than this one. They are for Claude Code's own terminal; the CLI also names
-// the commands bound to its terminal, which the service leaves out already.
+// Commands this window does with its own controls (compacting, the model and effort, approvals, the account, the
+// title, settings), those that would put the CLI in another session than this one, and Claude Code's own for
+// sessions its servers launch. They are for Claude Code's own terminal; the CLI also names the commands bound to
+// its terminal, which the service leaves out already. Names starting with "__" are the CLI's internal ones.
 const hidden = new Set([
   'compact',
   'model',
+  'effort',
+  'fast',
   'permissions',
   'login',
   'logout',
   'config',
+  'autocompact',
+  'rename',
   'clear',
   'resume',
   'exit',
   'quit',
+  'workflow-launch-exec',
 ]);
 // The everyday ones come first and are said in Chinese; the rest keep Claude Code's own words.
 const everyday: Record<string, string> = {
@@ -45,7 +51,7 @@ export function slashCommands(
   const order = Object.keys(everyday);
   const rank = (name: string) => (order.includes(name) ? order.indexOf(name) : order.length);
   const found = details
-    .filter((command) => !hidden.has(command.name))
+    .filter((command) => !hidden.has(command.name) && !command.name.startsWith('__'))
     .map((command) => {
       const names = [command.name, ...(command.aliases ?? [])].map((name) => name.toLowerCase());
       const fit = names.some((name) => name.startsWith(query))

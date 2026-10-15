@@ -15,6 +15,11 @@ const commands = [
   { name: 'clear', description: 'Clear conversation history', argumentHint: '' },
   { name: 'model', description: 'Set the model', argumentHint: '[model]' },
   { name: 'my-skill', description: 'Run my own skill', argumentHint: '' },
+  // Controls of their own here, and the CLI's internal ones, as Claude Code 2.1.293 lists them.
+  { name: 'effort', description: 'Set effort level', argumentHint: '<low|medium|high>' },
+  { name: 'rename', description: 'Rename the current conversation', argumentHint: '[name]' },
+  { name: '__remote-workflow', description: 'Run the workflow script', argumentHint: '' },
+  { name: 'workflow-launch-exec', description: 'Execute a workflow handoff', argumentHint: '' },
 ];
 
 async function open(page: Page) {
