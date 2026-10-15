@@ -1456,8 +1456,9 @@ export function App() {
                 });
               }}
               stop={stopRun}
-              replyApproval={(runId, approvalId, allowed, answers) => {
-                void act(async () => {
+              replyApproval={async (runId, approvalId, allowed, answers) => {
+                let sent = false;
+                await act(async () => {
                   await client.request({
                     type: 'approval.reply',
                     sessionId: selected!.id,
@@ -1466,7 +1467,9 @@ export function App() {
                     allowed,
                     ...(answers ? { answers } : {}),
                   });
+                  sent = true;
                 });
+                return sent;
               }}
             />
             {state.status === 'reconnecting' && (

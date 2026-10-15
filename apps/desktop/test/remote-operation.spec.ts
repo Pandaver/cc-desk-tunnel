@@ -2,6 +2,34 @@ import { expect, test } from '@playwright/test';
 import { resolve } from 'node:path';
 import { createSession, login, screenshots, send, settled } from './helpers.ts';
 
+test('a second press on an approval before it is over answers nothing and reports nothing', async ({
+  page,
+}) => {
+  // The reply to the press comes back before the approval is seen to be over, as it can when the session's
+  // events take long to arrive: they are held back here, in their order, and replies are not.
+  let held = false;
+  await page.routeWebSocket(/\/ws$/, (socket) => {
+    const service = socket.connectToServer();
+    service.onMessage((message) => {
+      if (held && typeof message === 'string' && message.includes('"session.'))
+        setTimeout(() => socket.send(message), 1500);
+      else socket.send(message);
+    });
+  });
+  await page.goto('/');
+  await login(page);
+  await createSession(page, '连点审批');
+  await send(page, '连点', 'tool');
+  const allow = page.getByRole('button', { name: '允许', exact: true });
+  await expect(allow).toBeVisible();
+  held = true;
+  await allow.click();
+  // A second press as soon as the button takes one again: it must not until the approval is over.
+  await allow.click({ timeout: 2000 }).catch(() => {});
+  await settled(page);
+  await expect(page.locator('.error-banner')).toHaveCount(0);
+});
+
 test('another computer works on a session while its own is connected; both see the run and either answers', async ({
   page,
   browser,
