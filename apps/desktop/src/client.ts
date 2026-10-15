@@ -83,8 +83,11 @@ export type HistoryState = {
 export type ClientState = {
   status: 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
   connectionId: string | null;
-  // The computer this client signed in as; a session is worked on from the one it is on.
+  // The computer this client signed in as; a session's commands run on the one it is on.
   device: Device | null;
+  // The user's computers connected to the service now, and whether commands reach each yet. Another
+  // computer's sessions can be worked on from here while it is listed and ready.
+  devices: ConnectedDevice[];
   sessions: Session[];
   events: Record<string, SessionEvent[]>;
   // Output a run is in the middle of, as far as it has arrived. It has no place in the history yet: the
@@ -114,6 +117,7 @@ export type ClientState = {
   progress: Record<string, Record<string, TaskProgress>>;
 };
 export type TaskProgress = Extract<EventPayload, { type: 'native.progress' }>;
+export type ConnectedDevice = Extract<ServerMessage, { type: 'devices' }>['devices'][number];
 
 // The renderer's single connection and its state store: components read `state` through subscribe / getSnapshot
 // and send commands with request(). A connection that breaks is made again, for as long as it takes, and what
@@ -123,6 +127,7 @@ export class ProxyClient {
     status: 'disconnected',
     connectionId: null,
     device: null,
+    devices: [],
     sessions: [],
     events: {},
     live: {},
@@ -224,6 +229,7 @@ export class ProxyClient {
     this.update({
       status: 'connecting',
       device,
+      devices: [],
       error: null,
       release: null,
       service: null,
@@ -373,6 +379,8 @@ export class ProxyClient {
         this.update(
           account.loggedIn ? { account } : { account, capabilities: null, metrics: null },
         );
+      } else if (message.type === 'devices') {
+        this.update({ devices: message.devices });
       } else if (message.type === 'session.updated') {
         this.upsert(message.session);
       } else if (
@@ -465,7 +473,7 @@ export class ProxyClient {
         });
         return;
       }
-      this.update({ status: 'reconnecting', connectionId: null });
+      this.update({ status: 'reconnecting', connectionId: null, devices: [] });
       this.retryTimer = setTimeout(
         () => {
           this.retryTimer = undefined;

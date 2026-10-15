@@ -781,7 +781,7 @@ export default function Conversation({
                   <span className={`running-dot${connected ? ' breathing' : ''}`} />
                   后台任务{tasks.length ? ` ${tasks.length} 个` : ''} · Claude
                   已答完，任务结束后会接着处理
-                  {!ownsRun && ' · 另一连接'}
+                  {!ownsRun && ' · 所在设备不在线'}
                 </div>
                 {/* The run is still on, so the controls that need it over are greyed out; this says why. */}
                 <p className="background-hint">
@@ -834,13 +834,13 @@ export default function Conversation({
                   )}
                   clock={clock}
                   connected={connected}
-                  suffix={ownsRun ? '' : ' · 另一连接'}
+                  suffix={ownsRun ? '' : ' · 所在设备不在线'}
                 />
               ) : (
                 <div className="run-indicator" role="status">
                   <span className="running-dot" />
                   {session.activeRun.waiting === 'question' ? '等待回答' : '等待审批'}
-                  {!ownsRun && ' · 另一连接'}
+                  {!ownsRun && ' · 所在设备不在线'}
                 </div>
               ))}
           </div>
