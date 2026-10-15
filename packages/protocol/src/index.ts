@@ -374,8 +374,8 @@ export const sessionSchema = z.object({
   title: z.string().min(1).max(120),
   autoTitle: z.boolean().default(false),
   projectPath: z.string().min(1).max(2048),
-  // The computer the project directory is on, and so the only one to send the session messages. A session
-  // from before 0.2.11 has none until a computer sends it one.
+  // The computer the project directory is on, and so where the session's runs and commands are, whichever of
+  // the user's computers sends its messages. A session from before 0.2.11 has none until a computer sends it one.
   device: deviceSchema.optional(),
   permissionMode: permissionModeSchema.default('auto'),
   model: z.string().trim().min(1).max(200).nullable().default(null),
@@ -730,6 +730,12 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
     client: installerSchema.optional(),
   }),
   z.object({ type: z.literal('service.update'), ...serviceUpdateSchema.shape }),
+  // The user's computers connected now, each with whether commands reach it yet: sent on signing in and
+  // whenever it changes. A computer not listed is away, and its sessions can only be read.
+  z.object({
+    type: z.literal('devices'),
+    devices: z.array(deviceSchema.extend({ ready: z.boolean() })),
+  }),
   // The execution channel runs over connections the device opens to this same address. `secret` signs them
   // in; it belongs to this connection alone and ends with it.
   z.object({ type: z.literal('tunnel.offer'), connectionId: id, secret: tunnelSecret }),
