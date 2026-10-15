@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const PROTOCOL_VERSION = 18;
+export const PROTOCOL_VERSION = 19;
 // The release each protocol version began with, from 0.2.4 on: a client newer than its service signs in with
 // the service's number to have it upgrade (see the README). A new number adds its line here.
 export const PROTOCOL_HISTORY: Readonly<Record<string, number>> = {
@@ -13,6 +13,7 @@ export const PROTOCOL_HISTORY: Readonly<Record<string, number>> = {
   '0.3.0': 16,
   '0.3.2': 17,
   '0.3.3': 18,
+  '0.3.5': 19,
 };
 export const MAX_FRAME_BYTES = 256 * 1024;
 // The longest global instructions edited here, in characters; it keeps a frame of them within MAX_FRAME_BYTES.
@@ -283,10 +284,12 @@ export const eventPayloadSchema = z.discriminatedUnion('type', [
     trigger: z.string(),
     previousTokens: z.number().nonnegative().nullable(),
   }),
-  // What one turn cost, summed from the model requests the CLI reported for it; the figures are the call log's.
+  // What one question cost, summed from the model requests the CLI reported for it; the figures are the call log's.
+  // A question runs on through the turns its background tasks start, and each of those turns sends the figures so far
+  // under the same messageId; the last one received is the current one.
   z.object({
     type: z.literal('turn.stats'),
-    // The user message the turn answered; a turn that a background task started has none.
+    // The user message the figures answer; a run that resumed without one reports under none.
     messageId: id.optional(),
     requests: z.number().int().nonnegative(),
     inputTokens: z.number().nonnegative(),
@@ -297,7 +300,7 @@ export const eventPayloadSchema = z.discriminatedUnion('type', [
     // Averages over the requests that report a first-token time; null when none does.
     ttftMs: z.number().nonnegative().nullable(),
     outputPerSecond: z.number().nonnegative().nullable(),
-    // Fewer requests were reported than the turn made when this was written.
+    // Fewer requests were reported than the question made, or a background task is still running and may add more.
     partial: z.boolean(),
   }),
   z.object({ type: z.literal('tool.requested'), ...toolSchema.shape }),
@@ -496,6 +499,7 @@ export const commandSchema = z.discriminatedUnion('type', [
     })
     .strict(),
   z.object({ type: z.literal('usage.summary'), ...request }).strict(),
+  z.object({ type: z.literal('session.stats'), ...request, sessionId: id }).strict(),
   z.object({ type: z.literal('service.update.check'), ...request }).strict(),
   z
     .object({ type: z.literal('service.update.install'), ...request, version: versionSchema })
@@ -711,6 +715,24 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('usage.summary'), requestId: id, ...usageSummarySchema.shape }),
   z.object({ type: z.literal('usage.page'), requestId: id, ...usagePageSchema.shape }),
+  // What a whole session has cost so far, summed from the model requests the call log holds for it.
+  z.object({
+    type: z.literal('session.stats'),
+    requestId: id,
+    sessionId: id,
+    // Distinct prompts, which is how many turns the log has seen, and the model requests they made.
+    turns: z.number().int().nonnegative(),
+    requests: z.number().int().nonnegative(),
+    inputTokens: z.number().nonnegative(),
+    outputTokens: z.number().nonnegative(),
+    cacheReadTokens: z.number().nonnegative(),
+    cacheCreationTokens: z.number().nonnegative(),
+    modelMs: z.number().nonnegative(),
+    ttftMs: z.number().nonnegative().nullable(),
+    outputPerSecond: z.number().nonnegative().nullable(),
+    // The oldest record the call log holds at all. The log is pruned, so a session older than this is counted from here.
+    firstRecordAt: timestamp.nullable(),
+  }),
   z.object({ type: z.literal('terminal.opened'), sessionId: id, terminalId: id }),
   z.object({
     type: z.literal('terminal.data'),

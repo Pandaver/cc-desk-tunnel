@@ -48,6 +48,7 @@ import { completeOnboarding } from './native-onboarding.ts';
 import { readNativeSettings, updateNativeSettings } from './native-settings.ts';
 import { readInstructions, writeInstructions } from './native-instructions.ts';
 import type { NativeTerminal } from './native-terminal.ts';
+import { inOrder } from './question.ts';
 import { simulate } from './simulation.ts';
 import { SessionStore } from './store.ts';
 import { Throttle } from './throttle.ts';
@@ -94,6 +95,8 @@ export type Run = {
   open?: Fragment;
   input?: NativeInput;
   controls: { refresh?: () => Promise<void>; stopTask?: (taskId: string) => Promise<void> };
+  // Turn figures are reported one after another, so a later report for the same question never lands before an earlier one.
+  stats: ReturnType<typeof inOrder>;
 };
 type Terminal = { id: string; sessionId: string; owner: Peer; process?: NativeTerminal };
 // One of the user's computers, while it is connected or expected back: its connections, the door its commands
@@ -388,6 +391,7 @@ export function createProxyServer(options: ServerOptions) {
       requests: number;
       outputTokens: number;
       promptIds: string[];
+      background: boolean;
     },
   ) {
     // Complete once every request of the main loop is there and the records add up to the output the CLI counted for the
@@ -407,7 +411,7 @@ export function createProxyServer(options: ServerOptions) {
         type: 'turn.stats',
         messageId: turn.messageId,
         ...figures,
-        partial: !complete(stats),
+        partial: turn.background || !complete(stats),
       });
   }
   function finish(run: Run, status: 'completed' | 'cancelled' | 'failed', reason?: string) {
@@ -466,7 +470,7 @@ export function createProxyServer(options: ServerOptions) {
             connectionId: run.connectionId,
             ...(background ? { waiting: 'background' as const } : {}),
           }),
-        turnEnded: (turn) => track(turnStats(run, turn).catch(() => {})),
+        turnEnded: (turn) => track(run.stats(() => turnStats(run, turn))),
         dataDir: store.directory,
         resume: store.hasNativeContext(run.sessionId),
         signal: run.controller.signal,
@@ -827,6 +831,7 @@ export function createProxyServer(options: ServerOptions) {
       approvals: new Map(),
       answered: new Set(),
       controls: {},
+      stats: inOrder(),
     };
     runs.set(command.sessionId, run);
     if (options.claude) run.input = new NativeInput(run.sessionId, (event) => emit(run, event));
@@ -946,6 +951,15 @@ export function createProxyServer(options: ServerOptions) {
       }
       case 'usage.summary':
         send(peer, { type: 'usage.summary', requestId: command.requestId, ...usage.summary() });
+        return undefined;
+      case 'session.stats':
+        store.get(command.sessionId);
+        send(peer, {
+          type: 'session.stats',
+          requestId: command.requestId,
+          sessionId: command.sessionId,
+          ...usage.sessionStats(command.sessionId),
+        });
         return undefined;
       case 'service.update.check':
         if (!updates) throw new DomainError('updates_unavailable', '此服务未启用版本跟踪。');
