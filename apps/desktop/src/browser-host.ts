@@ -166,33 +166,12 @@ export function installBrowserHost(info: HostInfo) {
     saveDrafts: async (drafts) => {
       localStorage.setItem('remote-drafts', JSON.stringify(drafts));
     },
-    loadSchedules: (initial) => rpc('schedules:load', initial),
-    saveSchedules: (text) => rpc('schedules:save', text),
+    loadSchedules: desktopOnly,
+    saveSchedules: desktopOnly,
+    saveRemoteSchedules: (text, revision) => rpc('schedules:save', text, revision),
     scheduleState: () => rpc('schedules:state'),
-    onSchedulesChanged: (callback) => {
-      let previous: string | undefined;
-      let active = true;
-      let reading = false;
-      const timer = setInterval(() => {
-        if (reading) return;
-        reading = true;
-        void rpc<{ text: string }>('schedules:load', '{"tasks":[]}')
-          .then(({ text }) => {
-            if (active && text !== previous) {
-              previous = text;
-              callback(text);
-            }
-          })
-          .catch(() => {})
-          .finally(() => {
-            reading = false;
-          });
-      }, 3000);
-      return () => {
-        active = false;
-        clearInterval(timer);
-      };
-    },
+    runScheduleNow: (id) => rpc('schedules:run-now', id),
+    onSchedulesChanged: subscribe,
     windowSettings: async () => ({ closeToTray: true }),
     setWindowSettings: desktopOnly,
     notify: noop,

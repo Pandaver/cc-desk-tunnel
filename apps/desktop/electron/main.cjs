@@ -36,16 +36,15 @@ const { spawn } = require('node:child_process');
 const { mkdir, readdir, rmdir, unlink } = require('node:fs/promises');
 const { pathToFileURL } = require('node:url');
 let bridge;
-let controlHub;
-let controlEndpoint;
 let webServer;
 let webAuthentication;
 let webConfiguration;
+let webControl;
+let webRequests;
 const handlers = new Map();
 // The last connection, kept for its installer download after a service refused this client's version.
 let lastBridge;
 let connectionGeneration = 0;
-let connectionKey;
 let webConfigurationTasks = Promise.resolve();
 const connections = require('./connections.cjs');
 // See connections.cjs. The profile is chosen before anything is read from it, the instance lock included:
@@ -111,26 +110,6 @@ function keepAwake(on) {
     powerSaveBlocker.stop(awake);
     awake = undefined;
   }
-}
-
-// Take ownership synchronously, before any close awaits. A later connection never becomes
-// the target of cleanup that belongs to an older disconnect or failed connection attempt.
-function takeConnection() {
-  connectionGeneration++;
-  const previous = { bridge, hub: controlHub, endpoint: controlEndpoint };
-  bridge = null;
-  controlHub = null;
-  controlEndpoint = null;
-  connectionKey = null;
-  keepAwake(false);
-  return previous;
-}
-async function closeConnection(resources) {
-  await Promise.allSettled([
-    resources.endpoint?.close(),
-    resources.hub?.close(),
-    resources.bridge?.close(),
-  ]);
 }
 
 // These channels answer only the application's own page.
@@ -303,29 +282,14 @@ handle('workspace:remove', async (event, directory) => {
   } catch {}
 });
 handle('proxy:connect', async (event, config) => {
-  if (
-    !config ||
-    typeof config.url !== 'string' ||
-    typeof config.fingerprint !== 'string' ||
-    typeof config.token !== 'string' ||
-    config.token.length < 24
-  )
+  if (!config || typeof config.url !== 'string' || typeof config.fingerprint !== 'string')
     throw new Error('Invalid proxy configuration');
-  if (quitting) throw new Error('The application is quitting');
-  const key = JSON.stringify({
-    url: config.url,
-    fingerprint: config.fingerprint,
-    token: config.token,
-    waits: config.waits,
-  });
-  // Reloading/reconnecting a view must not reset the proxy service connection or other browser views.
-  if (connectionKey === key && bridge && controlHub?.info().state === 'ready' && controlEndpoint)
-    return { url: controlEndpoint.url };
-  const previous = takeConnection();
-  const generation = connectionGeneration;
-  await closeConnection(previous);
+  const generation = ++connectionGeneration;
+  const previous = bridge;
+  bridge = null;
+  await previous?.close();
   if (generation !== connectionGeneration) throw new Error('Connection cancelled');
-  const { openProxyBridge, openServiceObserver, connectionWaits } = await import(
+  const { openProxyBridge } = await import(
     pathToFileURL(path.join(__dirname, 'proxy-bridge.mjs')).href
   );
   const vendor =
@@ -335,9 +299,6 @@ handle('proxy:connect', async (event, config) => {
       : path.join(__dirname, '../vendor'));
   const openssh = process.env.PROXY_OPENSSH_DIR ?? path.join(vendor, 'openssh');
   const powershell = app.isPackaged ? path.join(vendor, 'pwsh/pwsh.exe') : 'pwsh.exe';
-  if (generation !== connectionGeneration || quitting) throw new Error('Connection cancelled');
-  let ownedHub;
-  let ownedEndpoint;
   const connection = await openProxyBridge(
     config,
     {
@@ -354,8 +315,8 @@ handle('proxy:connect', async (event, config) => {
     },
     () => {
       if (bridge !== connection) return;
-      const ended = takeConnection();
-      void closeConnection(ended);
+      bridge = null;
+      keepAwake(false);
       if (!event.sender.isDestroyed()) event.sender.send('proxy:closed');
     },
   );
@@ -364,45 +325,8 @@ handle('proxy:connect', async (event, config) => {
     throw new Error('Connection cancelled');
   }
   bridge = lastBridge = connection;
-  connectionKey = key;
   keepAwake(true);
-  try {
-    const { createControlHub, openControlEndpoint, WebSocket, PROTOCOL_VERSION } =
-      await import('./desktop-web.mjs');
-    if (generation !== connectionGeneration || quitting) throw new Error('Connection cancelled');
-    const device = handlers.get('device:get')();
-    const hub = createControlHub({
-      openPrimary: () => new WebSocket(connection.url),
-      openObserver: () =>
-        openServiceObserver(config, (url) => session.defaultSession.resolveProxy(url)),
-      auth: { token: config.token, deviceName: device.name, protocolVersion: PROTOCOL_VERSION },
-      device,
-      // The bridge's ready timer already spans connect, SSH and tunnel setup. The hub
-      // must outlast it (not add the phases again), and also allow the observer's dial budget.
-      connectTimeoutMs:
-        Math.max(connectionWaits(config.waits).ready, connectionWaits(config.waits).connect) + 5000,
-    });
-    ownedHub = hub;
-    controlHub = hub;
-    await hub.start();
-    if (generation !== connectionGeneration || quitting) throw new Error('Connection cancelled');
-    ownedEndpoint = await openControlEndpoint(hub);
-    if (generation !== connectionGeneration || quitting) throw new Error('Connection cancelled');
-    controlEndpoint = ownedEndpoint;
-    return { url: ownedEndpoint.url };
-  } catch (error) {
-    // Clear only objects this attempt published, and do it before waiting for their close.
-    if (controlHub === ownedHub) controlHub = null;
-    if (controlEndpoint === ownedEndpoint) controlEndpoint = null;
-    if (bridge === connection) {
-      bridge = null;
-      connectionKey = null;
-    }
-    if (generation === connectionGeneration) keepAwake(false);
-    await closeConnection({ bridge: connection, hub: ownedHub, endpoint: ownedEndpoint });
-    if (error.frame?.code === 'version_mismatch') return { url: '', failure: error.frame };
-    throw error;
-  }
+  return { url: bridge.url };
 });
 // The service token is kept only when the user asks, encrypted for the current account of the system (DPAPI on
 // Windows, the login keychain on macOS).
@@ -466,48 +390,6 @@ handle('drafts:save', (_event, drafts) => replaceFile(draftsPath(), JSON.stringi
 const schedulesPath = () => path.join(app.getPath('userData'), 'schedules.json');
 const readSchedules = () => readFileSync(schedulesPath(), 'utf8').replace(/^\uFEFF/, '');
 let schedules;
-let scheduleState = null;
-let scheduleStateAt = 0;
-function changedSchedules(text) {
-  if (text === schedules) return;
-  schedules = text;
-  scheduleState = null;
-  BrowserWindow.getAllWindows()[0]?.webContents.send('schedules:changed', text);
-}
-// Runtime scheduling progress belongs to the desktop renderer, not to any remote browser's clock.
-// Only the local preload publishes it. The Web RPC allowlist below exposes its read side only.
-handle('schedules:state:publish', (_event, value) => {
-  if (value === null) {
-    scheduleState = null;
-    return;
-  }
-  if (
-    !value ||
-    typeof value.timeZone !== 'string' ||
-    !value.tasks ||
-    typeof value.tasks !== 'object' ||
-    Array.isArray(value.tasks)
-  )
-    throw new Error('Invalid schedule state');
-  new Intl.DateTimeFormat('en', { timeZone: value.timeZone });
-  const serialized = JSON.stringify(value);
-  if (serialized.length > 256 * 1024) throw new Error('Schedule state is too large');
-  for (const [id, state] of Object.entries(value.tasks)) {
-    if (!id || id.length > 120 || !state || (state.next !== null && !Number.isFinite(state.next)))
-      throw new Error('Invalid schedule task state');
-    if (
-      state.last &&
-      (!Number.isFinite(state.last.at) ||
-        !['sent', 'missed', 'failed'].includes(state.last.status) ||
-        typeof state.last.text !== 'string' ||
-        state.last.text.length > 4000)
-    )
-      throw new Error('Invalid schedule outcome');
-  }
-  scheduleState = JSON.parse(serialized);
-  scheduleStateAt = Date.now();
-});
-handle('schedules:state', () => (Date.now() - scheduleStateAt <= 45_000 ? scheduleState : null));
 handle('schedules:load', (_event, initial) => {
   if (!existsSync(schedulesPath())) replaceFile(schedulesPath(), String(initial));
   // An edit made outside the window is noticed by looking at the file every two seconds.
@@ -523,16 +405,41 @@ handle('schedules:load', (_event, initial) => {
       } catch {
         return;
       }
-      changedSchedules(text);
+      if (text === schedules) return;
+      schedules = text;
+      BrowserWindow.getAllWindows()[0]?.webContents.send('schedules:changed', text);
     }, 2000);
   }
-  changedSchedules(readSchedules());
+  schedules = readSchedules();
   return { path: schedulesPath(), text: schedules };
 });
 handle('schedules:save', (_event, text) => {
-  const next = String(text);
-  replaceFile(schedulesPath(), next);
-  changedSchedules(next);
+  schedules = String(text);
+  replaceFile(schedulesPath(), schedules);
+});
+// Web edits compare the file they displayed, not the renderer's possibly older React state. Keep the
+// comparison and replacement in this one synchronous handler; ordinary desktop saves stay unchanged.
+const scheduleRevision = (text) => createHash('sha256').update(text).digest('hex');
+handle('remote:schedules:read', () => {
+  if (!webServer) throw new Error('Web 入口已关闭。');
+  const text = readSchedules();
+  return { path: schedulesPath(), text, revision: scheduleRevision(text) };
+});
+handle('remote:schedules:save', (_event, text, revision) => {
+  if (!webServer) throw new Error('Web 入口已关闭。');
+  const previous = readSchedules();
+  if (typeof revision !== 'string' || scheduleRevision(previous) !== revision)
+    throw new Error('定时任务已在其他页面或文件中更改。草稿已保留，请核对最新任务后重新打开编辑。');
+  // A malformed file must be repaired explicitly, never replaced by a partial browser snapshot.
+  if (
+    typeof text !== 'string' ||
+    !Array.isArray((previous.trim() ? JSON.parse(previous) : { tasks: [] })?.tasks) ||
+    !Array.isArray(JSON.parse(text)?.tasks)
+  )
+    throw new Error('定时任务配置不是有效的 tasks 数组。');
+  replaceFile(schedulesPath(), text);
+  schedules = text;
+  BrowserWindow.getAllWindows()[0]?.webContents.send('schedules:changed', text);
 });
 handle('app:version', () => app.getVersion());
 // The notes of a release as its page on GitHub has them, for a version newer than this program, whose notes
@@ -741,8 +648,12 @@ handle('update:install', async (event, version) => {
   spawn(installer, ['/S', '--force-run'], { detached: true, stdio: 'ignore' }).unref();
   app.quit();
 });
-handle('proxy:disconnect', async () => {
-  await closeConnection(takeConnection());
+ipcMain.handle('proxy:disconnect', async () => {
+  keepAwake(false);
+  connectionGeneration++;
+  const previous = bridge;
+  bridge = null;
+  await previous?.close();
 });
 
 // Only these host operations are available remotely. Never expose arbitrary IPC, login secrets or installers.
@@ -753,12 +664,11 @@ const webOperations = new Set([
   'workspace:roots',
   'workspace:create',
   'workspace:remove',
-  'schedules:load',
-  'schedules:save',
-  'schedules:state',
 ]);
 async function webInvoke(method, args) {
   if (!Array.isArray(args)) throw new Error('Expected argument list');
+  if (['schedules:state', 'schedules:save', 'schedules:run-now'].includes(method))
+    return requestRenderer(method, args);
   if (webOperations.has(method)) return handlers.get(method)(null, ...args);
   if (method === 'project:check') {
     const directory = await asOnDisk(String(args[0]));
@@ -801,10 +711,18 @@ function remoteConfiguration() {
   return webConfiguration;
 }
 function remoteAuthentication() {
-  webAuthentication ??= require('./web-auth.cjs').createWebAuthStore({
-    filePath: path.join(app.getPath('userData'), 'remote-web', 'auth.json'),
-    safeStorage,
-  });
+  if (!webAuthentication) {
+    webAuthentication = require('./web-auth.cjs').createWebAuthStore({
+      filePath: path.join(app.getPath('userData'), 'remote-web', 'auth.json'),
+      safeStorage,
+    });
+    webAuthentication.subscribe(() => {
+      BrowserWindow.getAllWindows()[0]?.webContents.send(
+        'remote:sessions-changed',
+        webAuthentication.list(),
+      );
+    });
+  }
   return webAuthentication;
 }
 function saveRemoteConfiguration(configuration) {
@@ -827,6 +745,7 @@ function remoteStatus() {
     enabled: !!webServer,
     url: webServer ? `http://127.0.0.1:${webServer.port}` : null,
     token: webServer ? remoteAuthentication().token : null,
+    sessions: remoteAuthentication().list(),
   };
 }
 handle('remote:status', remoteStatus);
@@ -852,8 +771,39 @@ handle('remote:reset-pairing', () =>
     return remoteStatus();
   }),
 );
+handle('remote:revoke-session', (_event, id) =>
+  queueRemote(() => {
+    remoteAuthentication().revokeSession(id);
+    return remoteStatus();
+  }),
+);
+function requestRenderer(method, args = [], viewId) {
+  if (!webServer && method !== 'client:detach')
+    return Promise.reject(new Error('Web 入口未开启。'));
+  webRequests ??= require('./web-requests.cjs').createWebRequests({
+    window: () => BrowserWindow.getAllWindows()[0],
+  });
+  return webRequests.invoke(method, args, viewId);
+}
+ipcMain.on('remote:enabled', (event) => {
+  event.returnValue = event.senderFrame?.url.startsWith('file://') ? !!webServer : false;
+});
+ipcMain.on('remote:response', (event, response) => {
+  if (event.senderFrame?.url.startsWith('file://')) webRequests?.reply(event.sender, response);
+});
+ipcMain.on('remote:event', (event, value) => {
+  if (webServer && event.senderFrame?.url.startsWith('file://')) webControl?.publish(value);
+});
+let remoteEnabled = false;
+function changedRemoteEnabled() {
+  const enabled = !!webServer;
+  if (enabled === remoteEnabled) return;
+  remoteEnabled = enabled;
+  BrowserWindow.getAllWindows()[0]?.webContents.send('remote:enabled-changed', enabled);
+  if (!enabled) webRequests?.cancel();
+}
 async function startRemoteListener(configuration) {
-  const { startWebServer } = await import('./desktop-web.mjs');
+  const { startWebServer, createWebControl } = await import('./desktop-web.mjs');
   const started = await startWebServer({
     host: configuration.lan ? '0.0.0.0' : '127.0.0.1',
     port: configuration.port,
@@ -862,16 +812,21 @@ async function startRemoteListener(configuration) {
     // Cookies are shared across ports on one host. Each connection keeps its own stable name,
     // so opening another connection's Web page never replaces this profile's browser login.
     cookieName: `ccdt_web_session_${createHash('sha256').update(settingsPath()).digest('hex').slice(0, 16)}`,
-    getInfo: () => ({
+    getInfo: async () => ({
       kind: 'desktop-web',
       device: handlers.get('device:get')(),
       platform: process.platform,
       version: app.getVersion(),
-      connected: controlHub?.info().state === 'ready',
+      connected: await requestRenderer('client:info').then(
+        (info) => info.connected === true,
+        () => false,
+      ),
     }),
     invoke: webInvoke,
-    onConnection: (socket) =>
-      controlHub ? controlHub.attach(socket) : socket.close(1013, 'Desktop is not connected'),
+    onConnection: (socket) => {
+      webControl ??= createWebControl(requestRenderer);
+      webControl.attach(socket);
+    },
   });
   if (quitting) {
     await started.close();
@@ -896,6 +851,7 @@ async function configureRemote(values) {
     // Explicit shutdown is never held hostage by a preferences write failure.
     webServer = null;
     await old?.close();
+    changedRemoteEnabled();
     if (failure) throw failure;
     return remoteStatus();
   }
@@ -918,6 +874,7 @@ async function configureRemote(values) {
       try {
         webServer = await startRemoteListener(previous);
       } catch {
+        changedRemoteEnabled();
         throw new Error('应用失败，原端口暂未恢复；已保留原设置，请重新启用。');
       }
     }
@@ -925,6 +882,7 @@ async function configureRemote(values) {
   }
   webServer = candidate;
   webConfiguration = configuration;
+  changedRemoteEnabled();
   if (!rebind) await old?.close();
   return remoteStatus();
 }
@@ -1097,16 +1055,14 @@ let quitting = false;
 let exiting = false;
 app.on('before-quit', (event) => {
   quitting = true;
-  if (exiting) return;
+  if (exiting || !bridge) return;
   event.preventDefault();
   exiting = true;
-  const connection = takeConnection();
-  Promise.allSettled([
-    webConfigurationTasks.then(() => webServer?.close()),
-    closeConnection(connection),
-  ]).finally(() => app.quit());
+  bridge.close().finally(() => app.quit());
 });
 app.on('window-all-closed', () => app.quit());
 app.on('quit', () => {
+  void webServer?.close();
+  webRequests?.cancel();
   if (ownsInstance) connections.mark(base, connectionId, false);
 });

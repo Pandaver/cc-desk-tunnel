@@ -24,10 +24,6 @@ export type Task = {
 // What the last due time came to; kept apart from the file so that running a task never rewrites it.
 export type Outcome = { at: number; status: 'sent' | 'missed' | 'failed'; text: string };
 type Progress = Record<string, { key: string; base: number; last?: Outcome }>;
-export type ScheduleSnapshot = {
-  timeZone: string;
-  tasks: Record<string, { next: number | null; last?: Outcome }>;
-};
 
 export const guide = [
   'CC Desk Tunnel 客户端的定时任务。到点时客户端向会话发送一条带“定时任务”标签的消息，内容为 prompt。',
@@ -153,83 +149,17 @@ export function nextRun(schedule: Schedule, after: number): number | null {
   return null;
 }
 const weekdays = ['一', '二', '三', '四', '五', '六', '日'];
-export function describeSchedule(schedule: Schedule, timeZone?: string) {
-  if (schedule.type === 'once') {
-    // An offset-free rule is a wall-clock time on the execution host, not a date in the browser's timezone.
-    const local = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(schedule.at);
-    return `一次 · ${local ? schedule.at.slice(0, 16).replace('T', ' ') : stamp(new Date(schedule.at).getTime(), timeZone)}`;
-  }
+export function describeSchedule(schedule: Schedule) {
+  if (schedule.type === 'once') return `一次 · ${stamp(new Date(schedule.at).getTime())}`;
   if (schedule.type === 'daily') return `每天 ${schedule.time}`;
   if (schedule.type === 'weekly')
     return `每周${schedule.days.map((day) => weekdays[day - 1]).join('、')} ${schedule.time}`;
   return schedule.minutes % 60 ? `每 ${schedule.minutes} 分钟` : `每 ${schedule.minutes / 60} 小时`;
 }
-export function stamp(time: number, timeZone?: string) {
-  if (timeZone) {
-    const parts = Object.fromEntries(
-      new Intl.DateTimeFormat('en-CA', {
-        timeZone,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        hourCycle: 'h23',
-      })
-        .formatToParts(time)
-        .map(({ type, value }) => [type, value]),
-    );
-    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
-  }
+export function stamp(time: number) {
   const date = new Date(time);
   const pad = (value: number) => String(value).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-export function scheduleSnapshot(
-  tasks: Task[],
-  progress: Progress,
-  timeZone: string,
-): ScheduleSnapshot {
-  return {
-    timeZone,
-    tasks: Object.fromEntries(
-      tasks.flatMap((task) => {
-        const state = progress[task.id];
-        if (task.enabled && !state) return [];
-        return [
-          [
-            task.id,
-            {
-              next: task.enabled ? nextRun(task.schedule, state!.base) : null,
-              ...(state?.last ? { last: state.last } : {}),
-            },
-          ],
-        ];
-      }),
-    ),
-  };
-}
-export function scheduleTiming(
-  task: Task,
-  progress: Progress,
-  remote: boolean,
-  snapshot: ScheduleSnapshot | null,
-) {
-  if (remote)
-    return {
-      next: task.enabled ? snapshot?.tasks[task.id]?.next : null,
-      last: snapshot?.tasks[task.id]?.last,
-    };
-  const state = progress[task.id];
-  return {
-    next: task.enabled && state ? nextRun(task.schedule, state.base) : null,
-    last: state?.last,
-  };
-}
-export function scheduleNextLabel(task: Task, next: number | null | undefined, timeZone?: string) {
-  if (!task.enabled) return '已停用';
-  if (next === undefined) return '等待桌面客户端的调度状态';
-  return next === null ? '不会再运行' : `下次 ${stamp(next, timeZone)}`;
 }
 // The message a due task sends: the user's prompt under a line saying where it came from.
 export function taskMessage(task: Task, due: number) {
@@ -256,9 +186,7 @@ export type Schedules = {
   // Tasks in the file that were left out, and why.
   problems: string[];
   path: string;
-  remote: boolean;
-  timeZone?: string;
-  next: (task: Task) => number | null | undefined;
+  next: (task: Task) => number | null;
   last: (task: Task) => Outcome | undefined;
   save: (tasks: Task[]) => Promise<void>;
   runNow: (task: Task) => Promise<void>;
@@ -271,19 +199,15 @@ export function useSchedules(
   send: (task: Task, due: number) => Promise<boolean>,
   report?: (task: Task, outcome: Outcome) => void,
 ) {
-  const remote = window.desktop?.remote === true;
   const [tasks, setTasks] = useState<Task[]>([]);
   const [problems, setProblems] = useState<string[]>([]);
   const [path, setPath] = useState('');
-  const [progress, setProgress] = useState<Progress>(() => (remote ? {} : readProgress()));
-  const [loaded, setLoaded] = useState(false);
-  const [snapshot, setSnapshot] = useState<ScheduleSnapshot | null>(null);
+  const [progress, setProgress] = useState<Progress>(readProgress);
   const current = useRef({ tasks, progress, send, report });
   current.current = { tasks, progress, send, report };
   const busy = useRef(false);
 
   const record = useCallback((update: (progress: Progress) => Progress) => {
-    if (window.desktop?.remote) return;
     const next = update(current.current.progress);
     current.current.progress = next;
     localStorage.setItem(progressKey, JSON.stringify(next));
@@ -296,10 +220,6 @@ export function useSchedules(
       // A file that cannot be read at all changes nothing: the tasks already loaded keep running.
       if (parsed.broken) return;
       setTasks(parsed.tasks);
-      if (remote) {
-        setSnapshot(null);
-        return;
-      }
       // A task counts from the moment it appears or its rule changes, never from before.
       record((progress) =>
         Object.fromEntries(
@@ -311,67 +231,15 @@ export function useSchedules(
         ),
       );
     },
-    [record, remote],
+    [record],
   );
   useEffect(() => {
-    void loadFile()
-      .then((file) => {
-        setPath(file.path);
-        accept(file.text);
-        setLoaded(true);
-      })
-      .catch((error) => setProblems([error instanceof Error ? error.message : '任务配置读取失败']));
+    void loadFile().then((file) => {
+      setPath(file.path);
+      accept(file.text);
+    });
     return window.desktop?.onSchedulesChanged(accept);
   }, [accept]);
-
-  useEffect(() => {
-    if (!remote) return;
-    let active = true;
-    let reading = false;
-    const refresh = async () => {
-      if (reading) return;
-      reading = true;
-      try {
-        const value = await window.desktop?.scheduleState?.();
-        if (active) setSnapshot(value ?? null);
-      } catch {
-        if (active) setSnapshot(null);
-      } finally {
-        reading = false;
-      }
-    };
-    void refresh();
-    const timer = setInterval(() => void refresh(), 3000);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, [remote]);
-  useEffect(() => {
-    if (remote || !loaded || !window.desktop?.publishScheduleState) return;
-    const publish = () =>
-      void window.desktop!.publishScheduleState!(
-        scheduleSnapshot(
-          current.current.tasks,
-          current.current.progress,
-          Intl.DateTimeFormat().resolvedOptions().timeZone,
-        ),
-      ).catch(() => {});
-    publish();
-    const timer = setInterval(publish, 15_000);
-    return () => clearInterval(timer);
-  }, [remote, loaded, tasks, progress]);
-  useEffect(() => {
-    if (remote) return;
-    const clear = () => {
-      void window.desktop?.publishScheduleState?.(null).catch(() => {});
-    };
-    window.addEventListener('beforeunload', clear);
-    return () => {
-      window.removeEventListener('beforeunload', clear);
-      clear();
-    };
-  }, [remote]);
 
   const settle = useCallback(
     (task: Task, status: Outcome['status'], text: string) => {
@@ -400,8 +268,6 @@ export function useSchedules(
     [settle],
   );
   useEffect(() => {
-    // Only the desktop client's scheduler triggers automatic tasks.
-    if (remote) return;
     const tick = async () => {
       if (busy.current) return;
       busy.current = true;
@@ -422,7 +288,7 @@ export function useSchedules(
     void tick();
     const timer = setInterval(() => void tick(), 15_000);
     return () => clearInterval(timer);
-  }, [attempt, settle, remote]);
+  }, [attempt, settle]);
 
   const save = useCallback(
     async (tasks: Task[]) => {
@@ -437,26 +303,13 @@ export function useSchedules(
     tasks,
     problems,
     path,
-    remote,
-    timeZone: remote ? snapshot?.timeZone : Intl.DateTimeFormat().resolvedOptions().timeZone,
-    next: (task) => scheduleTiming(task, progress, remote, snapshot).next,
-    last: (task) => scheduleTiming(task, progress, remote, snapshot).last,
+    next: (task) => {
+      const state = progress[task.id];
+      return task.enabled && state ? nextRun(task.schedule, state.base) : null;
+    },
+    last: (task) => progress[task.id]?.last,
     save,
     runNow: async (task) => {
-      if (remote) {
-        // A manual click still sends through the normal client; it never advances the desktop client's automatic clock.
-        try {
-          if (!(await current.current.send(task, Date.now())))
-            throw new Error('现在无法发送：未连接，或目标会话正在运行');
-        } catch (error) {
-          current.current.report?.(task, {
-            at: Date.now(),
-            status: 'failed',
-            text: error instanceof Error ? error.message : '发送失败',
-          });
-        }
-        return;
-      }
       if (!(await attempt(task, Date.now())))
         settle(task, 'failed', '现在无法发送：未连接，或目标会话正在运行');
     },

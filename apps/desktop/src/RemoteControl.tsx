@@ -10,6 +10,13 @@ const loadSettings = remoteSettingsSession({
   configure: (configuration) => window.desktop!.configureRemote!(configuration),
   reset: () => window.desktop!.resetRemotePairing!(),
 });
+const sessionTime = new Intl.DateTimeFormat('zh-CN', {
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+});
 
 export default function RemoteControl() {
   const [status, setStatus] = useState<RemoteStatus | null>(null);
@@ -18,6 +25,7 @@ export default function RemoteControl() {
   const [lan, setLan] = useState(false);
   const [saving, setSaving] = useState(0);
   const [resetting, setResetting] = useState(false);
+  const [revoking, setRevoking] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [confirmReset, setConfirmReset] = useState(false);
   const [pairingVisible, setPairingVisible] = useState(false);
@@ -30,6 +38,9 @@ export default function RemoteControl() {
   useEffect(() => {
     if (!window.desktop?.configureRemote) return;
     let active = true;
+    const unsubscribe = window.desktop.onRemoteSessionsChanged?.((sessions) => {
+      if (active) setStatus((current) => (current ? { ...current, sessions } : current));
+    });
     void loadSettings()
       .then(({ queue: shared, status: value, error: failure }) => {
         if (!active) return;
@@ -50,6 +61,7 @@ export default function RemoteControl() {
       });
     return () => {
       active = false;
+      unsubscribe?.();
     };
   }, []);
   if (!window.desktop?.configureRemote) return null;
@@ -130,13 +142,26 @@ export default function RemoteControl() {
       setError(reason instanceof Error ? reason.message : '打开链接失败，请重试。');
     }
   };
+  const revokeBrowser = async (id: string) => {
+    if (revoking || !window.desktop?.revokeRemoteSession) return;
+    setRevoking(id);
+    setError('');
+    try {
+      const next = await window.desktop.revokeRemoteSession(id);
+      setStatus((current) => (current ? { ...current, sessions: next.sessions } : next));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '浏览器授权撤销失败，请重试。');
+    } finally {
+      setRevoking(null);
+    }
+  };
   const disabled = !status || resetting;
   return (
     <>
       <h2 className="page-heading">远程控制</h2>
       <div
         className="card remote-control"
-        aria-busy={saving > 0 || resetting}
+        aria-busy={saving > 0 || resetting || revoking !== null}
         onPointerDown={(event) => {
           // A blur can change the card height before pointerup and move an action away from the
           // pointer. Commit both intentions on click instead; keyboard blur still saves normally.
@@ -269,6 +294,36 @@ export default function RemoteControl() {
                 </button>
               </span>
             </div>
+          </>
+        )}
+        {status && (
+          <>
+            <div className="setting-row">
+              <span>
+                <strong>已配对浏览器</strong>
+                <small>登录有效期为 30 天，到期后重新配对。</small>
+              </span>
+              {status.sessions.length === 0 && <span className="setting-value">暂无</span>}
+            </div>
+            {status.sessions.map((session) => (
+              <div className="setting-row remote-session-row" key={session.id}>
+                <span>
+                  <strong>{session.label}</strong>
+                  <small>
+                    {sessionTime.format(session.createdAt)} 登录 ·{' '}
+                    {sessionTime.format(session.expiresAt)} 到期
+                  </small>
+                </span>
+                <button
+                  className="button secondary"
+                  aria-label={`撤销 ${session.label} 于 ${sessionTime.format(session.createdAt)} 登录的授权`}
+                  disabled={resetting || revoking !== null}
+                  onClick={() => void revokeBrowser(session.id)}
+                >
+                  {revoking === session.id ? '正在撤销…' : '撤销'}
+                </button>
+              </div>
+            ))}
           </>
         )}
         {error && !confirmReset && (

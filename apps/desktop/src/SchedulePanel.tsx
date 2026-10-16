@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { CalendarClock, Pencil, Play, Plus, Trash2 } from 'lucide-react';
 import type { Effort, NativeCapabilities, Session } from '@cc-desk-tunnel/protocol';
 import { folderName } from './paths.ts';
-import { describeSchedule, parseTasks, scheduleNextLabel, stamp } from './schedules.ts';
-import type { Schedule, Schedules, Task } from './schedules.ts';
+import { parseTasks } from './schedules.ts';
+import type { Schedule, Task } from './schedules.ts';
+import { scheduleDescription, scheduleNextLabel, scheduleStamp } from './browser-schedules.ts';
+import type { WorkbenchSchedules } from './browser-schedules.ts';
 import { IconButton } from './ui.tsx';
 
 // The editor's fields: every kind of rule and target keeps its own input, so switching kinds loses nothing.
@@ -47,7 +49,7 @@ function formOf(
         ? rule.at
         : remote && !timeZone
           ? ''
-          : stamp(Date.now() + 3_600_000, timeZone).replace(' ', 'T'),
+          : scheduleStamp(Date.now() + 3_600_000, timeZone).replace(' ', 'T'),
     time: rule?.type === 'daily' || rule?.type === 'weekly' ? rule.time : '09:00',
     days: rule?.type === 'weekly' ? rule.days : [1, 2, 3, 4, 5],
     minutes: String(rule?.type === 'interval' ? rule.minutes : 60),
@@ -92,6 +94,7 @@ function Editor({
   capabilities,
   timeZone,
   remote,
+  revision,
   save,
   cancel,
 }: {
@@ -101,11 +104,15 @@ function Editor({
   capabilities: NativeCapabilities | null;
   timeZone?: string;
   remote: boolean;
-  save: (task: Task) => Promise<void>;
+  revision?: string | null;
+  save: (task: Task, revision?: string | null) => Promise<void>;
   cancel: () => void;
 }) {
   const [form, setForm] = useState(() => formOf(task, sessions, projects, timeZone, remote));
   const [failure, setFailure] = useState<string | null>(null);
+  // Polling may refresh the list while this form stays open. Its draft still belongs to the version
+  // it was opened from; assigning the latest revision here would silently overwrite another edit.
+  const draftRevision = useRef(revision);
   const awaitingTimeZone = useRef(remote && !timeZone && task?.schedule.type !== 'once');
   const timeEdited = useRef(false);
   useEffect(() => {
@@ -116,7 +123,7 @@ function Editor({
       setForm((current) =>
         current.at
           ? current
-          : { ...current, at: stamp(Date.now() + 3_600_000, timeZone).replace(' ', 'T') },
+          : { ...current, at: scheduleStamp(Date.now() + 3_600_000, timeZone).replace(' ', 'T') },
       );
   }, [timeZone]);
   const change = (values: Partial<Form>) => {
@@ -136,7 +143,9 @@ function Editor({
         // The same check the file goes through, so the window cannot write a task it would then refuse.
         const checked = parseTasks(JSON.stringify({ tasks: [taskOf(form)] }));
         if (!checked.tasks[0]) return setFailure(checked.problems[0] ?? '任务内容不完整。');
-        save(checked.tasks[0]).catch((error: Error) => setFailure(error.message));
+        save(checked.tasks[0], draftRevision.current).catch((error: Error) =>
+          setFailure(error.message),
+        );
       }}
     >
       <label>
@@ -343,7 +352,7 @@ export default function SchedulePanel({
   projects,
   capabilities,
 }: {
-  schedules: Schedules;
+  schedules: WorkbenchSchedules;
   sessions: Session[];
   projects: string[];
   capabilities: NativeCapabilities | null;
@@ -353,8 +362,22 @@ export default function SchedulePanel({
   const [removing, setRemoving] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const { tasks } = schedules;
+  const refresh = schedules.refresh;
+  useEffect(() => {
+    if (!refresh) return;
+    const read = () => {
+      if (document.visibilityState === 'visible') void refresh();
+    };
+    read();
+    const timer = setInterval(read, 3000);
+    document.addEventListener('visibilitychange', read);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', read);
+    };
+  }, [refresh]);
   const store = (next: Task[]) =>
-    schedules.save(next).catch((error: Error) => setFailure(error.message));
+    schedules.save(next, schedules.revision).catch((error: Error) => setFailure(error.message));
   const where = (task: Task) => {
     if (task.target.type === 'new') return `新会话 · ${folderName(task.target.projectPath)}`;
     const { sessionId } = task.target;
@@ -396,16 +419,21 @@ export default function SchedulePanel({
                 <span>
                   <strong>{task.name}</strong>
                   <small>
-                    {describeSchedule(task.schedule, schedules.timeZone)} · {where(task)}
+                    {scheduleDescription(task.schedule, schedules.timeZone, schedules.remote)} ·{' '}
+                    {where(task)}
                   </small>
                   <small>
                     {scheduleNextLabel(task, next, schedules.timeZone)}
-                    {last && ` · 上次 ${stamp(last.at, schedules.timeZone)} ${last.text}`}
+                    {last && ` · 上次 ${scheduleStamp(last.at, schedules.timeZone)} ${last.text}`}
                   </small>
                   <span className="schedule-row-actions">
                     <IconButton
                       title={`立即运行 ${task.name}`}
-                      onClick={() => void schedules.runNow(task)}
+                      onClick={() =>
+                        void schedules
+                          .runNow(task)
+                          .catch((error: Error) => setFailure(error.message))
+                      }
                     >
                       <Play />
                     </IconButton>
@@ -442,7 +470,7 @@ export default function SchedulePanel({
             <p className="page-notes muted" role="status">
               {schedules.timeZone
                 ? `按桌面客户端时区 ${schedules.timeZone} 显示和编辑时间；自动任务仅由桌面客户端触发。`
-                : '等待桌面客户端发布调度状态和时区；浏览器不会自行推算或触发自动任务。'}
+                : '等待桌面客户端的调度状态和时区；浏览器不会自行推算或触发自动任务。'}
             </p>
           )}
           {editing !== undefined ? (
@@ -457,12 +485,14 @@ export default function SchedulePanel({
                   capabilities={capabilities}
                   timeZone={schedules.timeZone}
                   remote={schedules.remote}
+                  revision={schedules.revision}
                   cancel={() => setEditing(undefined)}
-                  save={async (task) => {
+                  save={async (task, revision) => {
                     await schedules.save(
                       tasks.some((item) => item.id === task.id)
                         ? tasks.map((item) => (item.id === task.id ? task : item))
                         : [...tasks, task],
+                      revision,
                     );
                     setEditing(undefined);
                   }}

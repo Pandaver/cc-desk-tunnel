@@ -12,9 +12,6 @@ const RPC_BODY_LIMIT = 32 * 1024 * 1024;
 const BUFFER_LIMIT = 8 * 1024 * 1024;
 const RESPONSE_LIMIT = 16 * 1024 * 1024;
 const COOKIE = 'ccdt_web_session';
-// Browsers cap persistent cookies; refresh on authenticated activity without expiring the server pairing.
-const COOKIE_MAX_AGE_SECONDS = 400 * 24 * 60 * 60;
-const upgradedCookie = Symbol('authenticated-cookie');
 const mimeTypes = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -33,6 +30,30 @@ const mimeTypes = {
 
 function failure(status, message) {
   return Object.assign(new Error(message), { status });
+}
+
+function browserLabel(userAgent = '') {
+  const browser = /Edg\//.test(userAgent)
+    ? 'Edge'
+    : /Firefox\/|FxiOS\//.test(userAgent)
+      ? 'Firefox'
+      : /Chrome\/|CriOS\//.test(userAgent)
+        ? 'Chrome'
+        : /Safari\//.test(userAgent)
+          ? 'Safari'
+          : '浏览器';
+  const platform = /Android/.test(userAgent)
+    ? 'Android'
+    : /iPhone|iPad|iPod/.test(userAgent)
+      ? 'iOS'
+      : /Windows/.test(userAgent)
+        ? 'Windows'
+        : /Macintosh|Mac OS X/.test(userAgent)
+          ? 'macOS'
+          : /Linux/.test(userAgent)
+            ? 'Linux'
+            : '';
+  return platform ? `${browser} · ${platform}` : browser;
 }
 
 async function body(request, maxBytes = BODY_LIMIT, reading) {
@@ -184,8 +205,9 @@ export async function startWebServer({
     }
     return { id, session };
   }
-  function cookie(id, logout = false) {
-    return `${cookieName}=${id}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${logout ? 0 : COOKIE_MAX_AGE_SECONDS}`;
+  function cookie(id, expiresAt = 0) {
+    const remaining = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
+    return `${cookieName}=${id}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${remaining}; Expires=${new Date(expiresAt).toUTCString()}`;
   }
   function json(response, status, value) {
     if (response.destroyed || response.writableEnded) return;
@@ -195,7 +217,7 @@ export async function startWebServer({
     });
     response.end(JSON.stringify(value));
   }
-  async function serveFile(request, response, renewal) {
+  async function serveFile(request, response) {
     let pathname;
     try {
       pathname = decodeURIComponent(request.url.split('?')[0]);
@@ -223,7 +245,6 @@ export async function startWebServer({
       throw failure(404, 'Not found.');
     const info = await stat(canonical);
     if (!info.isFile()) throw failure(404, 'Not found.');
-    if (renewal && auth.get(renewal.id)) response.setHeader('Set-Cookie', cookie(renewal.id));
     response.writeHead(200, {
       'Content-Type': type,
       'Content-Length': info.size,
@@ -263,9 +284,9 @@ export async function startWebServer({
         try {
           previous = currentSession(request).id;
         } catch {}
-        const { id } = auth.issue(previous);
+        const { id, expiresAt } = auth.issue(previous, browserLabel(request.headers['user-agent']));
         rate.failures = 0;
-        response.setHeader('Set-Cookie', cookie(id));
+        response.setHeader('Set-Cookie', cookie(id, expiresAt));
         json(response, 200, { ok: true });
       } else if (path.startsWith('/api/')) {
         const { id, session } = currentSession(request);
@@ -273,12 +294,11 @@ export async function startWebServer({
         if (path === '/api/logout' && request.method === 'POST') {
           await body(request);
           auth.revoke(id);
-          response.setHeader('Set-Cookie', cookie('', true));
+          response.setHeader('Set-Cookie', cookie(''));
           json(response, 200, { ok: true });
         } else if (path === '/api/info' && request.method === 'GET') {
           const info = await getInfo();
           if (!auth.get(id)) throw failure(401, 'Browser session ended.');
-          response.setHeader('Set-Cookie', cookie(id));
           json(response, 200, info);
         } else if (path === '/api/rpc' && request.method === 'POST') {
           if (session.active >= 4 || activeRpc >= 4)
@@ -297,7 +317,6 @@ export async function startWebServer({
             if (closing || !auth.get(id)) throw failure(401, 'Browser session ended.');
             const result = await invoke(input.method, input.args);
             if (!auth.get(id)) throw failure(401, 'Browser session ended.');
-            response.setHeader('Set-Cookie', cookie(id));
             json(response, 200, { result });
           } finally {
             session.active--;
@@ -305,13 +324,13 @@ export async function startWebServer({
           }
         } else throw failure(404, 'Not found.');
       } else if (request.method === 'GET' || request.method === 'HEAD') {
-        let renewal;
+        let authenticated = false;
         try {
-          const { id } = currentSession(request);
-          renewal = { id };
+          currentSession(request);
+          authenticated = true;
         } catch {}
-        if (!renewal) limit(request, 'static');
-        await serveFile(request, response, renewal);
+        if (!authenticated) limit(request, 'static');
+        await serveFile(request, response);
       } else throw failure(405, 'Method not allowed.');
     } catch (error) {
       if (response.headersSent) {
@@ -348,9 +367,6 @@ export async function startWebServer({
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
   });
-  wss.on('headers', (headers, request) => {
-    if (request[upgradedCookie]) headers.push(`Set-Cookie: ${request[upgradedCookie]}`);
-  });
   server.on('upgrade', (request, socket, head) => {
     try {
       if (closing || request.url !== '/api/control') throw failure(404, 'Not found.');
@@ -359,7 +375,6 @@ export async function startWebServer({
       limitSession(session);
       if (session.sockets.size >= 4 || wss.clients.size >= 32)
         throw failure(429, 'Too many connections.');
-      request[upgradedCookie] = cookie(id);
       wss.handleUpgrade(request, socket, head, (ws) => {
         session.sockets.add(ws);
         let alive = true;

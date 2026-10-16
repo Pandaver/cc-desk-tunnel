@@ -7,6 +7,21 @@ declare global {
       remote?: boolean;
       remoteStatus?: () => Promise<RemoteStatus>;
       resetRemotePairing?: () => Promise<RemoteStatus>;
+      revokeRemoteSession?: (id: string) => Promise<RemoteStatus>;
+      onRemoteSessionsChanged?: (
+        callback: (sessions: RemoteBrowserSession[]) => void,
+      ) => () => void;
+      onRemoteEnabledChanged?: (callback: (enabled: boolean) => void) => () => void;
+      onRemoteRequest?: (
+        methods: string[],
+        callback: (request: {
+          id: string;
+          viewId?: string;
+          method: string;
+          args: unknown[];
+        }) => unknown | Promise<unknown>,
+      ) => () => void;
+      publishRemoteEvent?: (event: { viewId?: string; message: unknown }) => void;
       openRemote?: () => Promise<void>;
       configureRemote?: (values: {
         enabled: boolean;
@@ -61,10 +76,10 @@ declare global {
       saveDrafts: (drafts: Record<string, string>) => Promise<void>;
       loadSchedules: (initial: string) => Promise<{ path: string; text: string }>;
       saveSchedules: (text: string) => Promise<void>;
-      scheduleState?: () => Promise<import('./schedules.ts').ScheduleSnapshot | null>;
-      publishScheduleState?: (
-        snapshot: import('./schedules.ts').ScheduleSnapshot | null,
-      ) => Promise<void>;
+      readRemoteSchedules?: () => Promise<{ path: string; text: string; revision: string }>;
+      saveRemoteSchedules?: (text: string, revision: string) => Promise<void>;
+      scheduleState?: () => Promise<import('./browser-schedules.ts').ScheduleSnapshot | null>;
+      runScheduleNow?: (taskId: string) => Promise<void>;
       onSchedulesChanged: (callback: (text: string) => void) => () => void;
       windowSettings: () => Promise<{ closeToTray: boolean }>;
       setWindowSettings: (values: { closeToTray: boolean }) => Promise<void>;
@@ -97,16 +112,9 @@ declare global {
       connectProxy: (config: {
         url: string;
         fingerprint: string;
-        token: string;
         // Seconds allowed for reaching the service, for the local SSH service to start, and for the whole.
         waits?: { connect: number; ssh: number; ready: number };
-      }) => Promise<{
-        url: string;
-        failure?: Extract<
-          import('@cc-desk-tunnel/protocol').ServerMessage,
-          { type: 'connection.error' }
-        >;
-      }>;
+      }) => Promise<{ url: string }>;
       disconnectProxy: () => Promise<void>;
       onProxyClosed: (callback: () => void) => () => void;
     };
@@ -118,4 +126,11 @@ export type RemoteStatus = {
   port: number;
   url: string | null;
   token: string | null;
+  sessions: RemoteBrowserSession[];
+};
+export type RemoteBrowserSession = {
+  id: string;
+  label: string;
+  createdAt: number;
+  expiresAt: number;
 };

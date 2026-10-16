@@ -46,7 +46,7 @@ Claude Code（简称 CC）运行在一台 Linux 服务器上；项目代码、�
 
 ## 快速开始
 
-实验性 Web 工作台的源码运行方法见 [桌面客户端 Web 工作台](docs/desktop-web.md)：前后端均由桌面端托管，当前支持本机/局域网浏览器访问，不修改现有代理服务，不包含公网中继。此功能尚不等同于上游发布包的功能承诺。
+实验性 Web 工作台的源码运行方法见 [桌面客户端 Web 工作台](docs/desktop-web.md)：前后端均由桌面端托管，浏览器同步桌面当前会话，复用原有连接与自动调度。当前提供本机/局域网入口，浏览器登录 30 天有效并可单独撤销；不修改现有代理服务，不内置或规划公网中继。本轮重构后的真实 Claude 验收仍待完成，尚不等同于上游发布包的功能承诺。
 
 需要：一台有公网 IP 或域名的 Linux 服务器（x86_64；arm64 为实验性支持。推荐 Ubuntu，已安装 Docker），和一台 Windows 10 / 11 x64 电脑。macOS 与 Linux 上也有客户端，目前是实验性支持。
 
@@ -168,7 +168,7 @@ macOS 与 Linux 的安装包在同一个发布页，安装方法见 [macOS 客�
 | [部署与安全边界](docs/deployment.md) | 端口、证书、凭据、数据与信任边界 |
 | [安全说明](SECURITY.md) | 威胁模型、已有防护、已知不足、漏洞报告 |
 | [架构](docs/architecture.md) | 组成、连接建立过程、关键设计决定 |
-| [桌面客户端 Web 工作台（实验性）](docs/desktop-web.md) | 本机/局域网访问、配对与共享执行宿主 |
+| [桌面客户端 Web 工作台（实验性）](docs/desktop-web.md) | 本机/局域网入口、同步工作台、有限期配对与授权撤销 |
 | [原生运行与会话存储](docs/native-runtime.md) | 如何驱动官方 CLI、上下文归属、审批、保留期 |
 | [Windows 客户端](apps/desktop/README.md) · [Linux 服务](apps/server/README.md) · [消息契约](packages/protocol/README.md) | 各模块的实现说明 |
 | [macOS 客户端（实验性）](docs/macos.md) · [Linux 客户端（实验性）](docs/linux.md) | 安装、与 Windows 的不同、已验证与未验证 |

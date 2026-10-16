@@ -55,7 +55,7 @@ Electron 选择“远程代理”，输入可信 WSS 地址、代理 token；自
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/client.ts` | 唯一的 WebSocket 连接与状态仓库：会话目录、事件缓存、历史分页、请求 / 响应配对。组件经 `useSyncExternalStore` 读取 |
+| `src/client.ts` | 桌面到代理服务的连接与状态仓库：会话目录、事件缓存、历史分页、请求 / 响应配对。组件经 `useSyncExternalStore` 读取 |
 | `src/transcript.ts` | 把会话事件流折叠成界面条目（消息、推理、工具、提示） |
 | `src/ConversationFind.tsx`、`conversationSearch.ts`、`messageTime.ts`、`copy.tsx` | 对话内查找、消息日期与复制 |
 | `src/App.tsx` | 编排：连接与登录、当前会话、所有请求和禁用条件；不含具体界面 |
@@ -73,9 +73,11 @@ Electron 选择“远程代理”，输入可信 WSS 地址、代理 token；自
 | `electron/client-log.cjs` | 连接日志：每次连接的建立、断开与原因，写在用户配置目录的 `logs/` 下，不含凭据和内容 |
 | `electron/proxy-bridge.mjs`、`windows-ssh.mjs`、`tunnel-channels.mjs` | 主进程连接桥：校验服务证书后转发 WSS；启动本机 sshd；按服务端的要求另开到同一地址的连接作为执行通道，接到本机 sshd 上 |
 | `electron/system-proxy.mjs` | 读出系统代理中的 HTTP 代理，并经它建立到服务端的 TCP 连接 |
-| `electron/control-hub.mjs`、`control-endpoint.mjs` | 桌面客户端持有主执行连接；各视图独立订阅，请求关联、终端归属与私有桌面接入 |
-| `electron/web-server.mjs`、`web-files.cjs`、`desktop-web.mjs` | 可选 Web 静态页面、配对/API/WS、附件存储与发行包统一入口 |
+| `electron/web-server.mjs`、`web-auth.cjs`、`web-files.cjs`、`desktop-web.mjs` | 可选 Web 静态页面、有限期浏览器授权与单独撤销、API/WS、附件存储与发行包统一入口 |
+| `electron/web-control.mjs`、`web-requests.cjs` | Web 请求的操作列表与桌面渲染页应答关联，不接管原代理连接 |
 | `src/RemoteControl.tsx`、`RemoteGate.tsx`、`browser-host.ts` | 桌面 Web 开关、浏览器配对与桌面宿主能力适配；详见 [Web 工作台](../../docs/desktop-web.md) |
+| `src/remote-client.ts`、`remote-client-hook.ts` | Web 启用时同步桌面 `ProxyClient` 状态及选中会话，浏览器经其原有方法提交操作 |
+| `src/browser-schedules.ts` | 浏览器读取桌面调度状态与请求立即运行；桌面的自动调度仍由原有 `schedules.ts` 执行 |
 | `electron/prepare-ssh.ps1`、`component-host.ps1` | 生成临时 SSH 配置；用 Job Object 托管 sshd |
 
 `test/` 是 Playwright 界面测试，`test-main/` 是主进程模块与 `client.ts` 的 Node 测试。新增界面状态先看能否放进所属区域的组件，跨区域才上提到 `App.tsx`。
@@ -84,9 +86,11 @@ Electron 选择“远程代理”，输入可信 WSS 地址、代理 token；自
 
 入口为“设置 → 常规 → 远程控制”。Web 默认关闭，退出桌面后停止；监听端口与局域网访问偏好会保存，但重启桌面后仍需手动启用。开关更改立即保存，监听端口在输入框失去焦点时保存，无需应用按钮。运行中可改端口；新端口被占用或设置无效时，原服务与有效配置保留。默认端口为 `17890`，可设置为 1024–65535。
 
-配对码跨 Web 开关、设置修改与桌面重启保持不变。浏览器登录在服务端不自动过期，同一访问地址且 Cookie 保留时可继续使用；浏览器清理数据、更换浏览器或访问域名时需重新配对。关闭 Web 只暂停访问；浏览器退出会撤销该次登录，显式“重置配对码”会换码并注销所有旧浏览器。配对重置不更换原代理服务凭据，也不关闭桌面主执行连接。
+配对码跨 Web 开关、设置修改与桌面重启保持不变。浏览器登录有效期为 30 天，不随访问顺延；设置页可查看每个浏览器的登录与到期时间，并单独撤销。关闭 Web 只暂停访问；浏览器退出会撤销该次登录，“重置配对码”会换码并注销所有旧浏览器。授权到期或撤销会断开对应浏览器的全部标签页，不关闭桌面主执行连接。早期无期限授权升级后需要重新配对，原配对码保留。
 
-当前只支持本机/局域网访问，不包含公网中继，不改动现有代理服务。详情见 [Web 工作台](../../docs/desktop-web.md)。
+Web 是桌面当前工作台的同步入口：选中会话跟随桌面与其他浏览器，草稿和面板布局各自保留。Web 启用时才接入桌面渲染页现有能力，不另建观察连接或改写原连接桥、自动调度器。
+
+当前提供本机/局域网入口，不内置或规划公网中继，不改动现有代理服务。外部可达性由使用者自己的 VPN、组网等设施解决；任意域名反代仍受现有 `Host` / `Origin` 校验限制，未提供通用反代配置。重构前的人工验收不代表本轮已通过真实 Claude 验收，关键自动回归随源码提交。详情见 [Web 工作台](../../docs/desktop-web.md)。
 
 ## 当前功能与边界
 
