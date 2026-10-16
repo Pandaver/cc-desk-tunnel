@@ -11,6 +11,10 @@ const BODY_LIMIT = 4096;
 const RPC_BODY_LIMIT = 32 * 1024 * 1024;
 const BUFFER_LIMIT = 8 * 1024 * 1024;
 const RESPONSE_LIMIT = 16 * 1024 * 1024;
+// A 64 MiB desktop snapshot is split into JSON chunks. Escaping that JSON again can double
+// its wire size; reserve another MiB for chunk envelopes, and count the in-flight frame too.
+const OUTBOUND_QUEUE_LIMIT = 2 * 64 * 1024 * 1024 + 1024 * 1024;
+const OUTBOUND_SEND_TIMEOUT = 30_000;
 const COOKIE = 'ccdt_web_session';
 const mimeTypes = {
   '.html': 'text/html; charset=utf-8',
@@ -409,22 +413,79 @@ export async function startWebServer({
           return emit(event, ...args);
         };
         const send = ws.send.bind(ws);
+        const outgoing = [];
+        let outgoingHead = 0;
+        let outgoingBytes = 0;
+        let sending = false;
+        let sendTimer;
+        let sendClosed = false;
+        function clearOutgoing() {
+          sendClosed = true;
+          clearTimeout(sendTimer);
+          outgoing.length = 0;
+          outgoingHead = 0;
+          outgoingBytes = 0;
+        }
+        function stopSending() {
+          clearOutgoing();
+          ws.terminate();
+        }
+        function drainOutgoing() {
+          if (sending || sendClosed || outgoingHead === outgoing.length) return;
+          if (closing || ws.readyState !== WebSocket.OPEN || !auth.get(id)) {
+            stopSending();
+            return;
+          }
+          const entry = outgoing[outgoingHead];
+          sending = true;
+          sendTimer = setTimeout(stopSending, OUTBOUND_SEND_TIMEOUT);
+          sendTimer.unref();
+          try {
+            send(entry.data, ...entry.args, (error) => {
+              if (sendClosed) return;
+              clearTimeout(sendTimer);
+              outgoingBytes -= entry.bytes;
+              outgoing[outgoingHead++] = undefined;
+              // Release sent entries without shifting the remaining queue for every chunk.
+              if (outgoingHead === outgoing.length) {
+                outgoing.length = 0;
+                outgoingHead = 0;
+              } else if (outgoingHead >= 1024 && outgoingHead * 2 >= outgoing.length) {
+                outgoing.splice(0, outgoingHead);
+                outgoingHead = 0;
+              }
+              sending = false;
+              try {
+                entry.callback?.(error);
+              } finally {
+                if (error) stopSending();
+                else queueMicrotask(drainOutgoing);
+              }
+            });
+          } catch {
+            stopSending();
+          }
+        }
         ws.send = (data, ...args) => {
           const bytes = typeof data === 'string' ? Buffer.byteLength(data) : (data.byteLength ?? 0);
-          // A complete history snapshot may exceed the backlog budget. Bound that frame
-          // separately; the backlog check rejects a slow reader before queuing another one.
           if (
+            sendClosed ||
             ws.readyState !== WebSocket.OPEN ||
             closing ||
             !auth.get(id) ||
-            ws.bufferedAmount > BUFFER_LIMIT ||
-            bytes > RESPONSE_LIMIT
+            bytes > RESPONSE_LIMIT ||
+            outgoingBytes + bytes > OUTBOUND_QUEUE_LIMIT
           ) {
-            ws.terminate();
+            stopSending();
             return;
           }
-          return send(data, ...args);
+          const callback = typeof args.at(-1) === 'function' ? args.pop() : undefined;
+          outgoing.push({ data, args, callback, bytes });
+          outgoingBytes += bytes;
+          drainOutgoing();
         };
+        ws.on('close', clearOutgoing);
+        ws.on('error', clearOutgoing);
         const heartbeat = setInterval(() => {
           if (!alive || !auth.get(id)) {
             ws.terminate();

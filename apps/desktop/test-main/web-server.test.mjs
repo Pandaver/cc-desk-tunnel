@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { request } from 'node:http';
@@ -8,6 +9,9 @@ import { test } from 'node:test';
 import { WebSocket } from 'ws';
 import { createWebAuthStore, SESSION_LIFETIME_MS } from '../electron/web-auth.cjs';
 import { startWebServer } from '../electron/web-server.mjs';
+import { createWebControl } from '../electron/web-control.mjs';
+import { ProxyClient } from '../src/client.ts';
+import { createRemoteClientAdapter } from '../src/remote-client.ts';
 
 async function start(t, options = {}) {
   const distDirectory = await mkdtemp(join(tmpdir(), 'ccdt-web-server-'));
@@ -223,4 +227,109 @@ test('logout revokes its grant while stopping the listener preserves other saved
   await server.close();
   const restarted = await start(t, { authStore: server.authStore });
   assert.equal((await http(restarted, '/api/info', { cookie: second })).status, 200);
+});
+
+async function snapshot(t, text, count) {
+  const client = new ProxyClient();
+  const sessionId = randomUUID();
+  const events = Array.from({ length: count }, (_, index) => ({
+    sessionId,
+    runId: randomUUID(),
+    sequence: index + 1,
+    createdAt: Date.now(),
+    payload: { type: 'text.delta', messageId: randomUUID(), text },
+  }));
+  client.update({ status: 'connected', events: { [sessionId]: events } });
+  let control;
+  const adapter = createRemoteClientAdapter(client, (event) => control.publish(event));
+  adapter.setEnabled(true);
+  control = createWebControl((method, args, viewId) =>
+    adapter.invoke({ id: 'snapshot', method, args, viewId }),
+  );
+  const server = await start(t, { onConnection: (socket) => control.attach(socket) });
+  t.after(() => adapter.dispose());
+  const socket = await connect(server, await pair(server));
+  const result = new Promise((resolve, reject) => {
+    const chunks = [];
+    let received;
+    socket.on('message', (raw) => {
+      try {
+        const value = JSON.parse(raw.toString());
+        if (value.type === 'client:chunk') {
+          assert.equal(value.index, chunks.length);
+          chunks.push(value.text);
+          if (chunks.length === value.total) received = JSON.parse(chunks.join(''));
+        } else if (value.type === 'response') {
+          assert.equal(value.ok, true);
+          assert.equal(received.events[sessionId].replace.length, count);
+          assert.equal(received.events[sessionId].replace.at(-1).payload.text, text);
+          resolve();
+        }
+      } catch (error) {
+        reject(error);
+      }
+    });
+    socket.once('error', reject);
+    socket.once('close', () => reject(new Error('Socket closed before the snapshot completed')));
+  });
+  socket.send(JSON.stringify({ id: 'snapshot', method: 'client:state', args: [] }));
+  await result;
+  socket.close();
+}
+
+test(
+  'a 12 MiB history snapshot survives its synchronous chunk burst on a real socket',
+  { timeout: 30_000 },
+  async (t) => {
+    await snapshot(t, 'a'.repeat(192 * 1024), 64);
+  },
+);
+
+test(
+  'the outgoing budget includes JSON escaping for a nearly 64 MiB history snapshot',
+  { timeout: 30_000 },
+  async (t) => {
+    // Each event stays below the service frame limit, while the complete state approaches 64 MiB.
+    // A backslash is escaped once in the snapshot and a second time inside the chunk envelope.
+    await snapshot(t, '\\'.repeat(63 * 1024), 512);
+  },
+);
+
+test('a slow browser exceeding its bounded outgoing queue does not disconnect another browser', async (t) => {
+  const peers = [];
+  const server = await start(t, {
+    onConnection: (socket) => {
+      peers.push(socket);
+      socket.on('message', (data) => socket.send(data.toString()));
+    },
+  });
+  const cookie = await pair(server);
+  const slow = await connect(server, cookie);
+  const other = await connect(server, cookie);
+  slow._socket.pause();
+  const closed = once(slow, 'close');
+  const frame = 'a'.repeat(16 * 1024 * 1024);
+  // Completion callbacks have not run yet: nine frames exceed the limit, including in-flight data.
+  for (let index = 0; index < 9; index++) peers[0].send(frame);
+  assert.notEqual(peers[0].readyState, WebSocket.OPEN);
+  slow._socket.resume();
+  await closed;
+  const echoed = once(other, 'message');
+  other.send('another browser stays connected');
+  assert.equal((await echoed)[0].toString(), 'another browser stays connected');
+  assert.equal((await http(server, '/api/info', { cookie })).status, 200);
+});
+
+test('a browser that stops reading is closed after the bounded send timeout', async (t) => {
+  const peers = [];
+  const server = await start(t, { onConnection: (socket) => peers.push(socket) });
+  const socket = await connect(server, await pair(server));
+  socket._socket.pause();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const closed = once(socket, 'close');
+  peers[0].send('a'.repeat(16 * 1024 * 1024));
+  t.mock.timers.tick(30_000);
+  assert.notEqual(peers[0].readyState, WebSocket.OPEN);
+  socket._socket.resume();
+  await closed;
 });
