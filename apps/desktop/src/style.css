@@ -3491,7 +3491,8 @@ dialog {
   font-size: 12px;
   cursor: pointer;
 }
-.stat-chip[aria-pressed='true'] {
+.stat-chip[aria-pressed='true'],
+.stat-chip[aria-checked='true'] {
   border-color: var(--accent);
   background: var(--accent-soft, rgba(37, 99, 235, 0.1));
   color: var(--accent);
