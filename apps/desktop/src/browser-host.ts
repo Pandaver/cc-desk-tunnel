@@ -190,6 +190,8 @@ export function installBrowserHost(info: HostInfo) {
     device: async () => info.device,
     installUpdate: desktopOnly,
     onUpdateProgress: subscribe,
+    upgradeService: desktopOnly,
+    onServiceUpgrade: subscribe,
     connectProxy: async () => ({
       url: `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/control`,
     }),

@@ -12,6 +12,8 @@ import { startPosixSsh } from './posix-ssh.mjs';
 import { openChannels } from './tunnel-channels.mjs';
 import { httpProxy, openSocket } from './system-proxy.mjs';
 import { channelFailure, controlFailure, passing } from './connect-errors.mjs';
+// Loaded by the main process from here, so that the package's bundle of this module holds it.
+export { upgradeService } from './service-upgrade.mjs';
 
 // The SSH service of a connection. The two are started and closed alike and give the same credentials; what
 // is behind them differs with the system: see each module.
@@ -43,7 +45,7 @@ export function connectionWaits(values) {
 // Starts TLS with the service, through the system's HTTP proxy when the Windows settings name one for it. The proxy
 // only relays bytes: the certificate is still the service's own and is judged as on a direct connection.
 // `route`, when given, is told the proxy that was used, for the words of a failure.
-async function connectService(address, config, resolveProxy, route) {
+export async function connectService(address, config, resolveProxy, route) {
   const port = Number(address.port || 443);
   const proxy = httpProxy(await resolveProxy?.(`https://${address.hostname}:${port}`));
   if (route) route.proxy = proxy;

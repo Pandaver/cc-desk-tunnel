@@ -42,6 +42,9 @@ test(
       const stagedRequire = createRequire(path.join(app, 'electron/main.cjs'));
       for (const dependency of ['ws', '@cc-desk-tunnel/protocol'])
         assert.throws(() => stagedRequire.resolve(dependency), { code: 'MODULE_NOT_FOUND' });
+      const bridge = await import(pathToFileURL(path.join(app, 'electron/proxy-bridge.mjs')).href);
+      assert.equal(typeof bridge.openProxyBridge, 'function');
+      assert.equal(typeof bridge.upgradeService, 'function');
       const runtime = await import(pathToFileURL(path.join(app, 'electron/desktop-web.mjs')).href);
       assert.deepEqual(Object.keys(runtime).sort(), ['createWebControl', 'startWebServer']);
       assert.equal(typeof runtime.createWebControl, 'function');

@@ -1,8 +1,14 @@
 import { test as base, expect, _electron } from '@playwright/test';
 import type { Browser, BrowserContext, ElectronApplication, Page } from '@playwright/test';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import { WebSocket, WebSocketServer } from 'ws';
+import { nativeSettingsSchema, PROTOCOL_VERSION } from '@cc-desk-tunnel/protocol';
+import type { Session } from '@cc-desk-tunnel/protocol';
+import { DomainError } from '../../server/src/errors.ts';
+import { readInstructions, writeInstructions } from '../../server/src/native-instructions.ts';
 import { login, send, sessionAction, settled } from './helpers.ts';
 
 type Desktop = {
@@ -126,6 +132,199 @@ async function select(page: Page, title: string) {
 test.describe('Electron Web workbench', () => {
   test.skip(process.platform !== 'win32', 'Windows Electron integration');
   test.setTimeout(120_000);
+
+  test('browser session statistics and global instructions use the desktop connection and preserve conflicting drafts', async ({
+    desktop,
+    browser,
+  }) => {
+    const contexts: BrowserContext[] = [];
+    // Only the service protocol is supplied here, as in settings.spec.ts. Both browsers use the real
+    // Electron listener and renderer adapter. Instructions use the real file/CAS implementation,
+    // with an explicit path in this test's profile rather than the user's Claude configuration.
+    const instructions = join(desktop.profile, 'native-profile', 'CLAUDE.md');
+    const original = writeInstructions(
+      '回复用中文。\n',
+      readInstructions(instructions).version,
+      instructions,
+    );
+    const updates: { text: string; version: string }[] = [];
+    let authentications = 0;
+    let statistics = 0;
+    const now = new Date().toISOString();
+    const session: Session = {
+      id: randomUUID(),
+      title: 'Web 主线功能验收',
+      autoTitle: false,
+      projectPath: desktop.project,
+      permissionMode: 'auto',
+      model: null,
+      effort: null,
+      createdAt: now,
+      updatedAt: now,
+      activeRun: null,
+    };
+    // The desktop page already exists, so use a real listener rather than routeWebSocket's
+    // new-document injection. The fixture owns only its ephemeral loopback port.
+    const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.once('listening', resolve);
+    });
+    const address = `ws://127.0.0.1:${(server.address() as { port: number }).port}/ws`;
+    server.on('connection', (socket) => {
+      const reply = (value: unknown) => {
+        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value));
+      };
+      socket.on('message', (raw) => {
+        const message = JSON.parse(String(raw));
+        if (message.type === 'device' || message.type === 'leave') return;
+        if (message.type === 'auth') {
+          authentications++;
+          reply({
+            type: 'ready',
+            protocolVersion: PROTOCOL_VERSION,
+            version: '0.0.1',
+            connectionId: randomUUID(),
+            adapter: 'claude-code',
+            sessions: [session],
+          });
+          return;
+        }
+        try {
+          if (message.type === 'session.subscribe')
+            reply({
+              type: 'session.snapshot',
+              requestId: message.requestId,
+              session,
+              mode: 'replace',
+              firstSequence: 0,
+              lastSequence: 0,
+              hasEarlier: false,
+              events: [],
+            });
+          if (message.type === 'session.stats') {
+            statistics++;
+            reply({
+              type: 'session.stats',
+              requestId: message.requestId,
+              sessionId: message.sessionId,
+              turns: 3,
+              requests: 7,
+              inputTokens: 100,
+              outputTokens: 2000,
+              cacheReadTokens: 40000,
+              cacheCreationTokens: 8000,
+              modelMs: 28200,
+              ttftMs: 952,
+              outputPerSecond: 99.3,
+              firstRecordAt: null,
+            });
+          }
+          if (message.type === 'settings.get')
+            reply({
+              type: 'settings.state',
+              requestId: message.requestId,
+              values: Object.fromEntries(
+                Object.keys(nativeSettingsSchema.shape).map((key) => [key, null]),
+              ),
+            });
+          if (message.type === 'instructions.update') {
+            updates.push({ text: message.text, version: message.version });
+            writeInstructions(message.text, message.version, instructions);
+          }
+          if (message.type.startsWith('instructions.'))
+            reply({
+              type: 'instructions.state',
+              requestId: message.requestId,
+              ...readInstructions(instructions),
+            });
+          reply({ type: 'response', requestId: message.requestId, ok: true });
+        } catch (error) {
+          reply({
+            type: 'response',
+            requestId: message.requestId,
+            ok: false,
+            code: error instanceof DomainError ? error.code : 'fixture_error',
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      });
+    });
+    try {
+      await desktop.page.getByRole('button', { name: '设置与账号', exact: true }).click();
+      await desktop.page.getByRole('menuitem', { name: '断开连接', exact: true }).click();
+      await desktop.page.getByLabel('服务地址', { exact: true }).fill(address);
+      await desktop.page
+        .getByLabel('服务凭据', { exact: true })
+        .fill('test-only-native-web-token-with-enough-length');
+      await desktop.page.getByRole('button', { name: '连接', exact: true }).click();
+      await expect(desktop.page.locator('.connection-status')).toContainText('已连接');
+      await select(desktop.page, session.title);
+      const access = await enable(desktop.page);
+      const first = await pair(browser, access);
+      contexts.push(first.context);
+      const second = await pair(browser, access, true);
+      contexts.push(second.context);
+      for (const page of [first.page, second.page]) {
+        await general(page);
+        await page.getByRole('switch', { name: '显示会话栏', exact: true }).click();
+        await page.getByRole('button', { name: '会话', exact: true }).click();
+        await expect(page.locator('.session-bar-part.session > button')).toHaveText(
+          '3 轮 · 7 步 · 平均 99 tok/s',
+        );
+        await page.locator('.session-bar-part.session > button').click();
+        await expect(
+          page.getByRole('dialog', { name: '会话统计', exact: true }).locator('header'),
+        ).toHaveText('会话统计3 轮');
+        await page.locator('.session-bar-part.session > button').click();
+      }
+      expect(statistics).toBeGreaterThanOrEqual(2);
+      for (const page of [desktop.page, first.page, second.page]) {
+        await general(page);
+        await page
+          .getByRole('navigation', { name: '设置分类' })
+          .getByRole('button', { name: 'Claude Code', exact: true })
+          .click();
+        await expect(
+          page.locator('.instructions-card').getByLabel('全局说明', { exact: true }),
+        ).toHaveValue(original.text);
+      }
+      const firstPanel = first.page.locator('.instructions-card');
+      const secondPanel = second.page.locator('.instructions-card');
+      const saved = '回复用中文。\n提交信息用中文。\n';
+      const draft = '第二个浏览器尚未保存的说明。\n';
+      await secondPanel.getByLabel('全局说明', { exact: true }).fill(draft);
+      await firstPanel.getByLabel('全局说明', { exact: true }).fill(saved);
+      await firstPanel.getByRole('button', { name: '保存', exact: true }).click();
+      await expect(firstPanel.getByRole('status')).toHaveText('已保存，从下一次运行起生效');
+      expect(readInstructions(instructions).text).toBe(saved);
+      await secondPanel.getByRole('button', { name: '保存', exact: true }).click();
+      await expect(secondPanel.getByRole('alert')).toContainText('已在别处修改');
+      await expect(secondPanel.getByLabel('全局说明', { exact: true })).toHaveValue(draft);
+      expect(readInstructions(instructions).text).toBe(saved);
+      expect(updates).toEqual([
+        { text: saved, version: original.version },
+        { text: draft, version: original.version },
+      ]);
+      for (const page of [desktop.page, second.page]) {
+        const panel = page.locator('.instructions-card');
+        await panel.getByRole('button', { name: '重新载入', exact: true }).click();
+        await expect(panel.getByLabel('全局说明', { exact: true })).toHaveValue(saved);
+        await expect(panel.getByRole('alert')).toHaveCount(0);
+      }
+      expect(authentications).toBe(1);
+      await expect(desktop.page.locator('.connection-status')).toContainText('已连接');
+    } finally {
+      try {
+        await Promise.all(contexts.map((context) => context.close()));
+      } finally {
+        for (const socket of server.clients) socket.terminate();
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        );
+      }
+    }
+  });
 
   test('two browsers share desktop selection and commands without sharing drafts or disconnecting the desktop', async ({
     desktop,

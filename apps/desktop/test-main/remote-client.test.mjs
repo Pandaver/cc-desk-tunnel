@@ -556,14 +556,15 @@ for (const timeout of [false, true]) {
   });
 }
 
-async function browser(t, f) {
+async function browser(t, f, count = 1) {
   const Original = globalThis.WebSocket;
   const sockets = [];
   class Socket {
     static OPEN = 1;
     readyState = 0;
     sent = [];
-    constructor() {
+    constructor(url) {
+      this.viewId = new URL(url).searchParams.get('view');
       sockets.push(this);
     }
     open() {
@@ -573,7 +574,7 @@ async function browser(t, f) {
     send(text) {
       const value = JSON.parse(text);
       this.sent.push(value);
-      void f.invoke(value.method, value.args, 'browser').then(
+      void f.invoke(value.method, value.args, this.viewId).then(
         (result) => this.message({ type: 'response', id: value.id, ok: true, result }),
         (error) =>
           this.message({ type: 'response', id: value.id, ok: false, error: error.message }),
@@ -585,25 +586,126 @@ async function browser(t, f) {
     close() {
       this.readyState = 3;
       this.onclose?.();
-      void f.invoke('client:detach', [], 'browser');
+      void f.invoke('client:detach', [], this.viewId);
     }
   }
   globalThis.WebSocket = Socket;
-  const client = new RemoteClient();
+  const clients = Array.from({ length: count }, () => new RemoteClient());
   f.deliver(({ viewId, message }) => {
-    if (viewId === 'browser') sockets.at(-1)?.message(message);
+    sockets.findLast((socket) => socket.viewId === viewId)?.message(message);
   });
   f.adapter.setEnabled(true);
-  client.connect('ws://127.0.0.1:1', '', {}, true, async () => 'ws://127.0.0.1:2/api/control');
+  for (const [index, client] of clients.entries())
+    client.connect(
+      'ws://127.0.0.1:1',
+      '',
+      {},
+      true,
+      async () => `ws://127.0.0.1:2/api/control?view=browser-${index}`,
+    );
   await turn();
-  sockets[0].open();
+  for (const socket of sockets) socket.open();
   await turn();
   t.after(() => {
-    client.disconnect();
+    for (const client of clients) client.disconnect();
     globalThis.WebSocket = Original;
   });
-  return { client, sockets };
+  return { client: clients[0], clients, sockets };
 }
+
+for (const type of ['session.stats', 'instructions.get', 'instructions.update']) {
+  test(`browser ${type} forwards data and failures through the desktop fetch`, async (t) => {
+    const f = fixture(t);
+    const b = await browser(t, f);
+    const command =
+      type === 'session.stats'
+        ? { type, sessionId: f.sessionId }
+        : type === 'instructions.update'
+          ? { type, text: '回复用中文。', version: 'original-version' }
+          : { type };
+    const data =
+      type === 'session.stats'
+        ? { type, requestId: randomUUID(), sessionId: f.sessionId, turns: 2, requests: 4 }
+        : {
+            type: 'instructions.state',
+            requestId: randomUUID(),
+            text: '回复用中文。',
+            version: 'next-version',
+          };
+    const forwarded = [];
+    f.client.fetch = async (value) => {
+      forwarded.push(value);
+      return data;
+    };
+    assert.deepEqual(await b.client.fetch(command), data);
+    assert.deepEqual(forwarded, [command]);
+    f.client.fetch = async (value) => {
+      forwarded.push(value);
+      throw new Error('原版本已变化，请重新载入。');
+    };
+    await assert.rejects(b.client.fetch(command), /原版本已变化，请重新载入。/);
+    assert.deepEqual(forwarded, [command, command]);
+    assert.equal(f.client.state.status, 'connected');
+  });
+}
+
+test('two browsers share device readiness and clear unavailable transport state until resynced', async (t) => {
+  const f = fixture(t);
+  const device = { id: randomUUID(), name: '另一台电脑', platform: 'linux', ready: true };
+  f.client.update({ devices: [device] });
+  const b = await browser(t, f, 2);
+  for (const client of b.clients) assert.deepEqual(client.state.devices, [device]);
+  f.client.update({ devices: [{ ...device, ready: false }] });
+  f.adapter.flush();
+  for (const client of b.clients)
+    assert.deepEqual(client.state.devices, [{ ...device, ready: false }]);
+  b.sockets[0].close();
+  assert.equal(b.client.state.status, 'reconnecting');
+  assert.deepEqual(b.client.state.devices, []);
+  assert.deepEqual(b.clients[1].state.devices, [{ ...device, ready: false }]);
+  assert.deepEqual(f.client.state.devices, [{ ...device, ready: false }]);
+  f.client.update({ devices: [device] });
+  f.adapter.flush();
+  assert.deepEqual(b.clients[1].state.devices, [device]);
+  b.client.retryNow();
+  await turn();
+  b.sockets[2].open();
+  await turn();
+  assert.deepEqual(b.client.state.devices, [device]);
+  f.client.update({ status: 'reconnecting', connectionId: null, devices: [] });
+  f.adapter.flush();
+  for (const client of b.clients) {
+    assert.equal(client.state.status, 'reconnecting');
+    assert.deepEqual(client.state.devices, []);
+  }
+  f.client.update({ status: 'connected', connectionId: randomUUID(), devices: [device] });
+  f.adapter.flush();
+  b.client.disconnect();
+  assert.deepEqual(b.client.state.devices, []);
+  assert.deepEqual(b.clients[1].state.devices, [device]);
+  assert.equal(f.client.state.status, 'connected');
+});
+
+test('other-device messages, approvals and stop requests keep their session and run identities', async (t) => {
+  const f = fixture(t);
+  const device = { id: randomUUID(), name: '另一台电脑', platform: 'linux', ready: true };
+  const sessionId = randomUUID();
+  const runId = randomUUID();
+  f.client.update({
+    devices: [device],
+    sessions: [...f.client.state.sessions, { id: sessionId, title: 'elsewhere', device }],
+  });
+  const b = await browser(t, f, 2);
+  const commands = [
+    { type: 'message.send', sessionId, text: '/status', scenario: 'chat' },
+    { type: 'approval.reply', sessionId, runId, approvalId: randomUUID(), allowed: true },
+    { type: 'run.cancel', sessionId, runId },
+  ];
+  for (const [index, command] of commands.entries()) await b.clients[index % 2].request(command);
+  assert.deepEqual(f.calls, commands);
+  assert.equal(f.client.state.selectedId, f.sessionId);
+  assert.equal(f.client.state.status, 'connected');
+});
 
 test('browser fetch returns data; state changes are visible when request resolves', async (t) => {
   const f = fixture(t);

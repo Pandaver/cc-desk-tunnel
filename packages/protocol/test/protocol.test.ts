@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import {
+  PROTOCOL_HISTORY,
   PROTOCOL_VERSION,
   authSchema,
   commandSchema,
   eventSchema,
+  serverMessageSchema,
   terminalControlSchema,
 } from '../src/index.ts';
 
@@ -25,6 +27,9 @@ test('protocol validates UTF-8 text, IDs and bounded input', () => {
   assert.equal(commandSchema.safeParse({ ...command, token: 'unexpected' }).success, false);
 });
 
+test('the protocol history ends with the current version', () => {
+  assert.equal(Object.values(PROTOCOL_HISTORY).at(-1), PROTOCOL_VERSION);
+});
 test('authentication version and event ordering are explicit', () => {
   const auth = {
     type: 'auth',
@@ -113,6 +118,34 @@ test('a run waiting only for background tasks, its task list and the request to 
   };
   assert.ok(commandSchema.safeParse(stop).success);
   assert.equal(commandSchema.safeParse({ ...stop, taskId: '' }).success, false);
+});
+
+test('a session report is asked for by session and answers with its figures', () => {
+  const requestId = randomUUID();
+  const sessionId = randomUUID();
+  assert.ok(commandSchema.safeParse({ type: 'session.stats', requestId, sessionId }).success);
+  assert.equal(commandSchema.safeParse({ type: 'session.stats', requestId }).success, false);
+  const stats = {
+    type: 'session.stats',
+    requestId,
+    sessionId,
+    turns: 2,
+    requests: 4,
+    inputTokens: 40,
+    outputTokens: 1000,
+    cacheReadTokens: 4000,
+    cacheCreationTokens: 200,
+    modelMs: 11500,
+    ttftMs: null,
+    outputPerSecond: null,
+    firstRecordAt: null,
+  };
+  assert.equal(serverMessageSchema.safeParse(stats).success, true);
+  assert.equal(serverMessageSchema.safeParse({ ...stats, turns: -1 }).success, false);
+  assert.equal(
+    serverMessageSchema.safeParse({ ...stats, firstRecordAt: 'yesterday' }).success,
+    false,
+  );
 });
 
 test('a turn report names the message it answered, or none for a turn a background task started', () => {

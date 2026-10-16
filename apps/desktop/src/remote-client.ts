@@ -8,8 +8,11 @@ type FetchCommand = Parameters<ProxyClient['fetch']>[0];
 type Replies = {
   'usage.summary': 'usage.summary';
   'usage.query': 'usage.page';
+  'session.stats': 'session.stats';
   'settings.get': 'settings.state';
   'settings.update': 'settings.state';
+  'instructions.get': 'instructions.state';
+  'instructions.update': 'instructions.state';
 };
 type TerminalMessage = Parameters<Parameters<ProxyClient['onTerminal']>[0]>[0];
 type Clock = { now: number; activity: Record<string, number> };
@@ -42,7 +45,15 @@ export const remoteClientMethods = [
   'client:clear-error',
   'client:detach',
 ];
-const fetches = new Set(['usage.summary', 'usage.query', 'settings.get', 'settings.update']);
+const fetches = new Set([
+  'usage.summary',
+  'usage.query',
+  'session.stats',
+  'settings.get',
+  'settings.update',
+  'instructions.get',
+  'instructions.update',
+]);
 // JSON inside the chunk envelope escapes some bytes a second time. These character-sized chunks
 // remain below 64 KiB on the wire, including non-ASCII text; the complete message is capped in bytes.
 const chunkSize = 16 * 1024;
@@ -519,7 +530,7 @@ export class RemoteClient extends ProxyClient {
   }
   private scheduleReconnect() {
     if (!this.reconnecting) return;
-    this.update({ status: 'reconnecting' });
+    this.update({ status: 'reconnecting', devices: [] });
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = setTimeout(
       () => {
@@ -550,7 +561,7 @@ export class RemoteClient extends ProxyClient {
     this.chunks = undefined;
     this.rejectRequests();
     this.attempt = 0;
-    this.update({ status: 'disconnected', connectionId: null });
+    this.update({ status: 'disconnected', connectionId: null, devices: [] });
   }
   private rejectRequests() {
     for (const request of this.requests.values()) {
