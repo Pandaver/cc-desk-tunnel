@@ -1,4 +1,4 @@
-import { commandSchema, terminalControlSchema } from '@cc-desk-tunnel/protocol';
+import { MAX_FRAME_BYTES, commandSchema, terminalControlSchema } from '@cc-desk-tunnel/protocol';
 import type { ServerMessage, SessionEvent, TerminalControl } from '@cc-desk-tunnel/protocol';
 import { ProxyClient, RequestInterruptedError } from './client.ts';
 import type { ClientState } from './client.ts';
@@ -15,6 +15,18 @@ type Replies = {
   'instructions.update': 'instructions.state';
 };
 type TerminalMessage = Parameters<Parameters<ProxyClient['onTerminal']>[0]>[0];
+type TerminalQueue = {
+  connectionId: string | null;
+  input: Extract<TerminalControl, { type: 'terminal.input' }>[];
+  bytes: number;
+  ack: number;
+  resize?: Extract<TerminalControl, { type: 'terminal.resize' }>;
+  inputPending: boolean;
+  inputBlocked: boolean;
+  ackPending: boolean;
+  resizePending: boolean;
+  closed: boolean;
+};
 type Clock = { now: number; activity: Record<string, number> };
 type EventChange = { replace?: SessionEvent[]; upsert?: SessionEvent[]; remove?: number[] };
 type StateMessage = {
@@ -386,6 +398,12 @@ export function createRemoteClientAdapter(
       return { revision };
     }
     if (!views.has(viewId)) throw new Error('请先同步工作台。');
+    // A browser frame may arrive after the desktop has connected to a different service.
+    // Bind every operation to the connection it was issued for, not whichever one is current.
+    const [expectedConnection, ...operationArgs] = args;
+    if (expectedConnection !== client.state.connectionId)
+      throw new Error('桌面服务连接已变化，请确认当前工作台后重试；操作未发送。');
+    args = operationArgs;
     let result: unknown;
     try {
       switch (method) {
@@ -468,6 +486,8 @@ export class RemoteClient extends ProxyClient {
       command?: Command['type'];
     }
   >();
+  private terminalQueues = new Map<string, TerminalQueue>();
+  private terminalBytes = 0;
   private revision = -1;
   private clockOffset = 0;
   private remoteActivity: Record<string, number> = {};
@@ -564,6 +584,7 @@ export class RemoteClient extends ProxyClient {
     this.update({ status: 'disconnected', connectionId: null, devices: [] });
   }
   private rejectRequests() {
+    this.dropTerminals();
     for (const request of this.requests.values()) {
       clearTimeout(request.timer);
       request.reject(
@@ -574,7 +595,12 @@ export class RemoteClient extends ProxyClient {
     }
     this.requests.clear();
   }
-  private call(method: string, args: unknown[], command?: Command['type']): Promise<unknown> {
+  private call(
+    method: string,
+    args: unknown[],
+    command?: Command['type'],
+    connectionId = this.state.connectionId,
+  ): Promise<unknown> {
     const socket = this.webSocket;
     if (!socket || socket.readyState !== WebSocket.OPEN)
       return Promise.reject(new Error('工作台未连接。'));
@@ -587,7 +613,13 @@ export class RemoteClient extends ProxyClient {
       }, 45000);
       this.requests.set(id, { resolve, reject, timer, command });
       try {
-        socket.send(JSON.stringify({ id, method, args }));
+        socket.send(
+          JSON.stringify({
+            id,
+            method,
+            args: method === 'client:state' ? args : [connectionId, ...args],
+          }),
+        );
       } catch (error) {
         clearTimeout(timer);
         this.requests.delete(id);
@@ -660,6 +692,8 @@ export class RemoteClient extends ProxyClient {
         !['terminal.opened', 'terminal.data', 'terminal.closed'].includes(message.type)
       )
         throw new Error('Invalid terminal message');
+      if (message.type === 'terminal.closed')
+        this.dropTerminals(message.sessionId, message.terminalId);
       for (const listener of this.terminalListeners) listener(message);
       return;
     }
@@ -696,6 +730,16 @@ export class RemoteClient extends ProxyClient {
     this.update({ ...message.state, events });
   }
   request(command: Command): ReturnType<ProxyClient['request']> {
+    if (command.type === 'terminal.close') {
+      const queue = this.terminalQueue(command);
+      if (queue) {
+        this.terminalBytes -= queue.bytes;
+        queue.input = [];
+        queue.bytes = queue.ack = 0;
+        queue.resize = undefined;
+        queue.closed = true;
+      }
+    }
     return this.call('client:request', [command], command.type) as ReturnType<
       ProxyClient['request']
     >;
@@ -736,10 +780,98 @@ export class RemoteClient extends ProxyClient {
   async loadEarlier(sessionId: string) {
     await this.call('client:load-earlier', [sessionId], 'session.history');
   }
+  private dropTerminals(sessionId?: string, terminalId?: string) {
+    for (const [key, queue] of this.terminalQueues) {
+      if (sessionId && key !== `${sessionId}:${terminalId}`) continue;
+      this.terminalBytes -= queue.bytes;
+      this.terminalQueues.delete(key);
+    }
+  }
+  private terminalQueue(command: { sessionId: string; terminalId: string }) {
+    const key = `${command.sessionId}:${command.terminalId}`;
+    let queue = this.terminalQueues.get(key);
+    if (!queue && this.terminalQueues.size < maxViews) {
+      queue = {
+        connectionId: this.state.connectionId,
+        input: [],
+        bytes: 0,
+        ack: 0,
+        inputPending: false,
+        inputBlocked: false,
+        ackPending: false,
+        resizePending: false,
+        closed: false,
+      };
+      this.terminalQueues.set(key, queue);
+    }
+    return queue;
+  }
+  private pumpTerminal(sessionId: string, terminalId: string, queue: TerminalQueue) {
+    const key = `${sessionId}:${terminalId}`;
+    if (this.terminalQueues.get(key) !== queue || queue.closed) return;
+    const send = (
+      command: TerminalControl,
+      pending: 'inputPending' | 'ackPending' | 'resizePending',
+    ) => {
+      queue[pending] = true;
+      void this.call('client:terminal', [command], undefined, queue.connectionId)
+        .catch((error: Error) => {
+          if (this.terminalQueues.get(key) !== queue) return;
+          // An uncertain input is never replayed; discard the remainder rather than sending a suffix.
+          this.terminalBytes -= queue.bytes;
+          queue.input = [];
+          queue.bytes = queue.ack = 0;
+          queue.resize = undefined;
+          queue.closed = true;
+          this.update({ error: error.message });
+        })
+        .finally(() => {
+          queue[pending] = false;
+          this.pumpTerminal(sessionId, terminalId, queue);
+        });
+    };
+    // Each stream has its own slot: a long paste cannot delay output acknowledgements or resizes.
+    if (!queue.ackPending && queue.ack) {
+      const bytes = Math.min(queue.ack, MAX_FRAME_BYTES);
+      queue.ack -= bytes;
+      send({ type: 'terminal.ack', sessionId, terminalId, bytes }, 'ackPending');
+    }
+    if (!queue.resizePending && queue.resize) {
+      const size = queue.resize;
+      queue.resize = undefined;
+      send(size, 'resizePending');
+    }
+    if (!queue.inputPending && queue.input.length) {
+      const input = queue.input.shift()!;
+      const bytes = new TextEncoder().encode(input.data).byteLength;
+      queue.bytes -= bytes;
+      this.terminalBytes -= bytes;
+      send(input, 'inputPending');
+    }
+  }
   terminalControl(command: TerminalControl) {
-    void this.call('client:terminal', [command]).catch((error: Error) =>
-      this.update({ error: error.message }),
-    );
+    if (this.state.status !== 'connected') return;
+    const queue = this.terminalQueue(command);
+    if (!queue || queue.closed) return;
+    if (command.type === 'terminal.input') {
+      if (queue.inputBlocked) return;
+      const bytes = new TextEncoder().encode(command.data).byteLength;
+      if (this.terminalBytes + bytes > 1024 * 1024 || queue.input.length >= 256) {
+        this.terminalBytes -= queue.bytes;
+        queue.input = [];
+        queue.bytes = 0;
+        queue.inputBlocked = true;
+        this.update({
+          error: '终端粘贴过大，未发送的输入已丢弃；请关闭后重新打开终端并分段粘贴。',
+        });
+        return;
+      }
+      queue.input.push(command);
+      queue.bytes += bytes;
+      this.terminalBytes += bytes;
+    } else if (command.type === 'terminal.ack') queue.ack += command.bytes;
+    else queue.resize = command;
+    this.pumpTerminal(command.sessionId, command.terminalId, queue);
   }
   clearRemoteError() {
     void this.call('client:clear-error', []).catch((error: Error) =>
@@ -747,6 +879,11 @@ export class RemoteClient extends ProxyClient {
     );
   }
   update(values: Partial<ClientState>) {
+    if (
+      ('connectionId' in values && values.connectionId !== this.state.connectionId) ||
+      (values.status && values.status !== 'connected')
+    )
+      this.dropTerminals();
     super.update(values);
     if (
       Object.keys(values).length === 1 &&

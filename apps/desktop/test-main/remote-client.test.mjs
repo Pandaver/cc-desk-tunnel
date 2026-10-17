@@ -56,8 +56,16 @@ function fixture(t) {
     () => localTerminal,
     10000,
   );
-  const invoke = (method, args = [], viewId = 'one') =>
-    adapter.invoke({ id: randomUUID(), method, args, viewId });
+  const invoke = (method, args = [], viewId = 'one', wire = false) =>
+    adapter.invoke({
+      id: randomUUID(),
+      method,
+      viewId,
+      args:
+        wire || ['client:info', 'client:state', 'client:detach'].includes(method)
+          ? args
+          : [client.state.connectionId, ...args],
+    });
   const terminal = (message) => {
     for (const listener of client.terminalListeners) listener(message);
   };
@@ -202,7 +210,10 @@ test('a failed Web event publisher cannot break desktop state or terminal listen
     id: randomUUID(),
     viewId: 'one',
     method: 'client:request',
-    args: [{ type: 'terminal.open', sessionId: f.sessionId, cols: 80, rows: 24 }],
+    args: [
+      f.client.state.connectionId,
+      { type: 'terminal.open', sessionId: f.sessionId, cols: 80, rows: 24 },
+    ],
   });
   assert.equal(f.client.state.status, 'connected');
 });
@@ -497,7 +508,7 @@ test('a real desktop request timeout followed by failure releases the Web reserv
     id: 'open',
     viewId: 'one',
     method: 'client:request',
-    args: [{ type: 'terminal.open', sessionId, cols: 80, rows: 24 }],
+    args: [client.state.connectionId, { type: 'terminal.open', sessionId, cols: 80, rows: 24 }],
   });
   const rejected = assert.rejects(pending, /结果尚未确认/);
   t.mock.timers.tick(10000);
@@ -563,6 +574,8 @@ async function browser(t, f, count = 1) {
     static OPEN = 1;
     readyState = 0;
     sent = [];
+    delayTerminal = false;
+    responses = [];
     constructor(url) {
       this.viewId = new URL(url).searchParams.get('view');
       sockets.push(this);
@@ -574,8 +587,13 @@ async function browser(t, f, count = 1) {
     send(text) {
       const value = JSON.parse(text);
       this.sent.push(value);
-      void f.invoke(value.method, value.args, this.viewId).then(
-        (result) => this.message({ type: 'response', id: value.id, ok: true, result }),
+      void f.invoke(value.method, value.args, this.viewId, true).then(
+        (result) => {
+          const respond = () => this.message({ type: 'response', id: value.id, ok: true, result });
+          if (this.delayTerminal && value.method === 'client:terminal')
+            this.responses.push(respond);
+          else respond();
+        },
         (error) =>
           this.message({ type: 'response', id: value.id, ok: false, error: error.message }),
       );
@@ -805,4 +823,121 @@ test('a missing state revision closes only the browser transport', async (t) => 
   assert.equal(b.sockets[0].readyState, 3);
   assert.equal(f.client.state.status, 'connected');
   assert.equal(b.client.state.status, 'reconnecting');
+});
+
+test('operations are bound to their issuing service connection, with state and detach exempt', async (t) => {
+  const f = fixture(t);
+  const b = await browser(t, f);
+  const old = b.client.state.connectionId;
+  f.client.update({ connectionId: randomUUID() });
+  for (const [method, args] of [
+    ['client:request', [{ type: 'account.logout' }]],
+    ['client:fetch', [{ type: 'settings.update', values: {} }]],
+    ['client:select', [f.sessionId]],
+    ['client:load-earlier', [f.sessionId]],
+    [
+      'client:terminal',
+      [{ type: 'terminal.input', sessionId: f.sessionId, terminalId: randomUUID(), data: 'x' }],
+    ],
+    ['client:clear-error', []],
+  ])
+    await assert.rejects(f.invoke(method, [old, ...args], 'browser-0', true), /连接已变化/);
+  assert.equal(f.calls.length, 0);
+  await f.invoke('client:state', [], 'browser-0', true);
+  await b.client.request({ type: 'account.logout' });
+  assert.equal(f.calls.at(-1).type, 'account.logout');
+  await f.invoke('client:detach', [], 'browser-0', true);
+});
+
+async function queuedTerminal(t) {
+  const f = fixture(t);
+  const b = await browser(t, f);
+  const terminalId = randomUUID();
+  f.handle((command) => {
+    if (command.type === 'terminal.open')
+      f.terminal({ type: 'terminal.opened', sessionId: f.sessionId, terminalId });
+  });
+  await b.client.request({ type: 'terminal.open', sessionId: f.sessionId, cols: 80, rows: 24 });
+  const socket = b.sockets[0];
+  socket.delayTerminal = true;
+  const input = (data) =>
+    b.client.terminalControl({ type: 'terminal.input', sessionId: f.sessionId, terminalId, data });
+  const ack = (bytes) =>
+    b.client.terminalControl({ type: 'terminal.ack', sessionId: f.sessionId, terminalId, bytes });
+  const resize = (cols) =>
+    b.client.terminalControl({
+      type: 'terminal.resize',
+      sessionId: f.sessionId,
+      terminalId,
+      cols,
+      rows: 24,
+    });
+  return { f, b, socket, terminalId, input, ack, resize };
+}
+
+test('terminal input has ordered backpressure while acknowledgements and latest resize keep moving', async (t) => {
+  const { f, b, socket, input, ack, resize } = await queuedTerminal(t);
+  for (let n = 0; n < 80; n++) input(String(n));
+  for (let n = 0; n < 20; n++) ack(16 * 1024);
+  for (let n = 80; n < 100; n++) resize(n);
+  await turn();
+  assert.equal(f.calls.filter((x) => x.type === 'terminal.input').length, 1);
+  assert.equal(f.calls.filter((x) => x.type === 'terminal.ack').length, 1);
+  assert.equal(f.calls.filter((x) => x.type === 'terminal.resize').length, 1);
+  for (let n = 0; n < 100 && (socket.responses.length || b.client.terminalBytes); n++) {
+    assert.ok(b.client.requests.size <= 3);
+    for (const respond of socket.responses.splice(0)) respond();
+    await turn();
+  }
+  assert.deepEqual(
+    f.calls.filter((x) => x.type === 'terminal.input').map((x) => x.data),
+    Array.from({ length: 80 }, (_, n) => String(n)),
+  );
+  const acks = f.calls.filter((x) => x.type === 'terminal.ack');
+  assert.equal(
+    acks.reduce((sum, x) => sum + x.bytes, 0),
+    20 * 16 * 1024,
+  );
+  assert.ok(acks.every((x) => x.bytes <= 256 * 1024));
+  assert.equal(f.calls.filter((x) => x.type === 'terminal.resize').at(-1).cols, 99);
+  assert.equal(b.client.terminalBytes, 0);
+});
+
+for (const reason of ['disconnect', 'connection replacement', 'explicit close', 'terminal exit']) {
+  test(`queued terminal input is discarded without replay after ${reason}`, async (t) => {
+    const { f, b, socket, terminalId, input } = await queuedTerminal(t);
+    for (let n = 0; n < 20; n++) input(String(n));
+    await turn();
+    if (reason === 'disconnect') {
+      socket.close();
+      b.client.retryNow();
+      await turn();
+      b.sockets.at(-1).open();
+    } else if (reason === 'connection replacement') {
+      f.client.update({ connectionId: randomUUID() });
+      f.adapter.flush();
+    } else if (reason === 'explicit close') {
+      await b.client.request({ type: 'terminal.close', sessionId: f.sessionId, terminalId });
+    } else f.terminal({ type: 'terminal.closed', sessionId: f.sessionId, terminalId, exitCode: 0 });
+    for (const respond of socket.responses.splice(0)) respond();
+    await turn();
+    assert.equal(f.calls.filter((x) => x.type === 'terminal.input').length, 1);
+    assert.equal(b.client.terminalBytes, 0);
+  });
+}
+
+test('oversized paste bounds memory, discards the suffix and preserves output flow control', async (t) => {
+  const { f, b, socket, input, ack, resize } = await queuedTerminal(t);
+  for (let n = 0; n < 300; n++) input('x'.repeat(4096));
+  assert.equal(b.client.terminalBytes, 0);
+  assert.match(b.client.state.error, /粘贴过大/);
+  ack(16384);
+  resize(100);
+  await turn();
+  for (const respond of socket.responses.splice(0)) respond();
+  await turn();
+  input('must-not-send-a-tail');
+  assert.equal(f.calls.filter((x) => x.type === 'terminal.input').length, 1);
+  assert.equal(f.calls.filter((x) => x.type === 'terminal.ack').length, 1);
+  assert.equal(f.calls.filter((x) => x.type === 'terminal.resize').at(-1).cols, 100);
 });
