@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { request } from 'node:http';
+import { syncBuiltinESMExports } from 'node:module';
+import os from 'node:os';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -133,6 +135,47 @@ test('HTTP and WebSocket reject missing credentials, cross-origin access and amb
   assert.equal((await http(server, '/api/info', { cookie: `${cookie}; ${cookie}` })).status, 401);
   await assert.rejects(connect(server), /401/);
   await assert.rejects(connect(server, cookie, 'http://untrusted.example'), /403/);
+});
+
+test('a running listener accepts current local interfaces but not removed addresses or arbitrary hosts', async (t) => {
+  let addresses = [{ family: 'IPv4', address: '192.0.2.10' }];
+  const mocked = t.mock.method(os, 'networkInterfaces', () => ({ lan: addresses }));
+  syncBuiltinESMExports();
+  t.after(() => {
+    mocked.mock.restore();
+    syncBuiltinESMExports();
+  });
+  const server = await start(t);
+  const cookie = await pair(server);
+  const host = (address) => `${address}:${server.port}`;
+  const local = (address) =>
+    http(server, '/api/info', {
+      cookie,
+      headers: { Host: host(address), Origin: `http://${host(address)}` },
+    });
+  assert.equal((await local('192.0.2.10')).status, 200);
+  addresses = [
+    { family: 'IPv4', address: '192.0.2.20' },
+    { family: 'IPv6', address: '2001:db8::20' },
+  ];
+  assert.equal((await local('192.0.2.20')).status, 200);
+  assert.equal((await local('[2001:db8::20]')).status, 200);
+  assert.equal((await local('192.0.2.10')).status, 403);
+  assert.equal((await local('192.0.2.99')).status, 403);
+  assert.equal((await local('untrusted.example')).status, 403);
+  assert.equal(
+    (await http(server, '/api/info', { cookie, headers: { Host: host('192.0.2.20') } })).status,
+    403,
+  );
+  const socket = new WebSocket(`${server.url.replace('http:', 'ws:')}/api/control`, {
+    origin: `http://${host('192.0.2.20')}`,
+    headers: { Cookie: cookie, Host: host('192.0.2.20') },
+  });
+  socket.on('error', () => {});
+  await once(socket, 'open');
+  const echoed = once(socket, 'message');
+  socket.send('new interface');
+  assert.equal((await echoed)[0].toString(), 'new interface');
 });
 
 test('revoking one browser closes all its sockets and leaves other browsers usable', async (t) => {

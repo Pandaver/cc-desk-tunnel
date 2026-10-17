@@ -109,11 +109,16 @@ export async function startWebServer({
     throw new Error('Invalid session cookie name.');
   const root = await realpath(resolve(distDirectory));
   if (!(await stat(root)).isDirectory()) throw new Error('The web directory is not a directory.');
-  const names = new Set(['localhost', '127.0.0.1', '[::1]']);
-  for (const interfaces of Object.values(networkInterfaces()))
-    for (const entry of interfaces ?? [])
-      if (entry.family === 'IPv4') names.add(entry.address);
-      else if (!entry.address.includes('%')) names.add(`[${entry.address}]`);
+  const loopbackNames = new Set(['localhost', '127.0.0.1', '[::1]']);
+  function localNames() {
+    const names = new Set(loopbackNames);
+    for (const interfaces of Object.values(networkInterfaces()))
+      for (const entry of interfaces ?? [])
+        if (entry.family === 'IPv4') names.add(entry.address);
+        else if (!entry.address.includes('%')) names.add(`[${entry.address}]`);
+    return names;
+  }
+  const names = localNames();
   if (!['0.0.0.0', '::'].includes(host) && !names.has(host) && !names.has(`[${host}]`))
     throw new Error('The web listener must bind a local interface address or localhost.');
 
@@ -141,7 +146,12 @@ export async function startWebServer({
       throw failure(403, 'Untrusted host.');
     }
     if (address.host !== authority.toLowerCase()) throw failure(403, 'Untrusted host.');
-    if (!names.has(address.hostname) || Number(address.port || 80) !== actualPort)
+    // A wildcard listener survives DHCP/VPN changes. Check the current local interfaces rather
+    // than keeping addresses that disappeared or rejecting a newly joined interface until restart.
+    if (
+      Number(address.port || 80) !== actualPort ||
+      (!loopbackNames.has(address.hostname) && !localNames().has(address.hostname))
+    )
       throw failure(403, 'Untrusted host.');
     return address.origin;
   }
