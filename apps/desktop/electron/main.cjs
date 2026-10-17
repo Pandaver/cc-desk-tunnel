@@ -41,6 +41,8 @@ let webAuthentication;
 let webConfiguration;
 let webControl;
 let webRequests;
+let webRelay;
+let lastLogin;
 const handlers = new Map();
 // The last connection, kept for its installer download after a service refused this client's version.
 let lastBridge;
@@ -345,7 +347,7 @@ handle('service:upgrade', async (event, config) => {
 });
 // The service token is kept only when the user asks, encrypted for the current account of the system (DPAPI on
 // Windows, the login keychain on macOS).
-handle('login:load', () => {
+function loadLogin() {
   const { login } = readSettings();
   if (!login) return null;
   let token = '';
@@ -361,8 +363,16 @@ handle('login:load', () => {
     remember: !!token,
     autoLogin: !!token && login.autoLogin === true,
   };
-});
+}
+handle('login:load', loadLogin);
 handle('login:save', (_event, login) => {
+  // Credentials not remembered on disk may still be used by an explicitly enabled relay this launch.
+  lastLogin = {
+    url: String(login?.url ?? ''),
+    fingerprint: String(login?.fingerprint ?? ''),
+    token: String(login?.token ?? ''),
+    mode: login?.mode === 'local' ? 'local' : 'remote',
+  };
   const remember = login?.remember === true && safeStorage.isEncryptionAvailable();
   writeSettings({
     login: remember
@@ -770,6 +780,46 @@ handle('remote:open', async () => {
       `http://127.0.0.1:${webServer.port}/#pair=${encodeURIComponent(remoteAuthentication().token)}`,
     );
 });
+function relay() {
+  webRelay ??= require('./web-relay-lifecycle.cjs').createWebRelayLifecycle({
+    start: async (options) => {
+      const { startWebRelay } = await import('./desktop-web.mjs');
+      return startWebRelay({
+        ...options,
+        deviceId: createHash('sha256')
+          .update(`${handlers.get('device:get')().id}\0${connectionId}`)
+          .digest('hex')
+          .slice(0, 32),
+        resolveProxy: (url) => session.defaultSession.resolveProxy(url),
+      });
+    },
+    changed: (status) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      if (window && !window.webContents.isDestroyed())
+        window.webContents.send('relay:changed', status);
+    },
+  });
+  return webRelay;
+}
+handle('relay:status', () => relay().status);
+handle('relay:configure', (_event, enabled) =>
+  queueRemote(async () => {
+    if (typeof enabled !== 'boolean') throw new Error('Invalid relay configuration');
+    if (!enabled) return relay().disable();
+    if (!webServer) throw new Error('请先启用 Web 工作台。');
+    return relay().enable(lastLogin ?? loadLogin(), webServer.port);
+  }),
+);
+handle('relay:open', () =>
+  queueRemote(async () => {
+    const status = relay().status;
+    if (!webServer || status.state !== 'online' || !status.url)
+      throw new Error('服务端访问尚未就绪，请稍后重试。');
+    const url = new URL(status.url);
+    url.hash = `pair=${encodeURIComponent(remoteAuthentication().token)}`;
+    await shell.openExternal(url.href);
+  }),
+);
 function queueRemote(operation) {
   const next = webConfigurationTasks.then(() => {
     if (quitting) throw new Error('The application is quitting');
@@ -824,6 +874,7 @@ async function startRemoteListener(configuration) {
     port: configuration.port,
     distDirectory: path.join(__dirname, '../dist'),
     authStore: remoteAuthentication(),
+    relayContext: (request) => webRelay?.context(request) ?? null,
     // Cookies are shared across ports on one host. Each connection keeps its own stable name,
     // so opening another connection's Web page never replaces this profile's browser login.
     cookieName: `ccdt_web_session_${createHash('sha256').update(settingsPath()).digest('hex').slice(0, 16)}`,
@@ -864,6 +915,7 @@ async function configureRemote(values) {
       webConfiguration = { ...previous, enabled: false };
     }
     // Explicit shutdown is never held hostage by a preferences write failure.
+    await webRelay?.disable();
     webServer = null;
     await old?.close();
     changedRemoteEnabled();
@@ -876,6 +928,7 @@ async function configureRemote(values) {
   // short rebind, so retain the complete previous configuration and restore it on any failure.
   const rebind = old && configuration.port === previous.port;
   if (rebind) {
+    await webRelay?.pause();
     await old.close();
     webServer = null;
   }
@@ -888,17 +941,21 @@ async function configureRemote(values) {
     if (rebind && !quitting) {
       try {
         webServer = await startRemoteListener(previous);
+        await webRelay?.resume(webServer.port);
       } catch {
+        await webRelay?.disable();
         changedRemoteEnabled();
         throw new Error('应用失败，原端口暂未恢复；已保留原设置，请重新启用。');
       }
     }
     throw error;
   }
+  if (!rebind) await webRelay?.pause();
   webServer = candidate;
   webConfiguration = configuration;
   changedRemoteEnabled();
   if (!rebind) await old?.close();
+  await webRelay?.resume(webServer.port);
   return remoteStatus();
 }
 
@@ -1070,13 +1127,14 @@ let quitting = false;
 let exiting = false;
 app.on('before-quit', (event) => {
   quitting = true;
-  if (exiting || !bridge) return;
+  if (exiting || (!bridge && !webRelay?.status.enabled)) return;
   event.preventDefault();
   exiting = true;
-  bridge.close().finally(() => app.quit());
+  void Promise.allSettled([bridge?.close(), webRelay?.disable()]).finally(() => app.quit());
 });
 app.on('window-all-closed', () => app.quit());
 app.on('quit', () => {
+  void webRelay?.disable();
   void webServer?.close();
   webRequests?.cancel();
   if (ownsInstance) connections.mark(base, connectionId, false);

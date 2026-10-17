@@ -97,6 +97,7 @@ export async function startWebServer({
   token,
   authStore,
   cookieName = COOKIE,
+  relayContext = () => undefined,
   getInfo = async () => ({}),
   invoke = async () => {
     throw new Error('Unsupported remote operation.');
@@ -136,7 +137,25 @@ export async function startWebServer({
   const reading = { bytes: 0 };
   let closePromise;
 
+  const relayContexts = new WeakMap();
+  function relayOf(request) {
+    if (relayContexts.has(request)) return relayContexts.get(request);
+    // Only the desktop's live relay controller can grant this context. Forwarding headers from
+    // a LAN caller, an old relay connection or an unrelated reverse proxy grant nothing.
+    const context = relayContext(request);
+    if (!context && Object.keys(request.headers).some((name) => name.startsWith('x-ccdt-relay-')))
+      throw failure(403, 'Untrusted relay.');
+    relayContexts.set(request, context);
+    return context;
+  }
+
   function originOf(request) {
+    const relay = relayOf(request);
+    if (relay) {
+      if (request.headers.host?.toLowerCase() !== new URL(relay.origin).host)
+        throw failure(403, 'Untrusted host.');
+      return relay.origin;
+    }
     const authority = request.headers.host;
     if (!authority || /[\s/@\\]/.test(authority)) throw failure(403, 'Untrusted host.');
     let address;
@@ -169,7 +188,7 @@ export async function startWebServer({
   function limit(request, area) {
     // Several browsers may share one source IP. Keep unauthenticated assets/login separate,
     // and never charge their traffic to an authenticated session.
-    const key = `${area}:${request.socket.remoteAddress ?? 'unknown'}`;
+    const key = `${area}:${relayOf(request)?.address ?? request.socket.remoteAddress ?? 'unknown'}`;
     const now = Date.now();
     let record = rates.get(key);
     if (!record) {
@@ -204,9 +223,10 @@ export async function startWebServer({
     session.sockets.clear();
   }
   function currentSession(request) {
+    const name = sessionCookieName(request);
     const cookies = (request.headers.cookie ?? '').split(';').map((part) => part.trim());
-    const values = cookies.filter((part) => part.startsWith(`${cookieName}=`));
-    const id = values.length === 1 ? values[0].slice(cookieName.length + 1) : '';
+    const values = cookies.filter((part) => part.startsWith(`${name}=`));
+    const id = values.length === 1 ? values[0].slice(name.length + 1) : '';
     const saved = auth.get(id);
     if (!saved) {
       disconnectSession(id);
@@ -219,9 +239,19 @@ export async function startWebServer({
     }
     return { id, session };
   }
-  function cookie(id, expiresAt = 0) {
+  function sessionCookieName(request) {
+    // Cookies ignore ports: a local root cookie and a relay path cookie can coexist on the
+    // same host. HTTP also cannot replace an existing Secure cookie after an entrance switches
+    // from HTTPS. Separate names keep both grants usable without revoking the local grant.
+    const relay = relayOf(request);
+    return relay
+      ? `${cookieName}_relay_${relay.origin.startsWith('https:') ? 'https' : 'http'}`
+      : cookieName;
+  }
+  function cookie(request, id, expiresAt = 0) {
     const remaining = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
-    return `${cookieName}=${id}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${remaining}; Expires=${new Date(expiresAt).toUTCString()}`;
+    const relay = relayOf(request);
+    return `${sessionCookieName(request)}=${id}; Path=${relay?.basePath ?? '/'}; HttpOnly; SameSite=Strict; Max-Age=${remaining}; Expires=${new Date(expiresAt).toUTCString()}${relay?.origin.startsWith('https:') ? '; Secure' : ''}`;
   }
   function json(response, status, value) {
     if (response.destroyed || response.writableEnded) return;
@@ -300,7 +330,7 @@ export async function startWebServer({
         } catch {}
         const { id, expiresAt } = auth.issue(previous, browserLabel(request.headers['user-agent']));
         rate.failures = 0;
-        response.setHeader('Set-Cookie', cookie(id, expiresAt));
+        response.setHeader('Set-Cookie', cookie(request, id, expiresAt));
         json(response, 200, { ok: true });
       } else if (path.startsWith('/api/')) {
         const { id, session } = currentSession(request);
@@ -308,7 +338,7 @@ export async function startWebServer({
         if (path === '/api/logout' && request.method === 'POST') {
           await body(request);
           auth.revoke(id);
-          response.setHeader('Set-Cookie', cookie(''));
+          response.setHeader('Set-Cookie', cookie(request, ''));
           json(response, 200, { ok: true });
         } else if (path === '/api/info' && request.method === 'GET') {
           const info = await getInfo();

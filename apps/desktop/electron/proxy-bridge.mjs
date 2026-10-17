@@ -45,7 +45,7 @@ export function connectionWaits(values) {
 // Starts TLS with the service, through the system's HTTP proxy when the Windows settings name one for it. The proxy
 // only relays bytes: the certificate is still the service's own and is judged as on a direct connection.
 // `route`, when given, is told the proxy that was used, for the words of a failure.
-export async function connectService(address, config, resolveProxy, route) {
+export async function connectService(address, config, resolveProxy, route, signal) {
   const port = Number(address.port || 443);
   const proxy = httpProxy(await resolveProxy?.(`https://${address.hostname}:${port}`));
   if (route) route.proxy = proxy;
@@ -54,7 +54,12 @@ export async function connectService(address, config, resolveProxy, route) {
     address.hostname,
     port,
     connectionWaits(config.waits).connect,
+    signal,
   );
+  if (signal?.aborted) {
+    socket.destroy();
+    throw signal.reason;
+  }
   // Lets the system notice a path that has gone, where something on the way would otherwise drop a quiet
   // connection without a word.
   socket.setKeepAlive(true, 30000);

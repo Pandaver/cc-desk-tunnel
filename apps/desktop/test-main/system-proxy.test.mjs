@@ -80,6 +80,34 @@ test('a refusing or silent proxy fails the connection instead of leaving it open
   );
 });
 
+test('optional cancellation rejects pending TCP dials but does not own a completed socket', async (t) => {
+  const sockets = new Set();
+  const echo = await listen((socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+    socket.pipe(socket);
+  });
+  t.after(() => {
+    for (const socket of sockets) socket.destroy();
+    echo.close();
+  });
+  const cancelled = new AbortController();
+  cancelled.abort();
+  await assert.rejects(openSocket(null, '127.0.0.1', echo.address().port, 1000, cancelled.signal), {
+    name: 'AbortError',
+  });
+  const pending = new AbortController();
+  const connecting = openSocket(null, '127.0.0.1', echo.address().port, 1000, pending.signal);
+  pending.abort();
+  await assert.rejects(connecting, { name: 'AbortError' });
+  const ready = new AbortController();
+  const socket = await openSocket(null, '127.0.0.1', echo.address().port, 1000, ready.signal);
+  ready.abort();
+  socket.write('still-owned-by-caller');
+  assert.equal(String((await once(socket, 'data'))[0]), 'still-owned-by-caller');
+  socket.destroy();
+});
+
 // A throwaway certificate made in memory by PowerShell; nothing enters the Windows certificate store.
 async function selfSigned() {
   const script = `$key = [Security.Cryptography.RSA]::Create(2048)

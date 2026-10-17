@@ -37,6 +37,18 @@
   overflow-wrap: anywhere;
   user-select: text;
 }
+.remote-control .relay-address-row {
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+.relay-address-row > span:first-child {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.relay-address-row > .remote-address {
+  flex: 1 1 360px;
+  justify-content: flex-end;
+}
 .remote-control .remote-pairing-row {
   align-items: center;
   flex-wrap: nowrap;

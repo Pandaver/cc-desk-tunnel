@@ -7,21 +7,32 @@ export function httpProxy(answer) {
   return match ? { host: match[1], port: Number(match[2]) } : null;
 }
 // A TCP connection to the target, tunnelled through the proxy's CONNECT method when there is one.
-export function openSocket(proxy, host, port, timeoutMs = 15000) {
+export function openSocket(proxy, host, port, timeoutMs = 15000, signal) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
     const socket = connect(proxy ?? { host, port });
+    let settled = false;
+    const cancelled = () => fail(signal.reason);
     const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', cancelled);
       socket.destroy();
       reject(error);
     };
     const ready = () => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', cancelled);
       socket.setTimeout(0);
       socket.off('error', fail);
       resolve(socket);
     };
     socket.setTimeout(timeoutMs, () => fail(new Error('Connection timed out')));
     socket.once('error', fail);
+    signal?.addEventListener('abort', cancelled, { once: true });
     socket.once('connect', () => {
+      if (settled) return;
       if (!proxy) return ready();
       socket.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n\r\n`);
       // The target stays silent until this side starts TLS, so the answer is all that arrives here.

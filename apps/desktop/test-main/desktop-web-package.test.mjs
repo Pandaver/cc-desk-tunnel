@@ -36,6 +36,7 @@ test(
         'desktop-web.mjs',
         'web-auth.cjs',
         'web-requests.cjs',
+        'web-relay-lifecycle.cjs',
       ])
         assert.ok((await stat(path.join(app, 'electron', file))).size > 0, `${file} is staged`);
 
@@ -46,8 +47,13 @@ test(
       assert.equal(typeof bridge.openProxyBridge, 'function');
       assert.equal(typeof bridge.upgradeService, 'function');
       const runtime = await import(pathToFileURL(path.join(app, 'electron/desktop-web.mjs')).href);
-      assert.deepEqual(Object.keys(runtime).sort(), ['createWebControl', 'startWebServer']);
+      assert.deepEqual(Object.keys(runtime).sort(), [
+        'createWebControl',
+        'startWebRelay',
+        'startWebServer',
+      ]);
       assert.equal(typeof runtime.createWebControl, 'function');
+      assert.equal(typeof runtime.startWebRelay, 'function');
       assert.equal(typeof runtime.startWebServer, 'function');
       const control = runtime.createWebControl(async () => null);
       assert.equal(typeof control.attach, 'function');

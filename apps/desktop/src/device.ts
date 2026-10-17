@@ -1,3 +1,4 @@
+import { browserStorageKey } from './browser-path.ts';
 import { platformOf } from '@cc-desk-tunnel/protocol';
 import type { Device, Session } from '@cc-desk-tunnel/protocol';
 import { pathKey } from './paths.ts';
@@ -9,8 +10,8 @@ export async function thisDevice(): Promise<Device> {
     const { platform } = window.desktop;
     return { ...(await window.desktop.device()), ...(platform === 'win32' ? {} : { platform }) };
   }
-  const id = localStorage.getItem('proxy-device') ?? crypto.randomUUID();
-  localStorage.setItem('proxy-device', id);
+  const id = localStorage.getItem(browserStorageKey('proxy-device')) ?? crypto.randomUUID();
+  localStorage.setItem(browserStorageKey('proxy-device'), id);
   return { id, name: '浏览器' };
 }
 // A session is on this computer when its project directory is; one from before computers were told apart

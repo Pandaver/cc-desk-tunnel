@@ -6,6 +6,10 @@ declare global {
       dev: boolean;
       remote?: boolean;
       remoteStatus?: () => Promise<RemoteStatus>;
+      relayStatus?: () => Promise<RelayStatus>;
+      configureRelay?: (enabled: boolean) => Promise<RelayStatus>;
+      openRelay?: () => Promise<void>;
+      onRelayChanged?: (callback: (status: RelayStatus) => void) => () => void;
       resetRemotePairing?: () => Promise<RemoteStatus>;
       revokeRemoteSession?: (id: string) => Promise<RemoteStatus>;
       onRemoteSessionsChanged?: (
@@ -145,4 +149,10 @@ export type RemoteBrowserSession = {
   label: string;
   createdAt: number;
   expiresAt: number;
+};
+export type RelayStatus = {
+  enabled: boolean;
+  state: 'disabled' | 'connecting' | 'online' | 'offline' | 'error';
+  url: string | null;
+  error: string | null;
 };

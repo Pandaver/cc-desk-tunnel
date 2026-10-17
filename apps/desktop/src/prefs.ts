@@ -1,3 +1,4 @@
+import { browserStorageKey } from './browser-path.ts';
 import { useSyncExternalStore } from 'react';
 import { onSharedChange, saveShared, shareOnce, shared } from './shared.ts';
 import { defaultView, viewModes } from './transcriptView.ts';
@@ -38,7 +39,7 @@ export type Prefs = {
   sessionBar: { enabled: boolean; summary: Record<string, boolean> };
 };
 
-const storageKey = 'proxy-prefs';
+const storageKey = browserStorageKey('proxy-prefs');
 const defaults: Prefs = {
   pinnedSessions: [],
   pinnedProjects: [],

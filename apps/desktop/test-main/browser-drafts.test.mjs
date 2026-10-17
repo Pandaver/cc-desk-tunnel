@@ -15,6 +15,26 @@ function storage(values = {}) {
   };
 }
 
+test('relay workstations keep drafts and backups separate on the same public origin', () => {
+  const backup = storage({ 'remote-drafts': JSON.stringify({ one: 'local work' }) });
+  const view = storage();
+  const firstPath = `/remote/${'a'.repeat(32)}/`;
+  const secondPath = `/remote/${'b'.repeat(32)}/`;
+  const first = createBrowserDrafts(backup, view, firstPath);
+  assert.deepEqual(first.load(), {});
+  first.save({ one: 'first workstation' });
+  const second = createBrowserDrafts(backup, view, secondPath);
+  assert.deepEqual(second.load(), {});
+  second.save({ one: 'second workstation' });
+  assert.deepEqual(createBrowserDrafts(backup, storage(), firstPath).load(), {
+    one: 'first workstation',
+  });
+  assert.deepEqual(createBrowserDrafts(backup, storage(), secondPath).load(), {
+    one: 'second workstation',
+  });
+  assert.deepEqual(createBrowserDrafts(backup, storage()).load(), { one: 'local work' });
+});
+
 test('tabs preserve independent drafts across reloads without replacing another session backup', () => {
   const backup = storage(),
     firstView = storage(),

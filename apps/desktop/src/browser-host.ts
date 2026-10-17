@@ -1,5 +1,6 @@
 import type { Device } from '@cc-desk-tunnel/protocol';
 import { createBrowserDrafts } from './browser-drafts.ts';
+import { browserApi, browserBasePath } from './browser-path.ts';
 
 export type HostInfo = {
   kind: 'desktop-web';
@@ -16,13 +17,13 @@ export class HostAccessError extends Error {
   }
 }
 export async function hostInfo(): Promise<HostInfo> {
-  const response = await fetch('/api/info', { cache: 'no-store' });
+  const response = await fetch(browserApi('info'), { cache: 'no-store' });
   if (response.status === 401) throw new HostAccessError('请使用桌面客户端显示的配对码连接。', 401);
   if (!response.ok) throw new Error('桌面客户端的 Web 服务暂时没有响应，请稍后重试。');
   return response.json();
 }
 export async function pairBrowser(token: string): Promise<HostInfo> {
-  const response = await fetch('/api/login', {
+  const response = await fetch(browserApi('login'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token }),
@@ -47,7 +48,7 @@ export async function resumeOrPairBrowser(token: string): Promise<HostInfo> {
   }
 }
 async function rpc<T>(method: string, ...args: unknown[]): Promise<T> {
-  const response = await fetch('/api/rpc', {
+  const response = await fetch(browserApi('rpc'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ method, args }),
@@ -72,7 +73,8 @@ async function upload(file: File): Promise<string> {
 }
 export function installBrowserHost(info: HostInfo) {
   let drafts: ReturnType<typeof createBrowserDrafts> | undefined;
-  const draftStore = () => (drafts ??= createBrowserDrafts(localStorage, sessionStorage));
+  const draftStore = () =>
+    (drafts ??= createBrowserDrafts(localStorage, sessionStorage, browserBasePath()));
   // getRandomValues works on HTTP LAN origins too; randomUUID is otherwise HTTPS-only.
   if (!crypto.randomUUID)
     Object.defineProperty(crypto, 'randomUUID', {
@@ -179,7 +181,7 @@ export function installBrowserHost(info: HostInfo) {
     onNotifyClicked: subscribe,
     zoom: noop,
     quit: async () => {
-      await fetch('/api/logout', {
+      await fetch(browserApi('logout'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: '{}',
@@ -194,7 +196,7 @@ export function installBrowserHost(info: HostInfo) {
     upgradeService: desktopOnly,
     onServiceUpgrade: subscribe,
     connectProxy: async () => ({
-      url: `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/control`,
+      url: `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}${browserApi('control')}`,
     }),
     disconnectProxy: noop,
     onProxyClosed: subscribe,

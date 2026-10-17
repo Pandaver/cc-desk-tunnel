@@ -4,6 +4,7 @@ import type { RemoteStatus } from './desktop.d.ts';
 import { remoteSettingsSession } from './remote-settings.ts';
 import type { RemoteChange } from './remote-settings.ts';
 import { IconButton, Modal, Switch } from './ui.tsx';
+import RelayControl from './RelayControl.tsx';
 
 const loadSettings = remoteSettingsSession({
   read: () => window.desktop!.remoteStatus!(),
@@ -34,6 +35,7 @@ export default function RemoteControl() {
   const requested = useRef({ enabled: false, lan: false });
   const portInput = useRef('17890');
   const committedPort = useRef(0);
+  const pendingPort = useRef<Promise<string> | undefined>(undefined);
 
   useEffect(() => {
     if (!window.desktop?.configureRemote) return;
@@ -98,18 +100,24 @@ export default function RemoteControl() {
     const revision = { ...versions.current };
     setSaving((count) => count + 1);
     setError('');
-    void queue.current
+    return queue.current
       .save(change)
       .then(({ status: next, error: failure }) => {
         settle(next, revision);
         setError(failure);
+        return failure;
       })
       .finally(() => setSaving((count) => count - 1));
   };
   const commitPort = () => {
-    if (committedPort.current === versions.current.port) return;
+    if (committedPort.current === versions.current.port) return pendingPort.current;
     committedPort.current = versions.current.port;
-    save({ port: Number(portInput.current) });
+    const operation = save({ port: Number(portInput.current) });
+    pendingPort.current = operation;
+    void operation?.finally(() => {
+      if (pendingPort.current === operation) pendingPort.current = undefined;
+    });
+    return operation;
   };
   const resetPairing = async () => {
     if (!queue.current || resetting) return;
@@ -130,7 +138,7 @@ export default function RemoteControl() {
   };
   const openWorkbench = async () => {
     if (!queue.current) return;
-    commitPort();
+    if (await commitPort()) return;
     const result = await queue.current.refresh();
     if (result.error) {
       setError(result.error);
@@ -170,7 +178,8 @@ export default function RemoteControl() {
             event.button === 0 &&
             document.activeElement?.id === 'remote-port' &&
             (button?.getAttribute('role') === 'switch' ||
-              button?.getAttribute('aria-label') === '打开链接')
+              button?.getAttribute('aria-label') === '打开链接' ||
+              button?.getAttribute('aria-label') === '打开服务端链接')
           )
             event.preventDefault();
         }}
@@ -296,6 +305,17 @@ export default function RemoteControl() {
             </div>
           </>
         )}
+        <RelayControl
+          enabled={enabled}
+          disabled={disabled}
+          prepare={async () => {
+            if (!queue.current) throw new Error('设置尚未读取完成，请稍后重试。');
+            const failure = await commitPort();
+            if (failure) throw new Error(failure);
+            const result = await queue.current.refresh();
+            if (result.error) throw new Error(result.error);
+          }}
+        />
         {status && (
           <>
             <div className="setting-row">

@@ -4,6 +4,14 @@ contextBridge.exposeInMainWorld('desktop', {
   remoteStatus: () => ipcRenderer.invoke('remote:status'),
   openRemote: () => ipcRenderer.invoke('remote:open'),
   configureRemote: (values) => ipcRenderer.invoke('remote:configure', values),
+  relayStatus: () => ipcRenderer.invoke('relay:status'),
+  configureRelay: (enabled) => ipcRenderer.invoke('relay:configure', enabled),
+  openRelay: () => ipcRenderer.invoke('relay:open'),
+  onRelayChanged: (callback) => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on('relay:changed', listener);
+    return () => ipcRenderer.removeListener('relay:changed', listener);
+  },
   resetRemotePairing: () => ipcRenderer.invoke('remote:reset-pairing'),
   revokeRemoteSession: (id) => ipcRenderer.invoke('remote:revoke-session', id),
   onRemoteSessionsChanged: (callback) => {

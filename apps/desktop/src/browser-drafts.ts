@@ -1,7 +1,5 @@
 import type { Drafts } from './drafts.ts';
 
-const viewKey = 'remote-drafts';
-const backupPrefix = 'remote-draft:';
 type StorageArea = Pick<Storage, 'getItem' | 'setItem' | 'removeItem' | 'key' | 'length'>;
 
 function read(text: string | null): Drafts {
@@ -20,7 +18,10 @@ function read(text: string | null): Drafts {
 
 // Each tab keeps its own draft map across reloads. Per-session backups let a new tab recover the
 // browser's latest edits without one tab replacing another session's saved work as a whole map.
-export function createBrowserDrafts(backup: StorageArea, view: StorageArea) {
+export function createBrowserDrafts(backup: StorageArea, view: StorageArea, basePath = '/') {
+  const prefix = basePath === '/' ? '' : `${basePath}:`;
+  const viewKey = `${prefix}remote-drafts`;
+  const backupPrefix = `${prefix}remote-draft:`;
   let previous: Drafts | undefined;
   function load(): Drafts {
     const legacy = backup.getItem(viewKey);

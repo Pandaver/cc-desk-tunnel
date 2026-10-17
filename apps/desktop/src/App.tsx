@@ -1,3 +1,4 @@
+import { browserStorageKey, browserApi } from './browser-path.ts';
 import {
   lazy,
   Suspense,
@@ -105,7 +106,7 @@ const narrow = () => matchMedia('(max-width: 700px)').matches;
 // The computer's projects, which the windows of its connections share (see shared.ts).
 function savedProjects(value: unknown = shared('projects')): string[] {
   try {
-    value ??= JSON.parse(localStorage.getItem('proxy-projects') ?? '[]');
+    value ??= JSON.parse(localStorage.getItem(browserStorageKey('proxy-projects')) ?? '[]');
     return Array.isArray(value)
       ? value.filter((item): item is string => typeof item === 'string')
       : [];
@@ -129,7 +130,7 @@ export function App() {
   );
   const state = useSyncExternalStore(client.subscribe, client.getSnapshot);
   const [form, setForm] = useState<ConnectionForm>(() => ({
-    url: localStorage.getItem('proxy-url') ?? 'ws://127.0.0.1:8787/ws',
+    url: localStorage.getItem(browserStorageKey('proxy-url')) ?? 'ws://127.0.0.1:8787/ws',
     token: '',
     fingerprint: '',
     mode: window.desktop ? 'remote' : 'local',
@@ -487,7 +488,7 @@ export function App() {
     if (connected) void window.desktop?.workspaceRoots().then(setWorkspaceRoots);
   }, [connected]);
   useEffect(() => {
-    localStorage.setItem('proxy-projects', JSON.stringify(projects));
+    localStorage.setItem(browserStorageKey('proxy-projects'), JSON.stringify(projects));
     saveShared('projects', projects);
   }, [projects]);
   useEffect(
@@ -576,7 +577,7 @@ export function App() {
       } else {
         client.connect(form.url, form.token, await thisDevice());
       }
-      localStorage.setItem('proxy-url', form.url);
+      localStorage.setItem(browserStorageKey('proxy-url'), form.url);
     } catch (error) {
       if (form.mode === 'remote') await window.desktop?.disconnectProxy();
       setError(error instanceof Error ? error.message : '连接失败。');
@@ -593,7 +594,7 @@ export function App() {
   }
   function disconnect() {
     if (window.desktop?.remote) {
-      void fetch('/api/logout', {
+      void fetch(browserApi('logout'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: '{}',

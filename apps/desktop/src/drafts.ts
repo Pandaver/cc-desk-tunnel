@@ -1,9 +1,10 @@
+import { browserStorageKey } from './browser-path.ts';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 // Unsent text is the user's work: it is kept per session and written to disk shortly after every edit,
 // so switching sessions, closing the window or a crash does not lose it.
 export type Drafts = Record<string, string>;
-const storageKey = 'proxy-drafts';
+const storageKey = browserStorageKey('proxy-drafts');
 const delay = 300;
 
 function clean(value: unknown): Drafts {

@@ -1,3 +1,4 @@
+import { browserStorageKey } from './browser-path.ts';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { effortSchema } from '@cc-desk-tunnel/protocol';
 import type { Effort } from '@cc-desk-tunnel/protocol';
@@ -166,8 +167,8 @@ export function taskMessage(task: Task, due: number) {
   return `[定时任务「${task.name}」· 计划时间 ${stamp(due)}]\n\n${task.prompt}`;
 }
 
-const storageKey = 'proxy-schedules';
-const progressKey = 'proxy-schedule-progress';
+const storageKey = browserStorageKey('proxy-schedules');
+const progressKey = browserStorageKey('proxy-schedule-progress');
 function readProgress(): Progress {
   try {
     const value = JSON.parse(localStorage.getItem(progressKey) ?? '{}');

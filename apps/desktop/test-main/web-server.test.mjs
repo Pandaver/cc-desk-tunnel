@@ -89,6 +89,178 @@ async function connect(server, cookie, origin = server.url) {
   return socket;
 }
 
+test('relay context preserves public origin checks and scopes HTTPS cookies without trusting LAN headers', async (t) => {
+  const origin = 'https://workbench.example';
+  const basePath = `/remote/${'a'.repeat(32)}/`;
+  let enabled = true;
+  const server = await start(t, {
+    relayContext: (request) =>
+      enabled && request.headers['x-ccdt-relay-key'] === 'test-relay-key'
+        ? { origin, basePath, address: '192.0.2.25' }
+        : undefined,
+  });
+  const headers = {
+    Host: 'workbench.example',
+    Origin: origin,
+    'x-ccdt-relay-key': 'test-relay-key',
+  };
+  assert.equal((await http(server, '/', { headers })).status, 200);
+  const paired = await http(server, '/api/login', {
+    method: 'POST',
+    body: { token: server.authStore.token },
+    headers,
+  });
+  assert.equal(paired.status, 200);
+  assert.ok(paired.headers['set-cookie'][0].includes(`Path=${basePath};`));
+  assert.match(paired.headers['set-cookie'][0], /; Secure$/);
+  const cookie = paired.headers['set-cookie'][0].split(';')[0];
+  assert.equal((await http(server, '/api/info', { headers, cookie })).status, 200);
+  assert.equal(
+    (
+      await http(server, '/api/info', {
+        headers: { ...headers, Origin: 'https://other.example' },
+        cookie,
+      })
+    ).status,
+    403,
+  );
+  assert.equal(
+    (await http(server, '/api/info', { headers: { ...headers, Host: 'other.example' }, cookie }))
+      .status,
+    403,
+  );
+  const logout = await http(server, '/api/logout', { method: 'POST', body: {}, headers, cookie });
+  assert.equal(logout.status, 200);
+  assert.ok(logout.headers['set-cookie'][0].includes(`Path=${basePath};`));
+  enabled = false;
+  assert.equal((await http(server, '/', { headers })).status, 403);
+  assert.equal((await http(server, '/')).status, 200);
+});
+
+test('disabled relay refuses injected context headers even with an otherwise local Host', async (t) => {
+  const server = await start(t);
+  for (const headers of [{ 'x-ccdt-relay-key': 'forged' }, { 'x-ccdt-relay-address': '192.0.2.1' }])
+    assert.equal((await http(server, '/', { headers })).status, 403);
+  const paired = await http(server, '/api/login', {
+    method: 'POST',
+    body: { token: server.authStore.token },
+  });
+  assert.equal(paired.status, 200);
+  assert.ok(paired.headers['set-cookie'][0].includes('Path=/;'));
+  assert.ok(!paired.headers['set-cookie'][0].includes('; Secure'));
+});
+
+test('local and relay cookies on one hostname remain distinct even when the browser sends both', async (t) => {
+  const origin = 'http://127.0.0.1:8787';
+  const server = await start(t, {
+    relayContext: (request) =>
+      request.headers['x-ccdt-relay-key'] === 'test-key'
+        ? { origin, basePath: `/remote/${'a'.repeat(32)}/`, address: '192.0.2.1' }
+        : undefined,
+  });
+  const local = await pair(server);
+  const headers = { Host: new URL(origin).host, Origin: origin, 'x-ccdt-relay-key': 'test-key' };
+  const remote = await http(server, '/api/login', {
+    method: 'POST',
+    body: { token: server.authStore.token },
+    headers,
+    cookie: local,
+  });
+  assert.equal(remote.status, 200);
+  const relay = remote.headers['set-cookie'][0].split(';')[0];
+  assert.notEqual(relay.split('=')[0], local.split('=')[0]);
+  assert.equal(server.authStore.list().length, 2);
+  assert.equal(
+    (await http(server, '/api/info', { headers, cookie: `${relay}; ${local}` })).status,
+    200,
+  );
+  assert.equal((await http(server, '/api/info', { cookie: local })).status, 200);
+  assert.equal(
+    (
+      await http(server, '/api/logout', {
+        method: 'POST',
+        body: {},
+        headers,
+        cookie: `${relay}; ${local}`,
+      })
+    ).status,
+    200,
+  );
+  assert.equal((await http(server, '/api/info', { cookie: local })).status, 200);
+});
+
+test('switching a relay from HTTPS to HTTP selects separate cookies and revokes only that grant', async (t) => {
+  let origin = 'https://workbench.example';
+  const basePath = `/remote/${'a'.repeat(32)}/`;
+  const server = await start(t, {
+    relayContext: (request) =>
+      request.headers['x-ccdt-relay-key'] === 'test-key'
+        ? { origin, basePath, address: '192.0.2.1' }
+        : undefined,
+  });
+  const headers = () => ({
+    Host: new URL(origin).host,
+    Origin: origin,
+    'x-ccdt-relay-key': 'test-key',
+  });
+  const local = await pair(server);
+  const secure = await http(server, '/api/login', {
+    method: 'POST',
+    body: { token: server.authStore.token },
+    headers: headers(),
+    cookie: local,
+  });
+  assert.equal(secure.status, 200);
+  assert.match(secure.headers['set-cookie'][0], /_relay_https=/);
+  assert.match(secure.headers['set-cookie'][0], /; Secure$/);
+  const httpsCookie = secure.headers['set-cookie'][0].split(';')[0];
+  // A browser may retain the earlier unqualified Secure relay cookie too. Neither is the
+  // HTTP grant, even when sent alongside it or before it in a Cookie header.
+  const legacy = httpsCookie.replace('_relay_https=', '_relay=');
+  origin = 'http://workbench.example';
+  const plain = await http(server, '/api/login', {
+    method: 'POST',
+    body: { token: server.authStore.token },
+    headers: headers(),
+    cookie: `${httpsCookie}; ${legacy}; ${local}`,
+  });
+  assert.equal(plain.status, 200);
+  assert.match(plain.headers['set-cookie'][0], /_relay_http=/);
+  assert.ok(!plain.headers['set-cookie'][0].includes('; Secure'));
+  assert.ok(plain.headers['set-cookie'][0].includes(`Path=${basePath};`));
+  const httpCookie = plain.headers['set-cookie'][0].split(';')[0];
+  const all = `${httpsCookie}; ${legacy}; ${httpCookie}; ${local}`;
+  assert.equal(server.authStore.list().length, 3);
+  assert.equal((await http(server, '/api/info', { headers: headers(), cookie: all })).status, 200);
+  assert.equal(
+    (await http(server, '/api/info', { headers: headers(), cookie: `${httpsCookie}; ${legacy}` }))
+      .status,
+    401,
+  );
+  const socket = new WebSocket(`${server.url.replace('http:', 'ws:')}/api/control`, {
+    headers: { ...headers(), Cookie: all },
+  });
+  socket.on('error', () => {});
+  await once(socket, 'open');
+  const disconnected = once(socket, 'close');
+  const logout = await http(server, '/api/logout', {
+    method: 'POST',
+    body: {},
+    headers: headers(),
+    cookie: all,
+  });
+  assert.equal(logout.status, 200);
+  assert.match(logout.headers['set-cookie'][0], /_relay_http=;/);
+  assert.match(logout.headers['set-cookie'][0], /Max-Age=0;/);
+  assert.ok(!logout.headers['set-cookie'][0].includes('; Secure'));
+  await disconnected;
+  assert.equal((await http(server, '/api/info', { headers: headers(), cookie: all })).status, 401);
+  origin = 'https://workbench.example';
+  assert.equal((await http(server, '/api/info', { headers: headers(), cookie: all })).status, 200);
+  assert.equal((await http(server, '/api/info', { cookie: local })).status, 200);
+  assert.equal(server.authStore.list().length, 2);
+});
+
 test('pairing issues a finite cookie without sliding expiry or leaking management credentials', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 0, 1) });
   const server = await start(t);

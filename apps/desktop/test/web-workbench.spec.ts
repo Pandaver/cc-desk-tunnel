@@ -2,12 +2,14 @@ import { test as base, expect, _electron } from '@playwright/test';
 import type { Browser, BrowserContext, ElectronApplication, Page } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
-import { createServer } from 'node:net';
+import { connect, createServer } from 'node:net';
+import type { Socket } from 'node:net';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
 import { nativeSettingsSchema, PROTOCOL_VERSION } from '@cc-desk-tunnel/protocol';
 import type { Session } from '@cc-desk-tunnel/protocol';
 import { DomainError } from '../../server/src/errors.ts';
+import { createProxyServer } from '../../server/src/server.ts';
 import { readInstructions, writeInstructions } from '../../server/src/native-instructions.ts';
 import { login, send, sessionAction, settled } from './helpers.ts';
 
@@ -92,7 +94,12 @@ async function enable(page: Page) {
   return { url: status.url!, token: status.token! };
 }
 
-async function pair(browser: Browser, access: { url: string; token: string }, other = false) {
+async function pair(
+  browser: Browser,
+  access: { url: string; token: string },
+  other = false,
+  prepare?: (context: BrowserContext) => Promise<void>,
+) {
   const context = await browser.newContext({
     viewport: { width: 1280, height: 900 },
     ...(other
@@ -100,6 +107,7 @@ async function pair(browser: Browser, access: { url: string; token: string }, ot
       : {}),
   });
   try {
+    await prepare?.(context);
     const page = await context.newPage();
     await page.goto(access.url);
     await page.getByLabel('配对码', { exact: true }).fill(access.token);
@@ -132,6 +140,201 @@ async function select(page: Page, title: string) {
 test.describe('Electron Web workbench', () => {
   test.skip(process.platform !== 'win32', 'Windows Electron integration');
   test.setTimeout(120_000);
+
+  test('optional service relay serves the real shared workbench and leaves local access intact', async ({
+    desktop,
+    browser,
+  }, testInfo) => {
+    const port = await unusedPort();
+    const relayPort = await unusedPort();
+    const origin = `http://127.0.0.1:${port}`;
+    const token = 'test-only-relay-service-credential';
+    // An ephemeral TCP mapping represents a deployment-selected public port in front of the fixed
+    // relay listener. Control/data connections still use the original service listener.
+    const sockets = new Set<Socket>();
+    const entry = createServer((socket) => {
+      const upstream = connect(relayPort, '127.0.0.1');
+      for (const connection of [socket, upstream]) {
+        sockets.add(connection);
+        connection.on('error', () => {
+          socket.destroy();
+          upstream.destroy();
+        });
+        connection.once('close', (hadError) => {
+          sockets.delete(connection);
+          if (hadError || !connection.readableEnded) {
+            socket.destroy();
+            upstream.destroy();
+          }
+        });
+      }
+      socket.pipe(upstream).pipe(socket);
+    });
+    let service: ReturnType<typeof createProxyServer> | undefined;
+    const contexts: BrowserContext[] = [];
+    try {
+      await new Promise<void>((resolve, reject) => {
+        entry.once('error', reject);
+        entry.listen(0, '127.0.0.1', resolve);
+      });
+      const publicPort = (entry.address() as { port: number }).port;
+      service = createProxyServer({
+        token,
+        dataDir: join(desktop.profile, 'relay-service'),
+        webRelay: { port: relayPort, publicPort },
+      });
+      await service.listen(port);
+      await create(desktop.page, desktop.project, '中继工作台');
+      // Only the saved service choice changes. The established business connection remains the
+      // existing test service; the separate relay is a real server on its own ephemeral port.
+      await desktop.page.evaluate(
+        async ({ origin, token }) => {
+          await window.desktop!.saveLogin({
+            mode: 'remote',
+            url: `${origin.replace('http:', 'ws:')}/ws`,
+            token,
+            fingerprint: '',
+            remember: false,
+            autoLogin: false,
+          });
+        },
+        { origin, token },
+      );
+      const local = await enable(desktop.page);
+      const direct = await pair(browser, local);
+      contexts.push(direct.context);
+      await expect(
+        desktop.page.getByRole('spinbutton', { name: '公网端口', exact: true }),
+      ).toHaveCount(0);
+      await expect(
+        desktop.page.getByRole('textbox', { name: '公网地址', exact: true }),
+      ).toHaveCount(0);
+      await expect(
+        desktop.page.getByRole('combobox', { name: '公网协议', exact: true }),
+      ).toHaveCount(0);
+      await desktop.page.getByRole('switch', { name: '通过服务端访问', exact: true }).click();
+      await expect
+        .poll(() =>
+          desktop.page.evaluate(() => window.desktop!.relayStatus!().then((s) => s.state)),
+        )
+        .toBe('online');
+      const relay = await desktop.page.evaluate(() => window.desktop!.relayStatus!());
+      expect(relay.url).toMatch(
+        new RegExp(`^http://127.0.0.1:${publicPort}/remote/[a-f0-9]{32}/$`),
+      );
+      expect(new URL(local.url).port).not.toBe(String(publicPort));
+      expect(publicPort).not.toBe(port);
+      expect(publicPort).not.toBe(relayPort);
+      expect(
+        (await direct.context.request.get(`${origin}${new URL(relay.url!).pathname}`)).status(),
+      ).toBe(404);
+      expect(
+        (await direct.context.request.get(`http://127.0.0.1:${publicPort}/health`)).status(),
+      ).toBe(404);
+      await desktop.page
+        .locator('.remote-control')
+        .screenshot({ path: testInfo.outputPath('relay-settings-wide.png') });
+      await desktop.application.evaluate(({ BrowserWindow }) => {
+        const [window] = BrowserWindow.getAllWindows();
+        window.setMinimumSize(640, 600);
+        window.setSize(720, 900);
+      });
+      await desktop.page
+        .locator('.remote-control')
+        .screenshot({ path: testInfo.outputPath('relay-settings-narrow.png') });
+      expect(
+        await desktop.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+      ).toBe(true);
+      await desktop.application.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0].setSize(1280, 900),
+      );
+      const localCookie = (await direct.context.cookies()).find((cookie) =>
+        cookie.name.startsWith('ccdt_web_session_'),
+      )!;
+      // Browsers protect an existing Secure cookie from an HTTP Set-Cookie with the same name/path.
+      // A previous HTTPS entry must not prevent pairing after choosing an HTTP public entry.
+      const remote = await pair(
+        browser,
+        { url: relay.url!, token: local.token },
+        false,
+        (context) =>
+          context.addCookies([
+            {
+              name: `${localCookie.name}_relay_https`,
+              value: 'previous-https-session',
+              domain: '127.0.0.1',
+              path: new URL(relay.url!).pathname,
+              secure: true,
+              httpOnly: true,
+              sameSite: 'Strict',
+            },
+          ]),
+      );
+      contexts.push(remote.context);
+      await expect(remote.page.locator('.session-row.selected strong')).toHaveText('中继工作台');
+      await remote.page.getByRole('textbox', { name: '消息' }).fill('通过独立中继操作原工作台');
+      await remote.page.getByRole('button', { name: '发送消息', exact: true }).click();
+      await settled(remote.page);
+      await expect(direct.page.locator('.message.user').last()).toContainText(
+        '通过独立中继操作原工作台',
+      );
+      const cookies = await remote.context.cookies();
+      expect(cookies.find((cookie) => cookie.name === `${localCookie.name}_relay_http`)?.path).toBe(
+        new URL(relay.url!).pathname,
+      );
+      expect(
+        cookies.find((cookie) => cookie.name === `${localCookie.name}_relay_https`)?.value,
+      ).toBe('previous-https-session');
+
+      const nextLocalPort = await unusedPort();
+      await desktop.page
+        .getByRole('spinbutton', { name: '监听端口', exact: true })
+        .fill(String(nextLocalPort));
+      await desktop.page.getByRole('spinbutton', { name: '监听端口', exact: true }).blur();
+      await expect
+        .poll(() =>
+          desktop.page.evaluate(() => window.desktop!.remoteStatus!().then((s) => s.port)),
+        )
+        .toBe(nextLocalPort);
+      await expect
+        .poll(() =>
+          desktop.page.evaluate(() => window.desktop!.relayStatus!().then((s) => s.state)),
+        )
+        .toBe('online');
+      expect((await desktop.page.evaluate(() => window.desktop!.relayStatus!())).url).toBe(
+        relay.url,
+      );
+      await expect
+        .poll(() => remote.context.request.get(`${relay.url}api/info`).then((r) => r.status()))
+        .toBe(200);
+      await remote.page.reload();
+      await expect(remote.page.locator('.connection-status')).toContainText('已连接');
+      expect(await remote.page.getByRole('textbox', { name: '配对码', exact: true }).count()).toBe(
+        0,
+      );
+      await desktop.page.getByRole('switch', { name: '通过服务端访问', exact: true }).click();
+      await expect
+        .poll(() =>
+          desktop.page.evaluate(() => window.desktop!.relayStatus!().then((s) => s.state)),
+        )
+        .toBe('disabled');
+      await expect
+        .poll(() => remote.context.request.get(relay.url!).then((r) => r.status()))
+        .toBe(404);
+      const nextLocal = await desktop.page.evaluate(() => window.desktop!.remoteStatus!());
+      expect(nextLocal.enabled).toBe(true);
+      expect((await direct.context.request.get(`${nextLocal.url}/api/info`)).status()).toBe(200);
+      await desktop.page.getByRole('button', { name: '会话', exact: true }).click();
+      await send(desktop.page, '中继关闭后桌面保持原连接');
+      await settled(desktop.page);
+    } finally {
+      await Promise.allSettled(contexts.map((context) => context.close()));
+      await desktop.page.evaluate(() => window.desktop!.configureRelay!(false)).catch(() => {});
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => entry.close(() => resolve()));
+      await service?.close();
+    }
+  });
 
   test('browser session statistics and global instructions use the desktop connection and preserve conflicting drafts', async ({
     desktop,
