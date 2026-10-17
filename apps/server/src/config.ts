@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ServerOptions } from './server.ts';
+import { webRelayOptions } from './web-relay.ts';
 
 function port(value: string | undefined, fallback: number, name: string) {
   const number = Number(value ?? fallback);
@@ -25,6 +26,16 @@ export function clearServiceVariables(env: NodeJS.ProcessEnv) {
 }
 
 export function environmentConfig(env: NodeJS.ProcessEnv, defaultDataDir: string) {
+  if (env.PROXY_WEB_RELAY_ENABLED && !['0', '1'].includes(env.PROXY_WEB_RELAY_ENABLED))
+    throw new Error('PROXY_WEB_RELAY_ENABLED must be 0 or 1.');
+  const webRelay =
+    env.PROXY_WEB_RELAY_ENABLED === '1'
+      ? webRelayOptions({
+          port: 5270,
+          publicPort: port(env.PROXY_WEB_RELAY_PUBLIC_PORT, 5270, 'PROXY_WEB_RELAY_PUBLIC_PORT'),
+          ...(env.PROXY_WEB_RELAY_ORIGIN ? { origin: env.PROXY_WEB_RELAY_ORIGIN } : {}),
+        })
+      : undefined;
   const native = env.PROXY_ADAPTER === 'claude-code';
   const reverseProxy = env.PROXY_TLS_MODE === 'reverse-proxy';
   if (env.PROXY_TLS_MODE && !['direct', 'reverse-proxy'].includes(env.PROXY_TLS_MODE))
@@ -45,6 +56,7 @@ export function environmentConfig(env: NodeJS.ProcessEnv, defaultDataDir: string
     dataDir: resolve(env.PROXY_DATA_DIR ?? defaultDataDir),
     host: env.PROXY_HOST ?? (native && !reverseProxy ? '0.0.0.0' : '127.0.0.1'),
     reverseProxy,
+    webRelay,
     tls:
       native && !reverseProxy
         ? {

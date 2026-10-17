@@ -2,6 +2,7 @@ import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { createReadStream, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { totalmem } from 'node:os';
+import type { Socket } from 'node:net';
 import { join } from 'node:path';
 import type { IncomingMessage, RequestListener } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
@@ -57,6 +58,8 @@ import type { TunnelOptions } from './tunnel.ts';
 import { ServiceUpdates, serviceVersion } from './updates.ts';
 import type { UpdateOptions } from './updates.ts';
 import { UsageLog, createUsageReceiver, telemetryEnvironment } from './usage.ts';
+import { WebRelay, webRelayOptions } from './web-relay.ts';
+import type { WebRelayOptions } from './web-relay.ts';
 
 type Peer = {
   socket: WebSocket;
@@ -119,6 +122,8 @@ export type ServerOptions = {
   tunnel?: TunnelOptions;
   tls?: { cert: Buffer; key: Buffer };
   reverseProxy?: boolean;
+  // Deployment opt-in: browser traffic has its own listener; control/data stay on the service listener.
+  webRelay?: WebRelayOptions;
   host?: string;
   // Where an administrator puts the Windows installer offered to clients; defaults to <dataDir>/client.
   clientDir?: string;
@@ -144,6 +149,7 @@ const CONTINUE =
 export function createProxyServer(options: ServerOptions) {
   if (options.token.length < 24)
     throw new Error('PROXY_TOKEN must contain at least 24 characters.');
+  const relayOptions = options.webRelay ? webRelayOptions(options.webRelay) : undefined;
   if (options.claude && (!options.tunnel || (!options.tls && !options.reverseProxy)))
     throw new Error(
       'Native mode requires TLS or explicit reverse proxy mode, and the execution channel.',
@@ -203,6 +209,9 @@ export function createProxyServer(options: ServerOptions) {
     );
   }
 
+  let webRelay: WebRelay | undefined;
+  let relayAddress: string | undefined;
+
   const handler: RequestListener = (request, response) => {
     if (request.method === 'GET' && request.url === '/health') {
       response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -234,8 +243,42 @@ export function createProxyServer(options: ServerOptions) {
     }
   };
   const server = options.tls ? createHttpsServer(options.tls, handler) : createServer(handler);
+  const relayHandler: RequestListener = (request, response) => {
+    if (!webRelay?.handleRequest(request, response)) response.writeHead(404).end();
+  };
+  const relayServer = relayOptions
+    ? options.tls
+      ? createHttpsServer(options.tls, relayHandler)
+      : createServer(relayHandler)
+    : undefined;
+  const relaySockets = new Set<Socket>();
+  relayServer?.on('connection', (socket) => {
+    // Pending HTTP headers and unfinished TLS handshakes are not registered relay channels yet.
+    // Keep this listener's sockets so shutdown does not wait for their handshake timeouts.
+    if (closing) {
+      socket.destroy();
+      return;
+    }
+    relaySockets.add(socket);
+    socket.once('close', () => relaySockets.delete(socket));
+  });
+  relayServer?.on('upgrade', (request, socket, head) => {
+    if (
+      !closing &&
+      request.url?.startsWith('/remote/') &&
+      webRelay?.handleUpgrade(request, socket, head)
+    )
+      return;
+    socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+  });
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
   server.on('upgrade', (request, socket, head) => {
+    if (
+      !closing &&
+      (request.url === '/_relay/control' || request.url === '/_relay/data') &&
+      webRelay?.handleUpgrade(request, socket, head)
+    )
+      return;
     if (
       closing ||
       request.url !== '/ws' ||
@@ -1474,26 +1517,11 @@ export function createProxyServer(options: ServerOptions) {
         );
     });
   });
-  return {
-    store,
-    async listen(port = 8787): Promise<string> {
-      await releases.refresh();
-      updates?.start();
-      if (usageReceiver)
-        options.claude!.environment = telemetryEnvironment(await usageReceiver.listen());
-      await new Promise<void>((resolve, reject) => {
-        server.once('error', reject);
-        server.listen(port, options.host ?? '127.0.0.1', () => {
-          server.off('error', reject);
-          resolve();
-        });
-      });
-      const address = server.address();
-      if (!address || typeof address === 'string') throw new Error('No listening address');
-      return `${options.tls ? 'https' : 'http'}://${options.host ?? '127.0.0.1'}:${address.port}`;
-    },
-    async close() {
+  let closePromise: Promise<void> | undefined;
+  function close() {
+    return (closePromise ??= (async () => {
       closing = true;
+      await webRelay?.close();
       updates?.stop();
       login?.process.cancel();
       const terminalCleanup = Promise.all(
@@ -1512,10 +1540,112 @@ export function createProxyServer(options: ServerOptions) {
       await Promise.all(cleanup);
       await usageReceiver?.close();
       await new Promise<void>((resolve) => wss.close(() => resolve()));
-      await new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      );
-      store.close();
+      try {
+        await Promise.all(
+          [server, relayServer]
+            .filter((listener) => listener !== undefined)
+            .map(
+              (listener) =>
+                new Promise<void>((resolve, reject) => {
+                  if (!listener.listening) {
+                    resolve();
+                    return;
+                  }
+                  listener.close((error) => (error ? reject(error) : resolve()));
+                  if (listener === relayServer) for (const socket of relaySockets) socket.destroy();
+                }),
+            ),
+        );
+      } finally {
+        relayAddress = undefined;
+        store.close();
+      }
+    })());
+  }
+  async function listenOn(listener: typeof server, port: number, label: string) {
+    if (closing) throw new Error('The proxy service is closed.');
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        listener.off('error', failed);
+        listener.off('listening', ready);
+        listener.off('close', stopped);
+      };
+      const failed = (error: Error) => {
+        cleanup();
+        reject(
+          new Error(
+            `${label} failed to listen on ${options.host ?? '127.0.0.1'}:${port}: ${error.message}`,
+            { cause: error },
+          ),
+        );
+      };
+      const ready = () => {
+        cleanup();
+        if (closing) listener.close(() => reject(new Error(`${label} was closed during startup.`)));
+        else resolve();
+      };
+      const stopped = () => {
+        cleanup();
+        reject(new Error(`${label} was closed during startup.`));
+      };
+      listener.once('error', failed);
+      listener.once('listening', ready);
+      listener.once('close', stopped);
+      try {
+        listener.listen(port, options.host ?? '127.0.0.1');
+      } catch (error) {
+        listener.off('error', failed);
+        failed(error as Error);
+      }
+    });
+    const address = listener.address();
+    if (!address || typeof address === 'string') throw new Error('No listening address');
+    return address.port;
+  }
+  return {
+    store,
+    get relayAddress() {
+      return relayAddress;
     },
+    async listen(port = 8787): Promise<string> {
+      if (closing) throw new Error('The proxy service is closed.');
+      try {
+        await releases.refresh();
+        if (closing) throw new Error('The proxy service is closed.');
+        updates?.start();
+        if (usageReceiver) {
+          options.claude!.environment = telemetryEnvironment(await usageReceiver.listen());
+          if (closing) {
+            await usageReceiver.close();
+            throw new Error('The proxy service is closed.');
+          }
+        }
+        const mainPort = await listenOn(server, port, 'Proxy service');
+        if (closing) throw new Error('The proxy service is closed.');
+        if (relayServer && relayOptions) {
+          const relayPort = await listenOn(relayServer, relayOptions.port, 'Web relay');
+          if (closing) throw new Error('The proxy service is closed.');
+          webRelay = new WebRelay(
+            {
+              protocol: options.tls ? 'https:' : 'http:',
+              publicPort: relayOptions.publicPort ?? relayPort,
+              origin: relayOptions.origin,
+            },
+            authorized,
+            addressOf,
+          );
+          relayAddress = `${options.tls ? 'https' : 'http'}://${options.host ?? '127.0.0.1'}:${relayPort}`;
+        }
+        return `${options.tls ? 'https' : 'http'}://${options.host ?? '127.0.0.1'}:${mainPort}`;
+      } catch (error) {
+        try {
+          await close();
+        } catch (cleanup) {
+          throw new AggregateError([error, cleanup], 'Service startup and cleanup failed.');
+        }
+        throw error;
+      }
+    },
+    close,
   };
 }

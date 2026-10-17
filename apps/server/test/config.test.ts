@@ -85,3 +85,80 @@ test('native server fails before opening history storage when transport config i
     /TLS/,
   );
 });
+
+test('Web relay deployment opt-in fixes the container port and validates its advertised entrance', () => {
+  for (const enabled of [undefined, '', '0'])
+    assert.equal(
+      environmentConfig(
+        {
+          PROXY_WEB_RELAY_ENABLED: enabled,
+          PROXY_WEB_RELAY_PUBLIC_PORT: 'unused',
+          PROXY_WEB_RELAY_ORIGIN: 'unused',
+        },
+        '/state',
+      ).options.webRelay,
+      undefined,
+    );
+  assert.deepEqual(environmentConfig({ PROXY_WEB_RELAY_ENABLED: '1' }, '/state').options.webRelay, {
+    port: 5270,
+    publicPort: 5270,
+    origin: undefined,
+  });
+  assert.deepEqual(
+    environmentConfig(
+      {
+        ...native,
+        PROXY_WEB_RELAY_ENABLED: '1',
+        PROXY_WEB_RELAY_PUBLIC_PORT: '18088',
+        PROXY_WEB_RELAY_ORIGIN: 'https://browser.example/',
+      },
+      '/state',
+    ).options.webRelay,
+    { port: 5270, publicPort: 18088, origin: 'https://browser.example' },
+  );
+  for (const enabled of ['yes', 'true', '2'])
+    assert.throws(
+      () => environmentConfig({ PROXY_WEB_RELAY_ENABLED: enabled }, '/state'),
+      /PROXY_WEB_RELAY_ENABLED/,
+    );
+  for (const value of ['0', '-1', '65536', '80.5', 'NaN', ''])
+    assert.throws(
+      () =>
+        environmentConfig(
+          { PROXY_WEB_RELAY_ENABLED: '1', PROXY_WEB_RELAY_PUBLIC_PORT: value },
+          '/state',
+        ),
+      /PROXY_WEB_RELAY_PUBLIC_PORT/,
+    );
+  for (const origin of [
+    'ftp://browser.example',
+    'https://user:pass@browser.example',
+    'https://browser.example/path',
+    'https://browser.example/..',
+    'https://browser.example/?',
+    'https://browser.example/#',
+    'http://browser.example:0',
+  ])
+    assert.throws(
+      () =>
+        environmentConfig(
+          { PROXY_WEB_RELAY_ENABLED: '1', PROXY_WEB_RELAY_ORIGIN: origin },
+          '/state',
+        ),
+      /PROXY_WEB_RELAY_ORIGIN/,
+    );
+});
+
+test('invalid relay API configuration fails before history storage is opened', () => {
+  for (const webRelay of [
+    { port: -1 },
+    { port: 65536 },
+    { publicPort: 0 },
+    { publicPort: NaN },
+    { origin: 'http://relay.example/path' },
+  ])
+    assert.throws(
+      () => createProxyServer({ token: 'a'.repeat(32), dataDir: '/must-not-open', webRelay }),
+      /relay|WEB_RELAY/i,
+    );
+});
