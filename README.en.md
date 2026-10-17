@@ -58,6 +58,8 @@ This repository publishes all of its own client, server, build and deployment so
 
 ## Quick start
 
+The experimental [desktop Web workbench](docs/desktop-web.md) shares the desktop's sessions, connection and scheduling. Local/LAN access does not need a server relay. For access across networks, the optional [Web relay](docs/web-relay.md) runs in the existing server container: container port `5270` is fixed, the host port defaults to `5270` and is configurable, and no listener or port mapping is added unless explicitly enabled. Browser pairing and revocation remain on the desktop. This source-branch feature still awaits real Claude acceptance testing and is not a promise about the upstream release packages.
+
 You need a Linux server with a public IP or domain name (x86_64, or arm64 as experimental support; Ubuntu recommended, Docker installed) and a Windows 10 / 11 x64 PC.
 
 **The server can be small.** Builds, tests and development tools all run on your Windows PC; the server only hosts Claude Code and a lightweight proxy service, so an entry-level machine with 2 vCPUs and 1 GB of memory is enough. Size it for heavier work only if you plan to have Claude build or run demanding tasks on the server itself.
@@ -75,7 +77,7 @@ The script:
 1. Checks for Docker, Docker Compose and a few tools. If something is missing it tells you the command to install it; it does not install system software itself.
 2. Downloads the newest server archive from this repository's releases, verifies it and unpacks it to `/opt/cc-desk-tunnel`.
 3. Asks for the public address, certificate mode, ports and data directory (every question has a default), then builds the image and starts it.
-4. Prints what the client needs — **service address, certificate fingerprint, service token** — and the TCP port to open in the firewall (8787 by default, the only one).
+4. Prints what the client needs — **service address, certificate fingerprint, service token** — and the TCP ports to open in the firewall (only 8787 by default; also check the browser entrance when explicitly enabling the Web relay).
 
 There is no prebuilt image yet: the image is built from source on your server, which takes a few minutes the first time. The script does not touch the firewall, nginx or SSH. Running the same command again upgrades an existing deployment. Manual installation, the three certificate modes, backup and restore are covered in the [deployment manual](deploy/README.md); if you already run nginx with a domain, see [reverse proxying with nginx](deploy/nginx.md).
 
@@ -100,11 +102,12 @@ Sign in to your Claude account on the account page at the bottom left of the cli
 | Port | Purpose | Open it? | Protected by |
 | --- | --- | --- | --- |
 | Service port (8787/TCP by default) | Client sign-in and conversation; the client also sets up Claude's execution channel to your PC through it | Yes. In nginx mode open nginx's 443 instead; 8787 then listens on the server only | TLS + service token + sign-in throttling; the execution channel also has a random secret for each connection |
+| Optional Web relay (host 5270/TCP → container 5270 by default) | Browser access to the desktop's existing Web workbench; off by default, configurable host port | Only when enabled. In nginx mode it defaults to host loopback behind the browser-facing proxy | Desktop pairing and expiring browser cookies; direct TLS reuses the existing certificate, while proxy HTTPS is configured by the operator |
 | The SSH port leading to Windows (random) | Claude running commands on your PC | **No, and it cannot be opened** | Listens only on the loopback address inside the container; it is not published to the server, let alone the internet, and accepts only the temporary public key of this connection |
 
-- **On Windows** no inbound port is needed; the local SSH server listens on loopback only and runs only while connected.
-- **If the server's firewall allows every port**: the SSH port still cannot be reached from outside. The project still exposes only the one port above, and its security rests on the service token. Allowing everything does expose whatever else runs on the server (its own SSH, for example), so open only what you need.
-- To tighten further, allow only your own egress IP to reach the port in your cloud provider's security group. Ports published by Docker usually bypass `ufw` rules, so restrict sources in the provider's security group.
+- **On Windows** connecting to the server needs no inbound port; the local SSH server listens on loopback only and runs only while connected. Optional LAN Web access requires its configured local port to be reachable; the server relay does not.
+- **If the server's firewall allows every port**: the execution SSH port still cannot be reached from outside. Only the service port is published by default; enabling the Web relay also publishes its configured browser entrance. Allowing everything also exposes whatever else runs on the server (its own SSH, for example), so open only what you need.
+- To tighten further, allow only your own egress IP to reach the enabled public entrances in your cloud provider's security group. Ports published by Docker usually bypass `ufw` rules, so restrict sources in the provider's security group.
 - **Deployments upgraded from 0.2.9 or earlier** also opened a tunnel port (7000/TCP by default). It is no longer used from 0.2.10 and can be removed from the firewall and security group.
 
 ### Four things you must know

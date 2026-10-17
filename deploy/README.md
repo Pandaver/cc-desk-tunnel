@@ -64,6 +64,8 @@ sudo bash deploy/manage.sh release-token /path/token.txt   # 不带参数则移�
 
 同时进行的运行和终端有上限，默认按服务器内存估算（每个约占 300 MB，1 GB 内存的服务器是 2 个）。要改就在 `config/service.env` 里加 `PROXY_MAX_RUNS='数量'` 并重启服务。
 
+可选的 [Web 工作台中继](../docs/web-relay.md) 与现有服务共用镜像和容器，默认关闭。启用时增加容器内固定的浏览器入口 `5270`，宿主端口可配置；桌面仍经原控制连接地址建立独立中继通道。本机与局域网 Web 访问不依赖此项，部署方法见下方“可选 Web 中继”。
+
 电脑断线后，它的任务在服务端继续，等它连回来；离线超过 5 分钟才停止。要改这个时间就加 `PROXY_GRACE_SECONDS='秒数'`（0 到 3600，0 表示断线即停止）并重启服务。
 
 需要脚本化或分步执行时仍可用参数形式：
@@ -79,7 +81,7 @@ sudo bash deploy/manage.sh connection
 
 `install.sh` 只检查 Docker / Compose 等依赖，缺少或 Docker 未运行时给出安装命令后退出；不安装系统软件，不修改 nginx、防火墙、SSH 或账号。首次构建联网下载系统包、固定 Node / CLI 和锁定 npm 依赖；非 JS 编译安装，node-pty 在镜像构建阶段准备。Node 24 原生执行 TypeScript；发行检查仍必须 typecheck。
 
-默认一个公网 TCP 端口：WSS / HTTPS `8787`，登录、对话和执行通道都经它。运维 SSH 遵循服务器已有端口。云防火墙与主机策略自行放行，**不需要 UDP 或公开 Windows / Linux 随机 SSH 端口**。从 0.2.9 及更早版本升级的部署原先还放行了 `7000`，不再使用，可以去掉；用 `manage.sh upgrade` 升级时容器也不再发布它。Docker 发布端口可能绕过 UFW 的常规 INPUT 规则，应采用云安全组或 Docker 对应防火墙策略，不把启用 UFW 当成已限制发布端口。
+默认一个公网 TCP 端口：WSS / HTTPS `8787`，登录、对话和执行通道都经它；只有显式启用 Web 中继才增加浏览器入口端口。运维 SSH 遵循服务器已有端口。云防火墙与主机策略自行放行，**不需要 UDP 或公开 Windows / Linux 随机 SSH 端口**。从 0.2.9 及更早版本升级的部署原先还放行了 `7000`，不再使用，可以去掉；用 `manage.sh upgrade` 升级时容器也不再发布它。Docker 发布端口可能绕过 UFW 的常规 INPUT 规则，应采用云安全组或 Docker 对应防火墙策略，不把启用 UFW 当成已限制发布端口。
 
 nginx 模式下服务按 `X-Real-IP` 区分来源地址做登录限速，请保留示例里的这一行。
 
@@ -105,6 +107,42 @@ nginx 的配置步骤、检查方法和常见问题见[用 nginx 反代](nginx.m
 客户端填 `connection` 输出的 URL / token。自签模式填指纹；真实可信 CA 或 nginx 域名证书将指纹留空，使用 CA、有效期和主机名校验。私有 CA 可选择明确指纹；指纹模式不额外验证有效期 / 域名，首次信任应由可信 SSH 渠道获得。没有任何关闭验证且不校验指纹的模式。
 
 执行通道与控制连接用同一个地址和同一张证书，没有单独的隧道证书；每次连接另有随机生成的通道密钥，经已验证的 WSS 下发。自签证书默认一年。
+
+## 可选 Web 中继
+
+普通部署保持原样：两个基础 Compose 文件都不映射中继端口、不注入中继环境变量。只有私有 `docker.env` 中设置 `WEB_RELAY_ENABLED='1'` 时，`manage.sh` 才自动叠加 [compose.relay.yml](compose.relay.yml)，在原 `proxy` 容器中启用功能，不增加容器或宿主 Docker socket。
+
+新部署可在原 `init` 命令追加参数；宿主端口默认为 `5270`，可选 `1–65535`，并与控制端口分开：
+
+```sh
+sudo bash deploy/manage.sh init --host VPS_IP --data /srv/cc-desk-tunnel \
+  --web-relay 1 --web-relay-port 5270
+sudo bash deploy/manage.sh build
+sudo bash deploy/manage.sh up
+```
+
+已有部署在 `.local/docker.env`（或 `PROXY_DEPLOY_CONFIG` 指定的文件）中添加以下内容，再执行 `manage.sh up` 重建容器；单纯 `restart` 不会更新端口映射：
+
+```dotenv
+WEB_RELAY_ENABLED='1'
+WEB_RELAY_PORT='5270'
+```
+
+只加 `WEB_RELAY_ENABLED='1'` 时也使用默认 `5270`。容器内端口始终是 `5270`，例如 `WEB_RELAY_PORT='9443'` 映射 `9443:5270`，同时传入 `PROXY_WEB_RELAY_PUBLIC_PORT=9443` 供服务端生成浏览器地址。直连模式沿用原 TLS 证书，使用 HTTPS；这项映射不会自动申请浏览器信任的证书。
+
+绑定地址默认沿用原控制端口：直连模式为 `0.0.0.0`，nginx 模式为 `127.0.0.1`。使用已有 nginx 时，还需要声明它对浏览器提供的入口：
+
+```sh
+sudo bash deploy/manage.sh init --host proxy.example.com --mode nginx \
+  --url wss://proxy.example.com/ws --data /srv/cc-desk-tunnel \
+  --web-relay 1 --web-relay-origin https://proxy.example.com
+```
+
+已有 nginx 部署在 `docker.env` 增加 `WEB_RELAY_ORIGIN='https://proxy.example.com'`。使用非默认公网端口时将端口写在该地址中；地址不含路径、账号、查询参数或 fragment。可用 `--web-relay-bind 127.0.0.1` 或 `WEB_RELAY_BIND='127.0.0.1'` 显式限定宿主回环，但也需提供上述公网入口。`WEB_RELAY_ORIGIN` 不创建域名或反代；反代规则见 [Web 中继](../docs/web-relay.md)。回环中继端口不向公网放行。
+
+overlay 将配置转换为 `PROXY_WEB_RELAY_ENABLED=1`、`PROXY_WEB_RELAY_PUBLIC_PORT` 和可选 `PROXY_WEB_RELAY_ORIGIN`。这些由容器环境提供，不需要再修改数据目录的 `service.env`。启用后执行 `manage.sh summary` 核对绑定和实际需放行的入口端口，再在桌面启用 Web 工作台及服务端访问。
+
+设 `WEB_RELAY_ENABLED='0'` 后执行 `manage.sh up`，会撤销新增的端口映射和中继环境变量；原业务连接方式保持不变。重建或关闭容器仍会中断正在进行的连接，请按原升级流程安排。
 
 ## 模型与可写空间
 
@@ -138,9 +176,11 @@ Compose 崩溃 / 主机重启恢复，`tini -g` 管理信号与孤儿进程；�
 
 仅导入镜像、手工 Compose 管理时，使用 `deploy/compose.yml`（无 build）。在独立部署目录复制为 `compose.yml`，将初始化生成的 `docker.env` 复制为同目录 `.env`，确认 `PROXY_IMAGE` 为已导入 tag；该配置不含 token / API key，但目录和文件仍保持私有。运行 `sudo docker compose up -d` / `ps` / `logs` / `stop`。调用备份等脚本时设置 `PROXY_DEPLOY_CONFIG=/部署目录/.env`、`PROXY_COMPOSE_FILE=/部署目录/compose.yml`，确保使用相同数据和项目。纯镜像部署升级使用 `docker load`、更新 tag、`docker compose up -d`，不用 `manage.sh build` / `upgrade`。
 
+纯镜像部署启用中继时，还需把同版 `deploy/compose.relay.yml` 复制到该目录；手工命令使用 `docker compose -f compose.yml -f compose.relay.yml up -d`。仅在 `.env` 写开关不会让原生 Compose 自动添加 overlay；`manage.sh` 则会根据开关自动选择程序包中的 overlay。升级时保留完整 `deploy/` 目录和私有 `.env`；源码发布包已包含两个基础文件、overlay 与管理脚本。关闭中继后使用不带 overlay 的 `docker compose -f compose.yml up -d`。
+
 镜像构建后，`sudo bash deploy/test.sh` 可运行不调用模型的隔离部署回归；占用测试端口 19871..19874，创建临时数据并在结束时回收。不会改既有服务；测试数据被删除，不用来测试生产数据。
 
-备份先停服务保证 SQLite / WAL 与原生数据一致，结束后恢复之前运行状态；排除临时 SSH 凭据、缓存和升级时留下的会话库副本（`state/backups`）。备份**含 token、API / 账号秘密、证书私钥和历史**，权限 0600，需安全离线保存。恢复仅允许已 stop 且长期数据为空的新初始化部署：
+备份先停服务保证 SQLite / WAL 与原生数据一致，结束后恢复之前运行状态；排除临时 SSH 凭据、缓存和升级时留下的会话库副本（`state/backups`）。备份**含 token、API / 账号秘密、证书私钥和历史**，权限 0600，需安全离线保存。部署侧的 `docker.env` 不在数据归档中，需另行保留；恢复到新宿主时按新宿主实际入口重新设置控制及中继端口，或初始化时传入同样的中继参数。备份、恢复和升级不会删除当前部署配置里的中继开关；恢复仅允许已 stop 且长期数据为空的新初始化部署：
 
 ```sh
 sudo bash deploy/manage.sh restore /secure/backup.tar.gz

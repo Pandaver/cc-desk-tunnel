@@ -17,11 +17,12 @@ Node.js、Claude Code、Agent SDK 均为固定版本（见 `scripts/install-linu
 | 直连入口 | 宿主 `0.0.0.0:8787` → 容器 8787 | HTTPS `/health`、WSS `/ws`（控制连接与执行通道） | 客户端可访问 |
 | nginx 入口 | 通常 `443`，遵循已有配置 | nginx 终止 TLS，WSS 反代 | 客户端可访问 |
 | nginx 上游 | 宿主 `127.0.0.1:8787` → 容器 8787 | HTTP / WS，只允许可信反代 | 不开放 |
+| 可选 Web 中继 | 显式启用后：宿主 `5270` → 容器 5270；宿主端口可改 | HTTP(S) `/remote/`，含浏览器 WebSocket | 直连时开放；nginx 模式只绑定宿主回环 |
 | 执行通道入口 | 容器 `127.0.0.1:<随机>` | SSH 到 Windows，经客户端建立的 WSS 转发 | 不开放 |
 | Windows sshd / UI bridge | Windows `127.0.0.1:<随机>` | SSH / 本机 nonce + Origin WS | 不开放 |
 | 运维 SSH | 遵循 VPS 原有端口，常见 22 | SSH / SFTP 管理 | 管理者可访问 |
 
-`--control-port` 可改，nginx 公网端口由既有服务决定。无需 UDP、Windows 入站规则或公开随机 SSH 端口；暂不支持 IPv6 配置。业务双向控制、原生终端均走 WSS，没有 REST 会话 / 配置 / 上传接口或公网 Web UI。无认证的 `GET /health` 只返回状态、协议版本和适配器类型；`GET /client/installer` 凭服务凭据下载客户端安装包；其他 HTTP 路径 404。服务端自身只向外访问 GitHub 的发布接口（查询版本、下载程序包与安装包）和升级时的 npm 仓库，可用 `PROXY_RELEASE_REPO='none'` 关闭。
+`--control-port` 可改，nginx 公网端口由既有服务决定。无需 UDP、Windows 入站规则或公开随机 SSH 端口；暂不支持 IPv6 部署配置。业务双向控制、原生终端均走 WSS，默认没有 REST 会话 / 配置 / 上传接口或公网 Web UI。无认证的 `GET /health` 只返回状态、协议版本和适配器类型；`GET /client/installer` 凭服务凭据下载客户端安装包；原服务端口其他 HTTP 路径 404。可选 [Web 中继](web-relay.md) 在独立端口转发桌面已有的页面与 API，注册及数据通道使用原服务端口的独立 WebSocket 路径，不复用业务执行通道。服务端自身只向外访问 GitHub 的发布接口（查询版本、下载程序包与安装包）和升级时的 npm 仓库，可用 `PROXY_RELEASE_REPO='none'` 关闭。
 
 容器内反代模式监听 `0.0.0.0` 供 Docker bridge 接入；宿主仅回环发布。不要将不可信容器加入同一网络或单独公开上游。Docker 端口发布与 UFW 常规 INPUT 的关系需核对，公网来源限制优先在云安全组 / Docker 防火墙策略实施。
 
