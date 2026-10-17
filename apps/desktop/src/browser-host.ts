@@ -1,4 +1,5 @@
 import type { Device } from '@cc-desk-tunnel/protocol';
+import { createBrowserDrafts } from './browser-drafts.ts';
 
 export type HostInfo = {
   kind: 'desktop-web';
@@ -70,6 +71,8 @@ async function upload(file: File): Promise<string> {
   return rpc('files:upload', file.name, btoa(text));
 }
 export function installBrowserHost(info: HostInfo) {
+  let drafts: ReturnType<typeof createBrowserDrafts> | undefined;
+  const draftStore = () => (drafts ??= createBrowserDrafts(localStorage, sessionStorage));
   // getRandomValues works on HTTP LAN origins too; randomUUID is otherwise HTTPS-only.
   if (!crypto.randomUUID)
     Object.defineProperty(crypto, 'randomUUID', {
@@ -162,10 +165,8 @@ export function installBrowserHost(info: HostInfo) {
       autoLogin: true,
     }),
     saveLogin: noop,
-    loadDrafts: async () => JSON.parse(localStorage.getItem('remote-drafts') || '{}'),
-    saveDrafts: async (drafts) => {
-      localStorage.setItem('remote-drafts', JSON.stringify(drafts));
-    },
+    loadDrafts: async () => draftStore().load(),
+    saveDrafts: async (drafts) => draftStore().save(drafts),
     loadSchedules: desktopOnly,
     saveSchedules: desktopOnly,
     saveRemoteSchedules: (text, revision) => rpc('schedules:save', text, revision),

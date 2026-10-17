@@ -394,6 +394,74 @@ test.describe('Electron Web workbench', () => {
     }
   });
 
+  test('tabs in one browser keep independent drafts after reload and recover other sessions in a new tab', async ({
+    desktop,
+    browser,
+  }) => {
+    let context: BrowserContext | undefined;
+    try {
+      const suffix = basename(desktop.profile).slice(-6);
+      const one = `标签页草稿甲 ${suffix}`,
+        two = `标签页草稿乙 ${suffix}`;
+      await create(desktop.page, desktop.project, one);
+      await create(desktop.page, desktop.project, two);
+      const access = await enable(desktop.page);
+      const first = await pair(browser, access);
+      context = first.context;
+      const second = await context.newPage();
+      await second.goto(access.url);
+      await expect(second.locator('.connection-status')).toContainText('已连接');
+      const persisted = async (page: Page, text: string) => {
+        await expect
+          .poll(() =>
+            page.evaluate(
+              (text) =>
+                Object.values(JSON.parse(sessionStorage.getItem('remote-drafts') ?? '{}')).includes(
+                  text,
+                ),
+              text,
+            ),
+          )
+          .toBe(true);
+      };
+      await select(first.page, one);
+      for (const page of [first.page, second])
+        await expect(page.locator('.session-row.selected strong')).toHaveText(one);
+      await first.page.getByRole('textbox', { name: '消息' }).fill('第一页独立草稿');
+      await persisted(first.page, '第一页独立草稿');
+      await select(second, two);
+      for (const page of [first.page, second])
+        await expect(page.locator('.session-row.selected strong')).toHaveText(two);
+      await second.getByRole('textbox', { name: '消息' }).fill('第二页另一会话草稿');
+      await persisted(second, '第二页另一会话草稿');
+      await first.page.reload();
+      await expect(first.page.locator('.connection-status')).toContainText('已连接');
+      await select(first.page, one);
+      await expect(first.page.getByRole('textbox', { name: '消息' })).toHaveValue('第一页独立草稿');
+      await expect(second.locator('.session-row.selected strong')).toHaveText(one);
+      await second.getByRole('textbox', { name: '消息' }).fill('第二页同一会话草稿');
+      await persisted(second, '第二页同一会话草稿');
+      await first.page.reload();
+      await expect(first.page.locator('.connection-status')).toContainText('已连接');
+      await expect(first.page.getByRole('textbox', { name: '消息' })).toHaveValue('第一页独立草稿');
+      await second.reload();
+      await expect(second.locator('.connection-status')).toContainText('已连接');
+      await expect(second.getByRole('textbox', { name: '消息' })).toHaveValue('第二页同一会话草稿');
+      const recovered = await context.newPage();
+      await recovered.goto(access.url);
+      await expect(recovered.locator('.connection-status')).toContainText('已连接');
+      await expect(recovered.getByRole('textbox', { name: '消息' })).toHaveValue(
+        '第二页同一会话草稿',
+      );
+      await select(recovered, two);
+      await expect(recovered.getByRole('textbox', { name: '消息' })).toHaveValue(
+        '第二页另一会话草稿',
+      );
+    } finally {
+      await context?.close();
+    }
+  });
+
   test('browser grants revoke independently and browser attachments and exports use the real desktop host', async ({
     desktop,
     browser,
