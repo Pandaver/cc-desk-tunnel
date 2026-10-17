@@ -1,5 +1,12 @@
 import { test as base, expect, _electron } from '@playwright/test';
-import type { Browser, BrowserContext, ElectronApplication, Locator, Page } from '@playwright/test';
+import type {
+  Browser,
+  BrowserContext,
+  ElectronApplication,
+  Locator,
+  Page,
+  WebSocketRoute,
+} from '@playwright/test';
 import { execFile } from 'node:child_process';
 import { randomUUID, X509Certificate } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
@@ -255,6 +262,121 @@ async function expectLatencyDetails(page: Page, panel: Locator, remote: boolean)
 test.describe('Electron Web workbench', () => {
   test.skip(process.platform !== 'win32', 'Windows Electron integration');
   test.setTimeout(120_000);
+
+  test('browser connection states distinguish pending, failed, retry and automatic recovery', async ({
+    desktop,
+    browser,
+  }, testInfo) => {
+    await create(desktop.page, desktop.project, '连接状态回归');
+    const access = await enable(desktop.page);
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    try {
+      const page = await context.newPage();
+      await page.clock.install();
+      let hold = true;
+      let snapshot:
+        { revision: number; state: Record<string, unknown>; [key: string]: unknown } | undefined;
+      const transports: { route: WebSocketRoute; server: WebSocketRoute; release: () => void }[] =
+        [];
+      // Delay real desktop snapshots, not application state. All RPCs still use the real listener.
+      await page.routeWebSocket(/\/api\/control(?:\?|$)/, (route) => {
+        const server = route.connectToServer();
+        const pending: (string | Buffer)[] = [];
+        let chunks: string[] = [];
+        server.onMessage((message) => {
+          let value = JSON.parse(String(message));
+          if (value.type === 'client:chunk') {
+            if (value.index === 0) chunks = [];
+            chunks.push(value.text);
+            if (value.index === value.total - 1) value = JSON.parse(chunks.join(''));
+          }
+          if (value.type === 'client:state' && value.full) snapshot = value;
+          if (hold) pending.push(message);
+          else route.send(message);
+        });
+        transports.push({
+          route,
+          server,
+          release: () => pending.splice(0).forEach((message) => route.send(message)),
+        });
+      });
+      let navigations = 0;
+      page.on('framenavigated', (frame) => {
+        if (frame === page.mainFrame()) navigations++;
+      });
+      await page.goto(access.url);
+      await page.getByLabel('配对码', { exact: true }).fill(access.token);
+      await page.getByRole('button', { name: '连接工作台', exact: true }).click();
+      const waiting = page.locator('.login-content');
+      await expect(waiting.getByRole('status')).toHaveText('正在连接桌面客户端的工作台…');
+      await expect(waiting.getByRole('button')).toHaveCount(0);
+      await page.screenshot({ path: testInfo.outputPath('web-connecting-wide.png') });
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.screenshot({ path: testInfo.outputPath('web-connecting-narrow.png') });
+      const navigationCount = navigations;
+      await page.clock.fastForward(51000);
+      await expect(waiting.getByRole('alert')).toContainText('超时');
+      await expect(waiting.getByRole('button', { name: '重试', exact: true })).toBeEnabled();
+      await page.screenshot({ path: testInfo.outputPath('web-connection-failed.png') });
+      await page.clock.fastForward(10000);
+      expect(transports.length).toBe(1);
+      await waiting.getByRole('button', { name: '重试', exact: true }).click();
+      await expect(waiting.getByRole('status')).toHaveText('正在连接桌面客户端的工作台…');
+      await expect(waiting.getByRole('button')).toHaveCount(0);
+      await expect.poll(() => transports.length).toBe(2);
+      hold = false;
+      transports.at(-1)!.release();
+      await expect(page.locator('.connection-status')).toContainText('已连接');
+      expect(navigations).toBe(navigationCount);
+      await page.setViewportSize({ width: 1280, height: 900 });
+      const draft = '连接恢复时保留未发送的草稿';
+      await page.getByRole('textbox', { name: '消息', exact: true }).fill(draft);
+      hold = true;
+      await transports.at(-1)!.route.close({ code: 1012, reason: 'test reconnect' });
+      await transports.at(-1)!.server.close();
+      await expect(
+        page.getByText('与桌面客户端的连接已断开，正在自动重连…', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('button', { name: /^(重试|重新连接|断开并回到登录页)$/ }),
+      ).toHaveCount(0);
+      await expect(page.getByRole('textbox', { name: '消息', exact: true })).toHaveValue(draft);
+      await page.screenshot({ path: testInfo.outputPath('web-reconnecting.png') });
+      await page.clock.fastForward(1100);
+      await expect.poll(() => transports.length).toBe(3);
+      hold = false;
+      transports.at(-1)!.release();
+      await expect(page.locator('.connection-status')).toContainText('已连接');
+      await expect(page.getByRole('textbox', { name: '消息', exact: true })).toHaveValue(draft);
+      expect(navigations).toBe(navigationCount);
+      await expect(desktop.page.locator('.connection-status')).toContainText('已连接');
+      // The Web transport is healthy in these states; only the desktop's service status changes.
+      // Derive complete frames from the real snapshot so HTTP polling cannot race the UI assertions.
+      hold = true;
+      expect(snapshot).toBeDefined();
+      let revision = snapshot!.revision + 100;
+      for (const [status, text] of [
+        ['connecting', '桌面客户端正在连接代理服务…'],
+        ['disconnected', '请先在桌面客户端连接代理服务。'],
+        ['reconnecting', '桌面客户端正在重新连接代理服务…'],
+      ]) {
+        transports.at(-1)!.route.send(
+          JSON.stringify({
+            ...snapshot,
+            revision: revision++,
+            state: { ...snapshot!.state, status, error: '代理服务认证失败' },
+          }),
+        );
+        await expect(page.getByText(text, { exact: true })).toBeVisible();
+        await expect(page.getByRole('button', { name: /^(重试|重新连接)$/ })).toHaveCount(0);
+        if (status === 'disconnected')
+          await expect(page.getByRole('alert')).toHaveText('代理服务：代理服务认证失败');
+      }
+      expect(transports.length).toBe(3);
+    } finally {
+      await context.close();
+    }
+  });
 
   test('connection diagnostics reuse the real business bridge through local and relayed browsers', async ({
     desktop,

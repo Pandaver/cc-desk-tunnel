@@ -631,6 +631,259 @@ async function browser(t, f, count = 1) {
   return { client: clients[0], clients, sockets };
 }
 
+function pendingBrowser(t, address = async () => 'ws://127.0.0.1:1/api/control') {
+  const original = globalThis.WebSocket;
+  const sockets = [];
+  class Socket {
+    static OPEN = 1;
+    readyState = 0;
+    sent = [];
+    constructor(url) {
+      this.url = url;
+      sockets.push(this);
+    }
+    open() {
+      this.readyState = 1;
+      this.onopen?.();
+    }
+    send(text) {
+      this.sent.push(JSON.parse(text));
+    }
+    message(value) {
+      this.onmessage?.({ data: JSON.stringify(value) });
+    }
+    close() {
+      this.readyState = 3;
+      this.onclose?.();
+    }
+  }
+  globalThis.WebSocket = Socket;
+  const client = new RemoteClient();
+  client.connect('', '', {}, true, address);
+  t.after(() => {
+    client.disconnect();
+    globalThis.WebSocket = original;
+  });
+  const snapshot = (socket, state = {}) => {
+    socket.message({
+      type: 'client:state',
+      revision: 0,
+      full: true,
+      state: { ...new ProxyClient().state, status: 'connected', ...state },
+      events: {},
+      clock: { now: Date.now(), activity: {} },
+    });
+    const request = socket.sent.find(({ method }) => method === 'client:state');
+    if (request)
+      socket.message({ type: 'response', id: request.id, ok: true, result: { revision: 0 } });
+  };
+  return { client, sockets, snapshot };
+}
+
+test('browser connection state waits for the full snapshot and is separate from desktop state', async (t) => {
+  const b = pendingBrowser(t);
+  const first = b.client.getWebSnapshot();
+  assert.deepEqual(first, { phase: 'connecting', error: null });
+  assert.equal(b.client.getWebSnapshot(), first);
+  let notified = 0;
+  const unsubscribe = b.client.subscribe(() => notified++);
+  t.after(unsubscribe);
+  await turn();
+  b.sockets[0].open();
+  const request = b.sockets[0].sent[0];
+  b.sockets[0].message({ type: 'response', id: request.id, ok: true, result: { revision: 0 } });
+  assert.equal(b.client.getWebSnapshot(), first);
+  b.snapshot(b.sockets[0], { status: 'connecting', error: '桌面服务连接尚未完成。' });
+  const connected = b.client.getWebSnapshot();
+  assert.deepEqual(connected, { phase: 'connected', error: null });
+  assert.equal(b.client.state.status, 'connecting');
+  assert.match(b.client.state.error, /桌面服务连接/);
+  b.sockets[0].message({
+    type: 'client:state',
+    full: false,
+    revision: 1,
+    state: { status: 'disconnected', error: '桌面服务凭据不正确。' },
+    events: {},
+    clock: { now: Date.now(), activity: {} },
+  });
+  assert.equal(b.client.getWebSnapshot(), connected);
+  assert.equal(b.client.state.status, 'disconnected');
+  assert.match(b.client.state.error, /凭据/);
+  assert.ok(notified >= 3);
+});
+
+test('initial browser failure waits for explicit retry and ignores old socket callbacks', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const b = pendingBrowser(t);
+  await turn();
+  const first = b.sockets[0];
+  first.open();
+  first.close();
+  assert.equal(b.client.getWebSnapshot().phase, 'failed');
+  assert.match(b.client.getWebSnapshot().error, /连接已断开/);
+  assert.equal(b.client.state.status, 'disconnected');
+  b.client.retryNow();
+  t.mock.timers.tick(60000);
+  await turn();
+  assert.equal(b.sockets.length, 1);
+  b.client.retryConnection();
+  b.client.retryConnection();
+  assert.deepEqual(b.client.getWebSnapshot(), { phase: 'connecting', error: null });
+  await turn();
+  assert.equal(b.sockets.length, 2);
+  first.open();
+  b.snapshot(first, { error: '旧连接错误' });
+  first.close();
+  await turn();
+  assert.equal(b.client.getWebSnapshot().phase, 'connecting');
+  assert.equal(b.client.state.error, null);
+  b.sockets[1].open();
+  b.snapshot(b.sockets[1]);
+  assert.equal(b.client.getWebSnapshot().phase, 'connected');
+  assert.deepEqual(
+    b.sockets[1].sent.map(({ method }) => method),
+    ['client:state'],
+  );
+});
+
+test('a rejected snapshot from a retired attempt cannot fail an immediate manual retry', async (t) => {
+  const b = pendingBrowser(t);
+  await turn();
+  b.sockets[0].open();
+  b.sockets[0].close();
+  // Closing rejects the first snapshot promise; its catch has not run when retry starts.
+  b.client.retryConnection();
+  await turn();
+  assert.equal(b.sockets.length, 2);
+  assert.deepEqual(b.client.getWebSnapshot(), { phase: 'connecting', error: null });
+  assert.equal(b.sockets[1].readyState, 0);
+  b.sockets[1].open();
+  b.snapshot(b.sockets[1]);
+  await turn();
+  assert.equal(b.client.getWebSnapshot().phase, 'connected');
+  assert.equal(b.client.state.error, null);
+});
+
+for (const waiting of ['address', 'socket', 'snapshot']) {
+  test(`initial browser ${waiting} timeout is bounded and can retry without reloading`, async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let resolveAddress;
+    let requested = 0;
+    const b = pendingBrowser(t, () => {
+      requested++;
+      return waiting === 'address' && requested === 1
+        ? new Promise((resolve) => (resolveAddress = resolve))
+        : Promise.resolve('ws://127.0.0.1:1/api/control');
+    });
+    await turn();
+    if (waiting === 'snapshot') b.sockets[0].open();
+    t.mock.timers.tick(waiting === 'snapshot' ? 45000 : 50000);
+    await turn();
+    assert.equal(b.client.getWebSnapshot().phase, 'failed');
+    assert.match(b.client.getWebSnapshot().error, /连接桌面客户端超时/);
+    assert.equal(b.client.state.error, null);
+    b.client.retryConnection();
+    await turn();
+    if (resolveAddress) {
+      resolveAddress('ws://127.0.0.1:2/expired');
+      await turn();
+    }
+    assert.equal(b.sockets.length, waiting === 'address' ? 1 : 2);
+    assert.equal(b.client.getWebSnapshot().phase, 'connecting');
+    const last = b.sockets.at(-1);
+    last.open();
+    b.snapshot(last);
+    t.mock.timers.tick(60000);
+    await turn();
+    assert.equal(b.client.getWebSnapshot().phase, 'connected');
+    assert.equal(b.sockets.length, waiting === 'address' ? 1 : 2);
+  });
+}
+
+test('address failures can retry and disconnect retires an unresolved address and its timer', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let resolveAddress;
+  let attempts = 0;
+  const b = pendingBrowser(t, async () => {
+    if (++attempts === 1) throw new Error('工作台地址暂时不可用。');
+    return new Promise((resolve) => (resolveAddress = resolve));
+  });
+  await turn();
+  assert.deepEqual(b.client.getWebSnapshot(), {
+    phase: 'failed',
+    error: '工作台地址暂时不可用。',
+  });
+  b.client.retryConnection();
+  await turn();
+  b.client.disconnect();
+  const disconnected = b.client.getWebSnapshot();
+  resolveAddress('ws://127.0.0.1:2/expired');
+  t.mock.timers.tick(60000);
+  b.client.retryConnection();
+  b.client.retryNow();
+  await turn();
+  assert.equal(b.sockets.length, 0);
+  assert.equal(b.client.getWebSnapshot(), disconnected);
+});
+
+for (const problem of ['invalid', 'delta', 'refused']) {
+  test(`initial browser ${problem} snapshot reports a connection failure`, async (t) => {
+    const b = pendingBrowser(t);
+    await turn();
+    const socket = b.sockets[0];
+    socket.open();
+    if (problem === 'invalid') socket.onmessage({ data: '{' });
+    else if (problem === 'refused')
+      socket.message({ type: 'client:error', message: '浏览器页面过多。' });
+    else
+      socket.message({
+        type: 'client:state',
+        full: false,
+        revision: 0,
+        state: {},
+        events: {},
+        clock: { now: Date.now(), activity: {} },
+      });
+    await turn();
+    assert.equal(b.client.getWebSnapshot().phase, 'failed');
+    assert.match(b.client.getWebSnapshot().error, problem === 'refused' ? /页面过多/ : /同步数据/);
+    assert.equal(socket.readyState, 3);
+    assert.equal(b.client.state.error, null);
+  });
+}
+
+test('an established browser reconnects automatically and does not expose manual retry', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const b = pendingBrowser(t);
+  await turn();
+  b.sockets[0].open();
+  b.snapshot(b.sockets[0]);
+  b.sockets[0].close();
+  assert.equal(b.client.getWebSnapshot().phase, 'reconnecting');
+  assert.equal(b.client.state.status, 'reconnecting');
+  b.client.retryConnection();
+  await turn();
+  assert.equal(b.sockets.length, 1);
+  t.mock.timers.tick(1000);
+  await turn();
+  assert.equal(b.sockets.length, 2);
+  assert.equal(b.client.getWebSnapshot().phase, 'reconnecting');
+  t.mock.timers.tick(50000);
+  await turn();
+  assert.equal(b.client.getWebSnapshot().phase, 'reconnecting');
+  assert.match(b.client.getWebSnapshot().error, /超时/);
+  b.client.retryNow();
+  await turn();
+  assert.equal(b.sockets.length, 3);
+  b.sockets[2].open();
+  b.snapshot(b.sockets[2]);
+  assert.deepEqual(b.client.getWebSnapshot(), { phase: 'connected', error: null });
+  assert.deepEqual(
+    b.sockets[2].sent.map(({ method }) => method),
+    ['client:state'],
+  );
+});
+
 for (const type of ['session.stats', 'instructions.get', 'instructions.update']) {
   test(`browser ${type} forwards data and failures through the desktop fetch`, async (t) => {
     const f = fixture(t);

@@ -535,6 +535,10 @@ export function createRemoteClientAdapter(
 
 // The browser renders the same components but never opens a service connection. Loss of its Web socket
 // rejects in-flight requests without replaying them; reconnect only asks for a fresh desktop snapshot.
+export type WebConnectionState = {
+  phase: 'connecting' | 'connected' | 'reconnecting' | 'failed';
+  error: string | null;
+};
 export class RemoteClient extends ProxyClient {
   private probes = new Map<string, (value?: unknown, error?: Error, cancel?: boolean) => void>();
   private webSocket: WebSocket | null = null;
@@ -544,6 +548,8 @@ export class RemoteClient extends ProxyClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private readyTimer: ReturnType<typeof setTimeout> | undefined;
   private reconnecting = false;
+  private webEstablished = false;
+  private webState: WebConnectionState = { phase: 'connecting', error: null };
   private requests = new Map<
     string,
     {
@@ -563,32 +569,45 @@ export class RemoteClient extends ProxyClient {
     | undefined;
   serviceNow = () => Date.now() - this.clockOffset;
   activityAt = (sessionId: string) => this.remoteActivity[sessionId] ?? 0;
+  getWebSnapshot = () => this.webState;
+
+  private setWebState(phase: WebConnectionState['phase'], error: string | null = null) {
+    if (this.webState.phase === phase && this.webState.error === error) return;
+    this.webState = { phase, error };
+    for (const listener of this.listeners) listener();
+  }
 
   connect(...args: Parameters<ProxyClient['connect']>) {
     this.disconnect();
     this.address = args[4] ?? (() => Promise.resolve(args[0]));
     this.reconnecting = true;
+    this.setWebState('connecting');
     this.update({ status: 'connecting', error: null });
     void this.openWeb();
   }
   private async openWeb() {
     const epoch = ++this.epoch;
+    // Include address resolution and the first complete snapshot in the same bounded attempt.
+    clearTimeout(this.readyTimer);
+    this.readyTimer = setTimeout(
+      () => this.failWebAttempt(epoch, '连接桌面客户端超时，请重试。'),
+      50000,
+    );
     try {
       const url = await this.address?.();
-      if (!url || epoch !== this.epoch || !this.reconnecting) return;
+      if (epoch !== this.epoch || !this.reconnecting) return;
+      if (!url) throw new Error('桌面客户端的连接地址不可用。');
       const socket = new WebSocket(url);
       this.webSocket = socket;
       this.revision = -1;
       this.chunks = undefined;
-      clearTimeout(this.readyTimer);
-      this.readyTimer = setTimeout(() => {
-        if (epoch === this.epoch) socket.close();
-      }, 50000);
       socket.onopen = () => {
         if (epoch !== this.epoch) return;
         void this.call('client:state', []).catch((error: Error) => {
-          this.update({ error: error.message });
-          socket.close();
+          this.failWebAttempt(
+            epoch,
+            /请求超时/.test(error.message) ? '连接桌面客户端超时，请重试。' : error.message,
+          );
         });
       };
       socket.onmessage = ({ data }) => {
@@ -596,27 +615,41 @@ export class RemoteClient extends ProxyClient {
         try {
           this.message(JSON.parse(String(data)));
         } catch {
-          this.update({ error: '工作台同步数据无效，请重新连接。' });
-          socket.close();
+          this.failWebAttempt(epoch, '工作台同步数据无效，请重试。');
         }
       };
       socket.onerror = () => {};
       socket.onclose = () => {
-        if (epoch !== this.epoch) return;
-        clearTimeout(this.readyTimer);
-        this.webSocket = null;
-        this.chunks = undefined;
-        this.rejectRequests();
-        this.scheduleReconnect();
+        this.failWebAttempt(epoch, '与桌面客户端的连接已断开。');
       };
     } catch (error) {
-      if (epoch !== this.epoch) return;
-      this.update({ error: (error as Error).message });
-      this.scheduleReconnect();
+      this.failWebAttempt(
+        epoch,
+        error instanceof Error ? error.message : '连接桌面客户端失败，请重试。',
+      );
     }
   }
-  private scheduleReconnect() {
-    if (!this.reconnecting) return;
+  private failWebAttempt(epoch: number, error: string) {
+    if (epoch !== this.epoch || !this.reconnecting) return;
+    // Retire this attempt before closing it or rejecting its snapshot request. Both can run late.
+    this.epoch++;
+    clearTimeout(this.readyTimer);
+    this.readyTimer = undefined;
+    const socket = this.webSocket;
+    this.webSocket = null;
+    this.chunks = undefined;
+    if (socket && socket.readyState < 2) socket.close();
+    this.rejectRequests();
+    if (!this.webEstablished) {
+      this.reconnecting = false;
+      this.setWebState('failed', error);
+      this.update({ status: 'disconnected', connectionId: null, devices: [] });
+      return;
+    }
+    this.scheduleReconnect(error);
+  }
+  private scheduleReconnect(error: string) {
+    this.setWebState('reconnecting', error);
     this.update({ status: 'reconnecting', devices: [] });
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = setTimeout(
@@ -626,6 +659,14 @@ export class RemoteClient extends ProxyClient {
       },
       Math.min(1000 * 2 ** this.attempt++, 5000),
     );
+  }
+  retryConnection() {
+    if (this.webState.phase !== 'failed' || !this.address) return;
+    this.reconnecting = true;
+    this.attempt = 0;
+    this.setWebState('connecting');
+    this.update({ status: 'connecting' });
+    void this.openWeb();
   }
   retryNow() {
     if (!this.reconnecting || !this.reconnectTimer) return;
@@ -648,6 +689,8 @@ export class RemoteClient extends ProxyClient {
     this.chunks = undefined;
     this.rejectRequests();
     this.attempt = 0;
+    this.webEstablished = false;
+    this.setWebState('failed', '与桌面客户端的连接已断开。');
     this.update({ status: 'disconnected', connectionId: null, devices: [] });
   }
   private rejectRequests() {
@@ -825,8 +868,7 @@ export class RemoteClient extends ProxyClient {
       return;
     }
     if (value.type === 'client:error') {
-      this.update({ error: String(value.message) });
-      this.webSocket?.close();
+      this.failWebAttempt(this.epoch, String(value.message));
       return;
     }
     if (value.type === 'client:terminal') {
@@ -851,6 +893,7 @@ export class RemoteClient extends ProxyClient {
     )
       throw new Error('Invalid state');
     const message = value as StateMessage;
+    if (!message.full && this.revision < 0) throw new Error('Initial snapshot missing');
     if (!message.full && message.revision !== this.revision + 1)
       throw new Error('State revision gap');
     if (message.full && message.revision < this.revision) return;
@@ -872,6 +915,10 @@ export class RemoteClient extends ProxyClient {
     this.remoteActivity = message.clock.activity;
     this.attempt = 0;
     this.update({ ...message.state, events });
+    if (message.full) {
+      this.webEstablished = true;
+      this.setWebState('connected');
+    }
   }
   request(command: Command): ReturnType<ProxyClient['request']> {
     if (command.type === 'terminal.close') {

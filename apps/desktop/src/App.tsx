@@ -83,6 +83,7 @@ import type { MenuItem, MenuPosition } from './ui.tsx';
 const NativeTerminal = lazy(() => import('./NativeTerminal.tsx'));
 // The notes of every version so far are read only when asked for, and stay out of what the window starts with.
 const ReleaseNotes = lazy(() => import('./ReleaseNotes.tsx'));
+const noWebConnection = () => null;
 
 // The newest event of a kind is the session's current native state.
 function latest<T extends EventPayload['type']>(events: SessionEvent[], type: T) {
@@ -130,6 +131,10 @@ export function App() {
     </Suspense>
   );
   const state = useSyncExternalStore(client.subscribe, client.getSnapshot);
+  const webConnection = useSyncExternalStore(
+    client.subscribe,
+    client instanceof RemoteClient ? client.getWebSnapshot : noWebConnection,
+  );
   const [form, setForm] = useState<ConnectionForm>(() => ({
     url: localStorage.getItem(browserStorageKey('proxy-url')) ?? 'ws://127.0.0.1:8787/ws',
     token: '',
@@ -1235,7 +1240,12 @@ export function App() {
     return () => window.removeEventListener('keydown', listener);
   }, []);
 
-  if (state.status === 'disconnected' || state.status === 'connecting')
+  if (
+    webConnection?.phase === 'connecting' ||
+    webConnection?.phase === 'failed' ||
+    state.status === 'disconnected' ||
+    state.status === 'connecting'
+  )
     return localSettings ? (
       <div className="settings-only">
         <div className="window-drag" />
@@ -1266,10 +1276,42 @@ export function App() {
       <main className="login-page">
         <div className="login-content">
           <h1>连接桌面客户端的工作台</h1>
-          <p role="status">{currentError || '正在连接桌面客户端的执行后台…'}</p>
-          <button className="button" onClick={() => location.reload()}>
-            重新连接
-          </button>
+          <p
+            className={`remote-connection-status${webConnection?.phase === 'failed' ? ' remote-error' : ''}`}
+            role={webConnection?.phase === 'failed' ? 'alert' : 'status'}
+          >
+            {(webConnection?.phase === 'connecting' || state.status === 'connecting') &&
+              webConnection?.phase !== 'failed' && (
+                <RefreshCw className="spinning" aria-hidden="true" />
+              )}
+            <span>
+              {webConnection?.phase === 'failed'
+                ? webConnection.error || '连接工作台失败，请重试。'
+                : webConnection?.phase === 'connected'
+                  ? state.status === 'connecting'
+                    ? '桌面客户端正在连接代理服务…'
+                    : '请先在桌面客户端连接代理服务。'
+                  : '正在连接桌面客户端的工作台…'}
+            </span>
+          </p>
+          {webConnection?.phase === 'connected' &&
+            state.status === 'disconnected' &&
+            state.error && (
+              <p className="remote-error" role="alert">
+                代理服务：{state.error}
+              </p>
+            )}
+          {webConnection?.phase === 'failed' && (
+            <button
+              type="button"
+              className="button primary"
+              onClick={() => {
+                if (client instanceof RemoteClient) client.retryConnection();
+              }}
+            >
+              重试
+            </button>
+          )}
         </div>
       </main>
     ) : (
@@ -1550,12 +1592,24 @@ export function App() {
               <div className="elsewhere-bar" role="status">
                 <Unplug />
                 <p>
-                  与服务端的连接断开了，正在重新连接。运行中的任务仍在服务端继续，连上之后这里会补上期间的内容；
-                  {state.error ? `原因：${state.error.split('\n')[0]}` : '不需要做什么。'}
+                  {window.desktop?.remote ? (
+                    webConnection?.phase === 'reconnecting' ? (
+                      '与桌面客户端的连接已断开，正在自动重连…'
+                    ) : (
+                      '桌面客户端正在重新连接代理服务…'
+                    )
+                  ) : (
+                    <>
+                      与服务端的连接断开了，正在重新连接。运行中的任务仍在服务端继续，连上之后这里会补上期间的内容；
+                      {state.error ? `原因：${state.error.split('\n')[0]}` : '不需要做什么。'}
+                    </>
+                  )}
                 </p>
-                <button type="button" className="button" onClick={disconnect}>
-                  断开并回到登录页
-                </button>
+                {!window.desktop?.remote && (
+                  <button type="button" className="button" onClick={disconnect}>
+                    断开并回到登录页
+                  </button>
+                )}
               </div>
             )}
             {beside.length > 0 && (

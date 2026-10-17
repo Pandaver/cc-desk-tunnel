@@ -498,6 +498,22 @@ button.chip.danger:hover:not(:disabled) {
   flex-direction: column;
   gap: 20px;
 }
+.remote-connection-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 16px 0 24px;
+  overflow-wrap: anywhere;
+}
+.remote-connection-status svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 3px;
+}
+.remote-connection-status span {
+  min-width: 0;
+}
 .login-options {
   display: flex;
   gap: 20px;
