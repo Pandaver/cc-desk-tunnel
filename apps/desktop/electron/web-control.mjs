@@ -9,6 +9,8 @@ const methods = new Set([
   'client:load-earlier',
   'client:terminal',
   'client:clear-error',
+  'client:probe',
+  'client:cancel-probe',
 ]);
 
 // This transport owns browser sockets only. Operations run on the existing desktop client; it never
@@ -74,6 +76,10 @@ export function createWebControl(invoke) {
               id: request.id,
               ok: false,
               error: error instanceof Error ? error.message : '桌面客户端上的操作失败。',
+              ...(request.method === 'client:probe' &&
+              ['TimeoutError', 'AbortError'].includes(error?.name)
+                ? { code: error.name }
+                : {}),
             }),
           )
           .then((response) => {

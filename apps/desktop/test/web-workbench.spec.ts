@@ -1,10 +1,13 @@
 import { test as base, expect, _electron } from '@playwright/test';
-import type { Browser, BrowserContext, ElectronApplication, Page } from '@playwright/test';
-import { randomUUID } from 'node:crypto';
+import type { Browser, BrowserContext, ElectronApplication, Locator, Page } from '@playwright/test';
+import { execFile } from 'node:child_process';
+import { randomUUID, X509Certificate } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { createServer as createHttpsServer } from 'node:https';
 import { connect, createServer } from 'node:net';
 import type { Socket } from 'node:net';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { WebSocket, WebSocketServer } from 'ws';
 import { nativeSettingsSchema, PROTOCOL_VERSION } from '@cc-desk-tunnel/protocol';
 import type { Session } from '@cc-desk-tunnel/protocol';
@@ -12,6 +15,7 @@ import { DomainError } from '../../server/src/errors.ts';
 import { createProxyServer } from '../../server/src/server.ts';
 import { readInstructions, writeInstructions } from '../../server/src/native-instructions.ts';
 import { login, send, sessionAction, settled } from './helpers.ts';
+import type { LatencyMetric, LatencyResult } from '../src/latency.ts';
 
 type Desktop = {
   application: ElectronApplication;
@@ -137,9 +141,409 @@ async function select(page: Page, title: string) {
     .click();
 }
 
+// Only the remote service is a test fixture. The application uses its real TLS bridge and
+// pinned-certificate check; browser probes pass through its real Web listener and preload.
+async function latencyService() {
+  const script = `$key = [Security.Cryptography.RSA]::Create(2048)
+    $request = [Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=localhost', $key, 'SHA256', [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+    $certificate = $request.CreateSelfSigned([DateTimeOffset]::Now.AddDays(-1), [DateTimeOffset]::Now.AddDays(1))
+    @{ cert = $certificate.ExportCertificatePem(); key = $key.ExportPkcs8PrivateKeyPem() } | ConvertTo-Json -Compress`;
+  const { stdout } = await promisify(execFile)(
+    'pwsh.exe',
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+    { windowsHide: true },
+  );
+  const tls = JSON.parse(stdout) as { cert: string; key: string };
+  const server = createHttpsServer(tls);
+  const sockets = new WebSocketServer({ server, autoPong: false });
+  const token = 'test-only-latency-service-credential';
+  const state = { probes: 0, authentications: 0, answer: true };
+  sockets.on('connection', (socket) => {
+    socket.on('error', () => {});
+    socket.on('ping', (payload) => {
+      if (String(payload).startsWith('latency:')) {
+        state.probes++;
+        if (!state.answer) return;
+      }
+      if (socket.readyState === WebSocket.OPEN) socket.pong(payload);
+    });
+    socket.on('message', (raw) => {
+      const message = JSON.parse(String(raw));
+      if (message.type !== 'auth') return;
+      if (message.token !== token) return socket.close(1008, 'Invalid test token');
+      state.authentications++;
+      socket.send(
+        JSON.stringify({
+          type: 'ready',
+          protocolVersion: PROTOCOL_VERSION,
+          version: '0.0.1',
+          connectionId: randomUUID(),
+          adapter: 'simulation',
+          sessions: [],
+        }),
+      );
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  return {
+    state,
+    token,
+    url: `wss://127.0.0.1:${(server.address() as { port: number }).port}/ws`,
+    fingerprint: new X509Certificate(tls.cert).fingerprint256,
+    async close() {
+      for (const socket of sockets.clients) socket.terminate();
+      await new Promise<void>((resolve) => sockets.close(() => resolve()));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+async function connectLatencyService(
+  page: Page,
+  service: Awaited<ReturnType<typeof latencyService>>,
+) {
+  await page.getByRole('button', { name: '设置与账号', exact: true }).click();
+  await page.getByRole('menuitem', { name: '断开连接', exact: true }).click();
+  await page.getByRole('button', { name: '远程代理', exact: true }).click();
+  await page.getByLabel('服务地址', { exact: true }).fill(service.url);
+  await page.getByLabel('服务凭据', { exact: true }).fill(service.token);
+  await page.getByLabel('服务证书指纹', { exact: true }).fill(service.fingerprint);
+  await page.getByRole('button', { name: '连接', exact: true }).click();
+  await expect(page.locator('.connection-status')).toContainText('已连接');
+}
+
+async function diagnostics(page: Page) {
+  await page.getByRole('button', { name: '连接诊断', exact: true }).click();
+  return page.getByRole('dialog', { name: '连接诊断', exact: true });
+}
+
+async function latencyResult(page: Page) {
+  return page.evaluate(() => {
+    const key = Object.keys(sessionStorage).find((key) => key.endsWith('proxy-latency-result'));
+    return key ? sessionStorage.getItem(key) : null;
+  });
+}
+
+async function expectLatencyDetails(page: Page, panel: Locator, remote: boolean) {
+  const saved: LatencyResult = JSON.parse((await latencyResult(page))!);
+  const metrics: [LatencyMetric, string][] = remote
+    ? [
+        ['full', '完整链路'],
+        ['workbench', '工作台'],
+        ['service', '服务连接'],
+      ]
+    : [['service', '服务连接']];
+  const format = (value: number) => (value < 1 ? '<1' : String(Math.round(value)));
+  await expect(panel.locator('.latency-detail')).toHaveCount(metrics.length);
+  for (const [key, label] of metrics) {
+    const detail = panel.getByRole('region', { name: label, exact: true });
+    const { values } = saved.metrics[key]!;
+    await expect(detail.locator('.latency-range dd')).toHaveText([
+      `${format(Math.min(...values))} ms`,
+      `${format(Math.max(...values))} ms`,
+    ]);
+    await expect(
+      detail.getByRole('list', { name: '成功采样 (ms)' }).getByRole('listitem'),
+    ).toHaveText(values.map(format));
+    await expect(detail.locator('.latency-issues')).toHaveCount(0);
+  }
+}
+
 test.describe('Electron Web workbench', () => {
   test.skip(process.platform !== 'win32', 'Windows Electron integration');
   test.setTimeout(120_000);
+
+  test('connection diagnostics reuse the real business bridge through local and relayed browsers', async ({
+    desktop,
+    browser,
+  }, testInfo) => {
+    const service = await latencyService();
+    const contexts: BrowserContext[] = [];
+    const relay = createProxyServer({
+      token: 'test-only-latency-relay-credential',
+      dataDir: join(desktop.profile, 'latency-relay'),
+      webRelay: { port: await unusedPort() },
+    });
+    try {
+      await connectLatencyService(desktop.page, service);
+      const local = await enable(desktop.page);
+      const first = await pair(browser, local);
+      const second = await pair(browser, local, true);
+      contexts.push(first.context, second.context);
+      const desktopPanel = await diagnostics(desktop.page);
+      await expect(
+        desktopPanel.getByRole('button', { name: '测试延迟', exact: true }),
+      ).toBeEnabled();
+      expect(service.state.probes).toBe(0);
+      await desktopPanel.getByRole('button', { name: '测试延迟', exact: true }).click();
+      await expect(desktopPanel.locator('[data-metric="service"]')).toContainText('5/5');
+      await expect(desktopPanel.getByLabel('服务连接延迟', { exact: true })).toHaveText(/ms$/);
+      expect(service.state.probes).toBe(5);
+      const desktopSummary = desktopPanel.locator('summary');
+      await desktopSummary.focus();
+      await desktop.page.keyboard.press('Enter');
+      await expect(desktopPanel.locator('details')).toHaveJSProperty('open', true);
+      await expectLatencyDetails(desktop.page, desktopPanel, false);
+      await desktop.page.keyboard.press('Space');
+      await expect(desktopPanel.locator('details')).toHaveJSProperty('open', false);
+      await desktop.page.keyboard.press('Enter');
+      await expect(desktopPanel.locator('details')).toHaveJSProperty('open', true);
+      await expect(desktopSummary.locator('svg')).toHaveCSS(
+        'transform',
+        'matrix(0, 1, -1, 0, 0, 0)',
+      );
+      expect(service.state.probes).toBe(5);
+      await desktop.page.screenshot({ path: testInfo.outputPath('desktop-latency.png') });
+      await desktop.page.getByRole('button', { name: '连接诊断', exact: true }).click();
+
+      const firstPanel = await diagnostics(first.page);
+      await firstPanel.getByRole('button', { name: '测试延迟', exact: true }).click();
+      for (const metric of ['full', 'workbench', 'service'])
+        await expect(firstPanel.locator(`[data-metric="${metric}"]`)).toContainText('5/5');
+      expect(service.state.probes).toBe(10);
+      const saved = await latencyResult(first.page);
+      expect(saved).not.toBeNull();
+      await firstPanel.locator('summary').click();
+      await expectLatencyDetails(first.page, firstPanel, true);
+      await first.page.screenshot({ path: testInfo.outputPath('browser-latency.png') });
+      await first.page.setViewportSize({ width: 390, height: 844 });
+      await expect(firstPanel).toBeVisible();
+      expect(
+        await first.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+      ).toBe(true);
+      expect(await firstPanel.evaluate((panel) => panel.scrollWidth <= panel.clientWidth)).toBe(
+        true,
+      );
+      await first.page.screenshot({ path: testInfo.outputPath('browser-latency-narrow.png') });
+      await first.page.setViewportSize({ width: 1280, height: 900 });
+      await first.page.keyboard.press('Escape');
+      await expect(firstPanel).not.toBeVisible();
+      await expect(first.page.getByRole('button', { name: '连接诊断', exact: true })).toBeFocused();
+      await first.page.keyboard.press('Enter');
+      await expect(firstPanel).toBeVisible();
+      expect(await latencyResult(first.page)).toBe(saved);
+      const otherPanel = await diagnostics(second.page);
+      await expect(otherPanel.locator('[data-metric="workbench"]')).not.toContainText('5/5');
+      expect(await latencyResult(second.page)).toBeNull();
+      await first.page.reload();
+      await expect(first.page.locator('.connection-status')).toContainText('已连接');
+      const restored = await diagnostics(first.page);
+      await expect(restored.locator('[data-metric="workbench"]')).toContainText('5/5');
+      expect(await latencyResult(first.page)).toBe(saved);
+      expect(service.state.probes).toBe(10);
+
+      // An independent real relay forwards the same browser control channel. Changing the
+      // saved relay target must not replace the existing, measured business connection.
+      const relayOrigin = await relay.listen(0);
+      await desktop.page.evaluate(async (origin) => {
+        await window.desktop!.saveLogin({
+          mode: 'remote',
+          url: `${origin.replace('http:', 'ws:')}/ws`,
+          token: 'test-only-latency-relay-credential',
+          fingerprint: '',
+          remember: false,
+          autoLogin: false,
+        });
+        await window.desktop!.configureRelay!(true);
+      }, relayOrigin);
+      await expect
+        .poll(() =>
+          desktop.page.evaluate(() => window.desktop!.relayStatus!().then((s) => s.state)),
+        )
+        .toBe('online');
+      const relayStatus = await desktop.page.evaluate(() => window.desktop!.relayStatus!());
+      const remote = await pair(browser, { url: relayStatus.url!, token: local.token });
+      contexts.push(remote.context);
+      const remotePanel = await diagnostics(remote.page);
+      await remotePanel.getByRole('button', { name: '测试延迟', exact: true }).click();
+      for (const metric of ['full', 'workbench', 'service'])
+        await expect(remotePanel.locator(`[data-metric="${metric}"]`)).toContainText('5/5');
+      expect(service.state.probes).toBe(15);
+      expect(service.state.authentications).toBe(1);
+      await expect(desktop.page.locator('.connection-status')).toContainText('已连接');
+    } finally {
+      await Promise.allSettled(contexts.map((context) => context.close()));
+      await desktop.page.evaluate(() => window.desktop!.configureRelay!(false)).catch(() => {});
+      await relay.close();
+      await service.close();
+    }
+  });
+
+  test('connection diagnostics cancel and time out without reconnecting or replacing previous results', async ({
+    desktop,
+    browser,
+  }, testInfo) => {
+    const service = await latencyService();
+    let context: BrowserContext | undefined;
+    try {
+      await connectLatencyService(desktop.page, service);
+      const access = await enable(desktop.page);
+      const paired = await pair(browser, access);
+      context = paired.context;
+      const page = paired.page;
+      let panel = await diagnostics(page);
+      await panel.getByRole('button', { name: '测试延迟', exact: true }).click();
+      await expect(panel.locator('[data-metric="service"]')).toContainText('5/5');
+      const saved = await latencyResult(page);
+      expect(service.state.probes).toBe(5);
+
+      service.state.answer = false;
+      await panel.getByRole('button', { name: '测试延迟', exact: true }).click();
+      await expect.poll(() => service.state.probes).toBe(6);
+      await page.getByRole('button', { name: '连接诊断', exact: true }).click();
+      await expect(panel).not.toBeVisible();
+      expect(await latencyResult(page)).toBe(saved);
+      panel = await diagnostics(page);
+      await expect(panel.getByRole('button', { name: '测试延迟', exact: true })).toBeEnabled();
+      await expect(panel.locator('[data-metric="service"]')).toContainText('5/5');
+
+      await panel.getByRole('button', { name: '测试延迟', exact: true }).click();
+      await expect.poll(() => service.state.probes).toBe(7);
+      await panel.getByRole('button', { name: '取消测试', exact: true }).click();
+      await expect(panel.getByRole('button', { name: '测试延迟', exact: true })).toBeEnabled();
+      expect(await latencyResult(page)).toBe(saved);
+
+      await panel.getByRole('button', { name: '测试延迟', exact: true }).click();
+      await expect.poll(() => service.state.probes).toBe(8);
+      // Exercise the native page-visibility handler without depending on headless Chromium's
+      // window manager. The pending probe still uses the real IPC, bridge and remote socket.
+      await page.evaluate(() => {
+        Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+        document.dispatchEvent(new Event('visibilitychange'));
+        Reflect.deleteProperty(document, 'hidden');
+      });
+      await expect(panel).not.toBeVisible();
+      expect(await latencyResult(page)).toBe(saved);
+      panel = await diagnostics(page);
+      await panel.getByRole('button', { name: '测试延迟', exact: true }).click();
+      await expect(panel.locator('[data-metric="service"]')).toContainText('0/5', {
+        timeout: 40000,
+      });
+      await expect(panel.locator('[data-metric="workbench"]')).toContainText('5/5');
+      await panel.locator('summary').click();
+      const serviceDetail = panel.getByRole('region', { name: '服务连接', exact: true });
+      await expect(serviceDetail).toContainText('没有成功的探测');
+      await expect(serviceDetail.locator('.latency-issues')).toContainText('5 次超时');
+      await expect(serviceDetail.locator('.latency-range')).toHaveCount(0);
+      await expect(serviceDetail.getByRole('list')).toHaveCount(0);
+      await expect(
+        panel.getByRole('region', { name: '工作台', exact: true }).getByRole('listitem'),
+      ).toHaveCount(5);
+      await page.setViewportSize({ width: 390, height: 844 });
+      expect(await panel.evaluate((panel) => panel.scrollWidth <= panel.clientWidth)).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath('browser-latency-timeout.png') });
+      await page.setViewportSize({ width: 1280, height: 900 });
+      expect(service.state.probes).toBe(13);
+      expect(service.state.authentications).toBe(1);
+      await expect(page.locator('.connection-status')).toContainText('已连接');
+      await expect(desktop.page.locator('.connection-status')).toContainText('已连接');
+
+      service.state.answer = true;
+      await panel.getByRole('button', { name: '测试延迟', exact: true }).click();
+      await expect(panel.locator('[data-metric="service"]')).toContainText('5/5');
+      await expectLatencyDetails(page, panel, true);
+      expect(service.state.probes).toBe(18);
+      expect(service.state.authentications).toBe(1);
+
+      const previous = await latencyResult(page);
+      service.state.answer = false;
+      await panel.getByRole('button', { name: '测试延迟', exact: true }).click();
+      await expect.poll(() => service.state.probes).toBe(19);
+      await desktop.page.getByRole('button', { name: '设置与账号', exact: true }).click();
+      await desktop.page.getByRole('menuitem', { name: '断开连接', exact: true }).click();
+      await expect(
+        desktop.page.getByRole('heading', { name: '连接代理服务', exact: true }),
+      ).toBeVisible();
+      await expect(panel).not.toBeVisible();
+      expect(await latencyResult(page)).toBe(previous);
+      // Opening the native window's menu may outlast one probe's timeout. Only probes
+      // after the completed disconnect would mean the cancelled run resumed itself.
+      const stopped = service.state.probes;
+      service.state.answer = true;
+      await desktop.page.getByLabel('服务地址', { exact: true }).fill(service.url);
+      await desktop.page.getByLabel('服务凭据', { exact: true }).fill(service.token);
+      await desktop.page.getByLabel('服务证书指纹', { exact: true }).fill(service.fingerprint);
+      await desktop.page.getByRole('button', { name: '连接', exact: true }).click();
+      await expect(page.locator('.connection-status')).toContainText('已连接');
+      panel = await diagnostics(page);
+      await expect(panel).toContainText('上次连接');
+      expect(await latencyResult(page)).toBe(previous);
+      expect(service.state.authentications).toBe(2);
+      expect(service.state.probes).toBe(stopped);
+    } finally {
+      await context?.close();
+      await service.close();
+    }
+  });
+
+  test('connection diagnostics keep partial samples and long errors readable in a small viewport', async ({
+    desktop,
+    browser,
+  }, testInfo) => {
+    const access = await enable(desktop.page);
+    const { page, context } = await pair(browser, access);
+    try {
+      const result: LatencyResult = {
+        version: 1,
+        remote: true,
+        connectionId: 'previous-connection',
+        completedAt: Date.now(),
+        metrics: {
+          full: {
+            values: [0.25, 1234.6],
+            attempts: 5,
+            timeouts: 1,
+            failures: 2,
+            error: '探测失败',
+          },
+          workbench: { values: [0, 0.5, 1, 2, 3], attempts: 5, timeouts: 0, failures: 0 },
+          service: {
+            values: [],
+            attempts: 5,
+            timeouts: 0,
+            failures: 5,
+            error: `未获得服务连接结果：${'connection_closed_'.repeat(30)}`,
+          },
+        },
+      };
+      // Exercise persisted-result rendering without depending on network timing for edge values.
+      await page.evaluate(
+        (saved) => sessionStorage.setItem('proxy-latency-result', JSON.stringify(saved)),
+        result,
+      );
+      await page.reload();
+      await expect(page.locator('.connection-status')).toContainText('已连接');
+      await page.setViewportSize({ width: 320, height: 568 });
+      const panel = await diagnostics(page);
+      await panel.locator('summary').click();
+      await expect(panel).toContainText('上次连接');
+      const full = panel.getByRole('region', { name: '完整链路', exact: true });
+      await expect(full.locator('.latency-range dd')).toHaveText(['<1 ms', '1235 ms']);
+      await expect(full.getByRole('listitem')).toHaveText(['<1', '1235']);
+      await expect(full.locator('.latency-issues')).toContainText('1 次超时 · 2 次失败');
+      const failed = panel.getByRole('region', { name: '服务连接', exact: true });
+      await expect(failed).toContainText('没有成功的探测');
+      await expect(failed.locator('.latency-issues')).toContainText(result.metrics.service!.error!);
+      await expect(failed.getByRole('list')).toHaveCount(0);
+      for (const element of [panel, ...(await panel.locator('.latency-detail').all())])
+        expect(
+          await element.evaluate((element) => element.scrollWidth <= element.clientWidth),
+        ).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath('browser-latency-partial.png') });
+      await panel.getByRole('button', { name: '测试延迟', exact: true }).focus();
+      await expect(panel.getByRole('button', { name: '测试延迟', exact: true })).toBeInViewport();
+      await page.screenshot({ path: testInfo.outputPath('browser-latency-long-error.png') });
+      await page.keyboard.press('Escape');
+      await expect(panel).not.toBeVisible();
+      await expect(page.getByRole('button', { name: '连接诊断', exact: true })).toBeFocused();
+      expect(JSON.parse((await latencyResult(page))!)).toEqual(result);
+    } finally {
+      await context.close();
+    }
+  });
 
   test('optional service relay serves the real shared workbench and leaves local access intact', async ({
     desktop,

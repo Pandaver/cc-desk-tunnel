@@ -65,7 +65,7 @@ function createWebRequests({ window, timeout = 30_000 }) {
           pending.delete(id);
           reject(new Error('桌面操作结果尚未确认；请查看当前状态，操作未自动重发。'));
         }, timeout);
-        pending.set(id, { sender, resolve, reject, timer });
+        pending.set(id, { sender, resolve, reject, timer, diagnostic: method === 'client:probe' });
         try {
           sender.send('remote:request', { id, method, args, viewId });
         } catch (error) {
@@ -82,7 +82,12 @@ function createWebRequests({ window, timeout = 30_000 }) {
       clearTimeout(entry.timer);
       pending.delete(response.id);
       if (response.ok === true) entry.resolve(response.result);
-      else entry.reject(new Error(String(response.error || '桌面操作失败。')));
+      else {
+        const error = new Error(String(response.error || '桌面操作失败。'));
+        if (entry.diagnostic && ['TimeoutError', 'AbortError'].includes(response.code))
+          error.name = response.code;
+        entry.reject(error);
+      }
     },
     cancel() {
       clearTimeout(detachTimer);

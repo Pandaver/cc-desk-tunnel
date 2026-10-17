@@ -132,6 +132,8 @@ declare global {
         waits?: { connect: number; ssh: number; ready: number };
       }) => Promise<{ url: string }>;
       disconnectProxy: () => Promise<void>;
+      probeService?: (request: { id: string; connectionId: string }) => Promise<number>;
+      cancelServiceProbe?: (id: string) => Promise<void>;
       onProxyClosed: (callback: () => void) => () => void;
     };
   }

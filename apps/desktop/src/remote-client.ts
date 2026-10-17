@@ -2,6 +2,7 @@ import { MAX_FRAME_BYTES, commandSchema, terminalControlSchema } from '@cc-desk-
 import type { ServerMessage, SessionEvent, TerminalControl } from '@cc-desk-tunnel/protocol';
 import { ProxyClient, RequestInterruptedError } from './client.ts';
 import type { ClientState } from './client.ts';
+import type { LatencyKind, LatencyProbe } from './latency.ts';
 
 type Command = Parameters<ProxyClient['request']>[0];
 type FetchCommand = Parameters<ProxyClient['fetch']>[0];
@@ -38,6 +39,28 @@ type StateMessage = {
   clock: Clock;
 };
 type RemoteRequest = { id: string; viewId?: string; method: string; args: unknown[] };
+// Electron's contextBridge does not preserve DOMException rejection properties. Encode only
+// diagnostic outcomes as plain data before that boundary so cancellation cannot become a generic
+// failure while the next workbench snapshot is still in flight. Preload unwraps this envelope.
+export async function bridgeRemoteClientRequest(
+  invoke: (request: RemoteRequest) => unknown | Promise<unknown>,
+  request: RemoteRequest,
+) {
+  if (request.method !== 'client:probe') return invoke(request);
+  try {
+    return { diagnostic: true, ok: true, result: await invoke(request) };
+  } catch (error) {
+    return {
+      diagnostic: true,
+      ok: false,
+      error: error instanceof Error ? error.message : '延迟测试失败。',
+      code:
+        error instanceof Error && ['AbortError', 'TimeoutError'].includes(error.name)
+          ? error.name
+          : 'Error',
+    };
+  }
+}
 export type RemoteClientHost = {
   onRemoteEnabledChanged: (listener: (enabled: boolean) => void) => () => void;
   onRemoteRequest: (
@@ -56,6 +79,8 @@ export const remoteClientMethods = [
   'client:terminal',
   'client:clear-error',
   'client:detach',
+  'client:probe',
+  'client:cancel-probe',
 ];
 const fetches = new Set([
   'usage.summary',
@@ -83,6 +108,8 @@ export function createRemoteClientAdapter(
   interval = 100,
 ) {
   const views = new Set<string>();
+  const probes = new Map<string, { id: string; controller: AbortController }>();
+  const probeRates = new Map<string, { began: number; count: number }>();
   const terminals = new Map<
     string,
     {
@@ -215,6 +242,9 @@ export function createRemoteClientAdapter(
   }
   function detach(viewId: string) {
     views.delete(viewId);
+    probes.get(viewId)?.controller.abort();
+    probes.delete(viewId);
+    probeRates.delete(viewId);
     for (const [sessionId, terminal] of terminals) {
       if (terminal.viewId !== viewId) continue;
       terminal.retired = true;
@@ -224,6 +254,10 @@ export function createRemoteClientAdapter(
   }
   function listen() {
     unsubscribe ??= client.subscribe(() => {
+      if (connectionId !== client.state.connectionId || client.state.status !== 'connected') {
+        for (const probe of probes.values()) probe.controller.abort();
+        probes.clear();
+      }
       if (connectionId !== client.state.connectionId) {
         connectionId = client.state.connectionId;
         terminals.clear();
@@ -398,12 +432,44 @@ export function createRemoteClientAdapter(
       return { revision };
     }
     if (!views.has(viewId)) throw new Error('请先同步工作台。');
+    // Cancellation is scoped to this browser's original request, even after a service switch.
+    if (method === 'client:cancel-probe') {
+      if (args.length !== 2 || !uuid(args[1])) throw new Error('请求格式无效。');
+      const pending = probes.get(viewId);
+      if (pending?.id === args[1]) pending.controller.abort();
+      return null;
+    }
     // A browser frame may arrive after the desktop has connected to a different service.
     // Bind every operation to the connection it was issued for, not whichever one is current.
     const [expectedConnection, ...operationArgs] = args;
-    if (expectedConnection !== client.state.connectionId)
+    if (expectedConnection !== client.state.connectionId) {
+      if (method === 'client:probe')
+        throw new DOMException('连接已变化，测试已取消。', 'AbortError');
       throw new Error('桌面服务连接已变化，请确认当前工作台后重试；操作未发送。');
+    }
     args = operationArgs;
+    if (method === 'client:probe') {
+      if (args.length !== 2 || (args[0] !== 'workbench' && args[0] !== 'service') || !uuid(args[1]))
+        throw new Error('请求格式无效。');
+      const now = Date.now();
+      const rate = probeRates.get(viewId);
+      if (!rate || now - rate.began >= 10000 || now < rate.began)
+        probeRates.set(viewId, { began: now, count: 1 });
+      else if (++rate.count > 32) throw new Error('延迟测试过于频繁，请稍后重试。');
+      if (probes.has(viewId)) throw new Error('延迟测试正在进行。');
+      // Echo through the same control connection without requesting or publishing a snapshot.
+      if (args[0] === 'workbench') return null;
+      // IPC has its own request ID; retain the browser's probe ID only within this view.
+      const probe = { id: args[1], controller: new AbortController() };
+      probes.set(viewId, probe);
+      try {
+        const result = await client.measureLatency('service', probe.controller.signal);
+        if (probe.controller.signal.aborted) throw new DOMException('测试已取消。', 'AbortError');
+        return result.service;
+      } finally {
+        if (probes.get(viewId) === probe) probes.delete(viewId);
+      }
+    }
     let result: unknown;
     try {
       switch (method) {
@@ -470,6 +536,7 @@ export function createRemoteClientAdapter(
 // The browser renders the same components but never opens a service connection. Loss of its Web socket
 // rejects in-flight requests without replaying them; reconnect only asks for a fresh desktop snapshot.
 export class RemoteClient extends ProxyClient {
+  private probes = new Map<string, (value?: unknown, error?: Error, cancel?: boolean) => void>();
   private webSocket: WebSocket | null = null;
   private address: (() => Promise<string>) | null = null;
   private epoch = 0;
@@ -584,6 +651,8 @@ export class RemoteClient extends ProxyClient {
     this.update({ status: 'disconnected', connectionId: null, devices: [] });
   }
   private rejectRequests() {
+    for (const finish of this.probes.values())
+      finish(undefined, new DOMException('工作台连接已变化，测试已取消。', 'AbortError'));
     this.dropTerminals();
     for (const request of this.requests.values()) {
       clearTimeout(request.timer);
@@ -594,6 +663,67 @@ export class RemoteClient extends ProxyClient {
       );
     }
     this.requests.clear();
+  }
+  measureLatency(kind: LatencyKind, signal: AbortSignal): Promise<LatencyProbe> {
+    if (signal.aborted) return Promise.reject(new DOMException('测试已取消。', 'AbortError'));
+    if (!['workbench', 'service'].includes(kind))
+      return Promise.reject(new Error('测试类型无效。'));
+    const socket = this.webSocket;
+    const connectionId = this.state.connectionId;
+    if (!socket || socket.readyState !== WebSocket.OPEN || this.state.status !== 'connected')
+      return Promise.reject(new Error('工作台未连接。'));
+    if (this.probes.size) return Promise.reject(new Error('延迟测试正在进行。'));
+    const id = crypto.randomUUID();
+    const began = performance.now();
+    return new Promise((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout>;
+      let unsubscribe = () => {};
+      const finish = (value?: unknown, error?: Error, cancel = false) => {
+        if (!this.probes.delete(id)) return;
+        clearTimeout(timer);
+        signal.removeEventListener('abort', aborted);
+        unsubscribe();
+        if (cancel && socket.readyState === WebSocket.OPEN) {
+          try {
+            socket.send(
+              JSON.stringify({
+                id: crypto.randomUUID(),
+                method: 'client:cancel-probe',
+                args: [connectionId, id],
+              }),
+            );
+          } catch {}
+        }
+        if (error) reject(error);
+        else if (
+          kind === 'service' &&
+          (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 60000)
+        )
+          reject(new Error('延迟测试返回了无效结果。'));
+        else
+          resolve({
+            elapsed: performance.now() - began,
+            ...(kind === 'service' ? { service: value as number } : {}),
+          });
+      };
+      const aborted = () => finish(undefined, new DOMException('测试已取消。', 'AbortError'), true);
+      this.probes.set(id, finish);
+      signal.addEventListener('abort', aborted, { once: true });
+      unsubscribe = this.subscribe(() => {
+        if (this.state.connectionId !== connectionId || this.state.status !== 'connected')
+          finish(undefined, new DOMException('连接已变化，测试已取消。', 'AbortError'), true);
+      });
+      // A nested probe includes both network legs and the service's own bounded probe wait.
+      timer = setTimeout(
+        () => finish(undefined, new DOMException('延迟测试超时。', 'TimeoutError'), true),
+        kind === 'service' ? 6000 : 3000,
+      );
+      try {
+        socket.send(JSON.stringify({ id, method: 'client:probe', args: [connectionId, kind, id] }));
+      } catch (error) {
+        finish(undefined, error instanceof Error ? error : new Error('延迟测试发送失败。'), true);
+      }
+    });
   }
   private call(
     method: string,
@@ -669,6 +799,20 @@ export class RemoteClient extends ProxyClient {
       return;
     }
     if (value.type === 'response') {
+      const probe = this.probes.get(value.id);
+      if (probe) {
+        const message = typeof value.error === 'string' ? value.error : '延迟测试失败。';
+        const error =
+          value.code === 'AbortError'
+            ? new DOMException('连接已变化，测试已取消。', 'AbortError')
+            : value.code === 'TimeoutError' || message.includes('延迟测试超时')
+              ? Object.assign(new DOMException('延迟测试超时。', 'TimeoutError'), {
+                  serviceTimedOut: true,
+                })
+              : new Error(message);
+        probe(value.result, value.ok ? undefined : error);
+        return;
+      }
       const request = this.requests.get(value.id);
       if (!request) return;
       clearTimeout(request.timer);

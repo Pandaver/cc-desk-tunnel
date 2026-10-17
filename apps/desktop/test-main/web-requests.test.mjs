@@ -32,6 +32,21 @@ function fixture(t) {
   return { requests, messages, first, sender, state, select: (value) => (current = value) };
 }
 
+test('diagnostic cancellation and timeout codes survive IPC without changing business error semantics', async (t) => {
+  const f = fixture(t);
+  for (const code of ['AbortError', 'TimeoutError']) {
+    for (const method of ['client:probe', 'client:request']) {
+      const pending = assert.rejects(f.requests.invoke(method, [], 'page'), {
+        name: method === 'client:probe' ? code : 'Error',
+        message: 'diagnostic outcome',
+      });
+      const { sender, value } = f.messages.at(-1);
+      f.requests.reply(sender, { id: value.id, ok: false, error: 'diagnostic outcome', code });
+      await pending;
+    }
+  }
+});
+
 test('internal detach is ordered after state and needs no slot from the full business request pool', async (t) => {
   const f = fixture(t);
   for (let index = 0; index < 16; index++) await f.state(`view-${index}`);

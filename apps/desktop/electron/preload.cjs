@@ -31,12 +31,28 @@ contextBridge.exposeInMainWorld('desktop', {
       void Promise.resolve()
         .then(() => callback(request))
         .then(
-          (result) => ipcRenderer.send('remote:response', { id: request.id, ok: true, result }),
+          (result) => {
+            if (request.method === 'client:probe' && result?.diagnostic === true) {
+              ipcRenderer.send('remote:response', {
+                id: request.id,
+                ok: result.ok === true,
+                result: result.result,
+                error: typeof result.error === 'string' ? result.error : '延迟测试失败。',
+                code: ['AbortError', 'TimeoutError'].includes(result.code)
+                  ? result.code
+                  : undefined,
+              });
+            } else ipcRenderer.send('remote:response', { id: request.id, ok: true, result });
+          },
           (error) =>
             ipcRenderer.send('remote:response', {
               id: request.id,
               ok: false,
               error: error instanceof Error ? error.message : '桌面操作失败。',
+              ...(request.method === 'client:probe' &&
+              ['TimeoutError', 'AbortError'].includes(error?.name)
+                ? { code: error.name }
+                : {}),
             }),
         );
     };
@@ -118,6 +134,8 @@ contextBridge.exposeInMainWorld('desktop', {
   },
   connectProxy: (config) => ipcRenderer.invoke('proxy:connect', config),
   disconnectProxy: () => ipcRenderer.invoke('proxy:disconnect'),
+  probeService: (request) => ipcRenderer.invoke('proxy:probe', request),
+  cancelServiceProbe: (id) => ipcRenderer.invoke('proxy:cancel-probe', id),
   onProxyClosed: (callback) => {
     const listener = () => callback();
     ipcRenderer.on('proxy:closed', listener);

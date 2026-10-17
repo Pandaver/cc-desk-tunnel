@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef } from 'react';
 import type { ProxyClient } from './client.ts';
-import { createRemoteClientAdapter, remoteClientMethods } from './remote-client.ts';
+import {
+  bridgeRemoteClientRequest,
+  createRemoteClientAdapter,
+  remoteClientMethods,
+} from './remote-client.ts';
 import type { RemoteClientHost } from './remote-client.ts';
 
 // Installing this hook does nothing until the desktop's optional Web listener is enabled.
@@ -29,7 +33,11 @@ export function useRemoteClientRequests(
     let requests = () => {};
     const enabled = host.onRemoteEnabledChanged((value) => {
       requests();
-      requests = value ? host.onRemoteRequest!(remoteClientMethods, current.invoke) : () => {};
+      requests = value
+        ? host.onRemoteRequest!(remoteClientMethods, (request) =>
+            bridgeRemoteClientRequest(current.invoke, request),
+          )
+        : () => {};
       current.setEnabled(value);
     });
     return () => {

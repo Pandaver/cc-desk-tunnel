@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
@@ -38,7 +40,10 @@ function fixture(initialFiles) {
   let listenerFailure;
   let quits = 0;
   const profile = join(dirname(filename), 'memory-profile');
-  const sender = { isDestroyed: () => false, send: (...args) => messages.push(args) };
+  const sender = Object.assign(new EventEmitter(), {
+    isDestroyed: () => false,
+    send: (...args) => messages.push(args),
+  });
   const electron = {
     app: {
       getPath: () => profile,
@@ -112,6 +117,7 @@ function fixture(initialFiles) {
             url: `ws://127.0.0.1/bridge-${bridges.length}`,
             closed: 0,
             closeGate: undefined,
+            probe: async () => 12,
             async close() {
               order.push('bridge:close');
               bridge.closed++;
@@ -170,6 +176,8 @@ function fixture(initialFiles) {
   const event = { senderFrame: { url: 'file:///desktop/index.html' }, sender };
   return {
     call: (name, ...args) => handlers.get(name)(event, ...args),
+    callAs: (name, otherEvent, ...args) => handlers.get(name)(otherEvent, ...args),
+    sender,
     emit: (name, ...args) => events.get(name)(...args),
     imported,
     order,
@@ -442,4 +450,119 @@ test('switching business service changes only the next explicit relay enable, no
   assert.equal(host.relays[2].options.config.url, replacement.url);
   assert.equal(host.relays[2].options.config.token, replacement.token);
   assert.equal(host.bridges[0].closed, 0);
+});
+
+const probeRequest = () => ({ id: randomUUID(), connectionId: randomUUID() });
+function pendingProbe() {
+  return (_connectionId, { signal }) =>
+    new Promise((_resolve, reject) => {
+      const abort = () => reject(new Error('延迟测试已取消。'));
+      if (signal.aborted) abort();
+      else signal.addEventListener('abort', abort, { once: true });
+    });
+}
+
+test('service probe IPC validates arguments and only answers the application page', async () => {
+  const host = fixture();
+  await assert.rejects(host.call('proxy:probe', probeRequest()), /未就绪/);
+  await host.call('proxy:connect', config);
+  assert.throws(
+    () =>
+      host.callAs(
+        'proxy:probe',
+        { senderFrame: { url: 'https://untrusted.example' }, sender: host.sender },
+        probeRequest(),
+      ),
+    /Untrusted/,
+  );
+  for (const input of [
+    null,
+    {},
+    { id: 'invalid', connectionId: 'x' },
+    { id: randomUUID(), connectionId: '' },
+  ])
+    await assert.rejects(host.call('proxy:probe', input), /参数/);
+  const request = probeRequest();
+  host.bridges[0].probe = async (connectionId) => {
+    assert.equal(connectionId, request.connectionId);
+    return 21;
+  };
+  assert.equal(await host.call('proxy:probe', request), 21);
+  assert.equal(host.sender.listenerCount('destroyed'), 0);
+});
+
+test('service probe cancellation belongs to its sender and does not end the bridge', async () => {
+  const host = fixture();
+  await host.call('proxy:connect', config);
+  host.bridges[0].probe = pendingProbe();
+  const request = probeRequest();
+  const measured = host.call('proxy:probe', request);
+  const cancelled = assert.rejects(measured, /已取消/);
+  await assert.rejects(host.call('proxy:probe', request), /标识/);
+  const stranger = { senderFrame: { url: 'file:///other/index.html' }, sender: {} };
+  host.callAs('proxy:cancel-probe', stranger, request.id);
+  await nextTurn();
+  assert.equal(host.sender.listenerCount('destroyed'), 1);
+  host.call('proxy:cancel-probe', request.id);
+  await cancelled;
+  assert.equal(host.sender.listenerCount('destroyed'), 0);
+  assert.equal(host.bridges[0].closed, 0);
+  host.bridges[0].probe = async () => 8;
+  assert.equal(await host.call('proxy:probe', probeRequest()), 8);
+});
+
+test('service probes are bounded and a finished probe frees a concurrency slot', async () => {
+  const host = fixture();
+  await host.call('proxy:connect', config);
+  host.bridges[0].probe = pendingProbe();
+  const requests = Array.from({ length: 4 }, probeRequest);
+  const cancelled = requests.map((request) =>
+    assert.rejects(host.call('proxy:probe', request), /已取消/),
+  );
+  await assert.rejects(host.call('proxy:probe', probeRequest()), /频繁/);
+  host.call('proxy:cancel-probe', requests[0].id);
+  await cancelled[0];
+  host.bridges[0].probe = async () => 8;
+  assert.equal(await host.call('proxy:probe', probeRequest()), 8);
+  await host.call('proxy:disconnect');
+  await Promise.all(cancelled);
+  assert.equal(host.sender.listenerCount('destroyed'), 0);
+});
+
+test('reconnect, disconnect, transport close, quit and renderer destruction cancel service probes', async () => {
+  for (const action of ['reconnect', 'disconnect', 'close', 'quit', 'destroy']) {
+    const host = fixture();
+    await host.call('proxy:connect', config);
+    host.bridges[0].probe = pendingProbe();
+    const cancelled = assert.rejects(host.call('proxy:probe', probeRequest()), /已取消/);
+    if (action === 'reconnect') await host.call('proxy:connect', config);
+    if (action === 'disconnect') await host.call('proxy:disconnect');
+    if (action === 'close') host.bridges[0].onClosed();
+    if (action === 'quit') host.emit('before-quit', { preventDefault() {} });
+    if (action === 'destroy') host.sender.emit('destroyed');
+    await cancelled;
+    assert.equal(host.sender.listenerCount('destroyed'), 0);
+  }
+});
+
+test('a late successful result from an old bridge is discarded after reconnect', async () => {
+  const host = fixture();
+  await host.call('proxy:connect', config);
+  const gate = deferred();
+  host.bridges[0].probe = () => gate.promise;
+  const cancelled = assert.rejects(host.call('proxy:probe', probeRequest()), /已取消|已变化/);
+  await host.call('proxy:connect', config);
+  gate.resolve(10);
+  await cancelled;
+  assert.equal(host.sender.listenerCount('destroyed'), 0);
+  assert.equal(await host.call('proxy:probe', probeRequest()), 12);
+});
+
+test('rapid successful service probe IPC requests are rate limited', async () => {
+  const host = fixture();
+  await host.call('proxy:connect', config);
+  for (let index = 0; index < 20; index++) await host.call('proxy:probe', probeRequest());
+  await assert.rejects(host.call('proxy:probe', probeRequest()), /频繁/);
+  assert.equal(host.bridges[0].closed, 0);
+  assert.equal(host.sender.listenerCount('destroyed'), 0);
 });

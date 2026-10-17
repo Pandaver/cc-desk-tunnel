@@ -28,6 +28,27 @@ class PageSocket extends EventEmitter {
   }
 }
 
+test('diagnostic error codes survive browser transport without exposing arbitrary IPC errors', async () => {
+  const transport = createWebControl(async (method, args) => {
+    if (method === 'client:detach') return;
+    throw Object.assign(new Error('diagnostic outcome'), { name: args[0] });
+  });
+  const socket = new PageSocket();
+  transport.attach(socket);
+  try {
+    for (const code of ['AbortError', 'TimeoutError']) {
+      socket.request(code, 'client:probe', [code]);
+      await setImmediate();
+      assert.equal(socket.messages.at(-1).code, code);
+    }
+    socket.request('other', 'client:state', ['AbortError']);
+    await setImmediate();
+    assert.equal(socket.messages.at(-1).code, undefined);
+  } finally {
+    socket.close();
+  }
+});
+
 test('browser request IDs are isolated by page; repeated requests do not execute twice', async () => {
   const calls = [];
   const transport = createWebControl(async (method, args, viewId) => {

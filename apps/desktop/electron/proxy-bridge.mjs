@@ -12,6 +12,7 @@ import { startPosixSsh } from './posix-ssh.mjs';
 import { openChannels } from './tunnel-channels.mjs';
 import { httpProxy, openSocket } from './system-proxy.mjs';
 import { channelFailure, controlFailure, passing } from './connect-errors.mjs';
+import { probeSocket } from './socket-latency.mjs';
 // Loaded by the main process from here, so that the package's bundle of this module holds it.
 export { upgradeService } from './service-upgrade.mjs';
 
@@ -161,6 +162,7 @@ export async function openProxyBridge(
       ssh: null,
       channels: null,
       preparing: null,
+      connectionId: null,
     };
     const current = pair;
     const queue = [];
@@ -299,8 +301,10 @@ export async function openProxyBridge(
       }
       // A service of another version refuses the connection but may still offer the installer for its own.
       if (message.type === 'connection.error' && message.client) release = message.client;
-      if (message.type === 'connection.error')
+      if (message.type === 'connection.error') {
+        current.connectionId = null;
         log(`The service refused or ended the connection: ${message.code}.`);
+      }
       if (message.type === 'tunnel.offer') {
         if (offerReceived || !nativeReady || nativeReady.connectionId !== message.connectionId) {
           fail('隧道连接标识不匹配。');
@@ -334,12 +338,16 @@ export async function openProxyBridge(
           return;
         }
         clearTimeout(timer);
+        current.connectionId = message.connectionId;
         log(
           `Connected as ${message.connectionId.slice(0, 8)} to service ${nativeReady.version ?? 'of unknown version'}; commands can run.`,
         );
         if (local.readyState === WebSocket.OPEN) local.send(JSON.stringify(nativeReady));
       } else if (local.readyState === WebSocket.OPEN) {
-        if (message.type === 'ready') clearTimeout(timer);
+        if (message.type === 'ready') {
+          clearTimeout(timer);
+          current.connectionId = message.connectionId;
+        }
         local.send(raw.toString('utf8'));
       }
     });
@@ -426,6 +434,19 @@ export async function openProxyBridge(
     url: `ws://127.0.0.1:${server.address().port}/bridge/${nonce}`,
     close,
     downloadInstaller,
+    async probe(expectedConnectionId, { signal } = {}) {
+      const current = pair;
+      if (closed || !current?.connectionId || current.connectionId !== expectedConnectionId)
+        throw new Error('服务连接已变化或未就绪，请重新测试。');
+      const elapsed = await probeSocket(current.remote, {
+        signal: signal
+          ? AbortSignal.any([signal, current.controller.signal])
+          : current.controller.signal,
+      });
+      if (closed || pair !== current || current.connectionId !== expectedConnectionId)
+        throw new Error('服务连接已变化，请重新测试。');
+      return elapsed;
+    },
     // The installer the service last announced, if any.
     release: () => release,
   };

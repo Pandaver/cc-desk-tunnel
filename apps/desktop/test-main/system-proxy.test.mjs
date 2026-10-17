@@ -3,10 +3,11 @@ import { test } from 'node:test';
 import { connect, createServer } from 'node:net';
 import { createServer as createHttpsServer } from 'node:https';
 import { execFile } from 'node:child_process';
-import { X509Certificate } from 'node:crypto';
+import { X509Certificate, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { promisify } from 'node:util';
 import { WebSocket, WebSocketServer } from 'ws';
+import { PROTOCOL_VERSION } from '@cc-desk-tunnel/protocol';
 import { httpProxy, openSocket } from '../electron/system-proxy.mjs';
 import { openProxyBridge } from '../electron/proxy-bridge.mjs';
 
@@ -238,5 +239,69 @@ test(
       answering.lines.some((line) => line.startsWith('Connection given up')),
       false,
     );
+  },
+);
+
+test(
+  'bridge latency requires ready identity, ignores native pre-tunnel readiness and cancels without reconnecting',
+  { skip: process.platform !== 'win32', timeout: 30000 },
+  async (t) => {
+    const { cert, key } = await selfSigned();
+    const service = createHttpsServer({ cert, key });
+    const wss = new WebSocketServer({ server: service, autoPong: false });
+    service.listen(0, '127.0.0.1');
+    await once(service, 'listening');
+    const bridge = await openProxyBridge(
+      {
+        url: `wss://127.0.0.1:${service.address().port}/ws`,
+        fingerprint: new X509Certificate(cert).fingerprint256,
+      },
+      {},
+    );
+    t.after(async () => {
+      await bridge.close();
+      for (const socket of wss.clients) socket.terminate();
+      await new Promise((resolve) => wss.close(resolve));
+      await new Promise((resolve) => service.close(resolve));
+    });
+    const id = randomUUID();
+    await assert.rejects(bridge.probe(id), /未就绪/);
+    const accepted = once(wss, 'connection');
+    const local = new WebSocket(bridge.url);
+    await once(local, 'open');
+    const [remote] = await accepted;
+    remote.on('message', (raw) => {
+      if (JSON.parse(String(raw)).type === 'leave') remote.close();
+    });
+    const ready = {
+      type: 'ready',
+      protocolVersion: PROTOCOL_VERSION,
+      connectionId: id,
+      adapter: 'claude-code',
+      version: '0.3.4',
+      sessions: [],
+    };
+    // Native readiness is held until the actual execution tunnel is ready.
+    remote.send(JSON.stringify(ready));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await assert.rejects(bridge.probe(id), /未就绪/);
+    const delivered = once(local, 'message');
+    remote.send(JSON.stringify({ ...ready, adapter: 'simulation' }));
+    await delivered;
+    await assert.rejects(bridge.probe(randomUUID()), /已变化/);
+    const answer = (nonce) => remote.pong(nonce);
+    remote.on('ping', answer);
+    assert.ok((await bridge.probe(id)) >= 0);
+    remote.removeListener('ping', answer);
+    const controller = new AbortController();
+    const cancelled = assert.rejects(bridge.probe(id, { signal: controller.signal }), /已取消/);
+    controller.abort();
+    await cancelled;
+    assert.equal(local.readyState, WebSocket.OPEN);
+    assert.equal(remote.readyState, WebSocket.OPEN);
+    const closed = assert.rejects(bridge.probe(id), /已取消|已断开/);
+    await bridge.close();
+    await closed;
+    await assert.rejects(bridge.probe(id), /未就绪/);
   },
 );

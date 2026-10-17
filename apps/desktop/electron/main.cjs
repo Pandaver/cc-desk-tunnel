@@ -47,6 +47,12 @@ const handlers = new Map();
 // The last connection, kept for its installer download after a service refused this client's version.
 let lastBridge;
 let connectionGeneration = 0;
+const serviceProbes = new Map();
+let serviceProbeStarts = [];
+function cancelServiceProbes() {
+  for (const probe of serviceProbes.values()) probe.controller.abort();
+  serviceProbes.clear();
+}
 let webConfigurationTasks = Promise.resolve();
 const connections = require('./connections.cjs');
 // See connections.cjs. The profile is chosen before anything is read from it, the instance lock included:
@@ -287,6 +293,7 @@ handle('proxy:connect', async (event, config) => {
   if (!config || typeof config.url !== 'string' || typeof config.fingerprint !== 'string')
     throw new Error('Invalid proxy configuration');
   const generation = ++connectionGeneration;
+  cancelServiceProbes();
   const previous = bridge;
   bridge = null;
   await previous?.close();
@@ -317,6 +324,7 @@ handle('proxy:connect', async (event, config) => {
     },
     () => {
       if (bridge !== connection) return;
+      cancelServiceProbes();
       bridge = null;
       keepAwake(false);
       if (!event.sender.isDestroyed()) event.sender.send('proxy:closed');
@@ -329,6 +337,50 @@ handle('proxy:connect', async (event, config) => {
   bridge = lastBridge = connection;
   keepAwake(true);
   return { url: bridge.url };
+});
+// A probe never opens its own service connection. The page must name the current ready connection,
+// and each request is separately cancellable so one browser cannot cancel another browser's test.
+handle('proxy:probe', async (event, request) => {
+  if (
+    !request ||
+    typeof request.id !== 'string' ||
+    !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(request.id) ||
+    typeof request.connectionId !== 'string' ||
+    !request.connectionId ||
+    request.connectionId.length > 128
+  )
+    throw new Error('延迟测试参数无效。');
+  if (!bridge) throw new Error('服务连接未就绪。');
+  if (serviceProbes.has(request.id)) throw new Error('延迟测试标识已使用。');
+  const now = performance.now();
+  serviceProbeStarts = serviceProbeStarts.filter((started) => now - started < 1000);
+  if (serviceProbes.size >= 4 || serviceProbeStarts.length >= 20)
+    throw new Error('延迟测试过于频繁，请稍后重试。');
+  serviceProbeStarts.push(now);
+  const connection = bridge;
+  const generation = connectionGeneration;
+  const controller = new AbortController();
+  const probe = { controller, sender: event.sender };
+  const cancel = () => controller.abort();
+  if (event.sender.isDestroyed()) throw new Error('延迟测试已取消。');
+  serviceProbes.set(request.id, probe);
+  event.sender.once('destroyed', cancel);
+  try {
+    const elapsed = await connection.probe(request.connectionId, { signal: controller.signal });
+    if (controller.signal.aborted) throw new Error('延迟测试已取消。');
+    if (generation !== connectionGeneration || bridge !== connection)
+      throw new Error('服务连接已变化，请重新测试。');
+    return elapsed;
+  } finally {
+    event.sender.removeListener('destroyed', cancel);
+    if (serviceProbes.get(request.id) === probe) serviceProbes.delete(request.id);
+  }
+});
+handle('proxy:cancel-probe', (event, id) => {
+  if (typeof id !== 'string') return;
+  const probe = serviceProbes.get(id);
+  if (probe?.sender !== event.sender) return;
+  probe.controller.abort();
 });
 // A service older than this client refuses it at sign-in; it is asked to upgrade over a connection of its own.
 handle('service:upgrade', async (event, config) => {
@@ -676,6 +728,7 @@ handle('update:install', async (event, version) => {
 ipcMain.handle('proxy:disconnect', async () => {
   keepAwake(false);
   connectionGeneration++;
+  cancelServiceProbes();
   const previous = bridge;
   bridge = null;
   await previous?.close();
@@ -1127,6 +1180,7 @@ let quitting = false;
 let exiting = false;
 app.on('before-quit', (event) => {
   quitting = true;
+  cancelServiceProbes();
   if (exiting || (!bridge && !webRelay?.status.enabled)) return;
   event.preventDefault();
   exiting = true;

@@ -1,4 +1,5 @@
 import { ArrowLeft, ArrowRight, PanelLeft } from 'lucide-react';
+import type { ReactNode } from 'react';
 import { IconButton } from './ui.tsx';
 import type { MenuItem, MenuPosition } from './ui.tsx';
 
@@ -16,6 +17,7 @@ export default function TitleBar({
   openMenu,
   connected,
   adapterName,
+  diagnostics,
 }: {
   title: string;
   // Absent while there is nowhere to go.
@@ -27,6 +29,7 @@ export default function TitleBar({
   openMenu: (menu: BarMenu, position: MenuPosition) => void;
   connected: boolean;
   adapterName: string;
+  diagnostics?: ReactNode;
 }) {
   return (
     <header className="titlebar">
@@ -60,6 +63,7 @@ export default function TitleBar({
         <span>{connected ? '已连接' : '重连中'}</span>
         <small>{adapterName}</small>
       </span>
+      {diagnostics}
     </header>
   );
 }

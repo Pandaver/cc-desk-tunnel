@@ -75,6 +75,7 @@ import SettingsPage from './SettingsPage.tsx';
 import type { Section } from './SettingsPage.tsx';
 import Sidebar from './Sidebar.tsx';
 import TitleBar from './TitleBar.tsx';
+import ConnectionDiagnostics from './ConnectionDiagnostics.tsx';
 import type { BarMenu } from './TitleBar.tsx';
 import { IconButton, Menu } from './ui.tsx';
 import type { MenuItem, MenuPosition } from './ui.tsx';
@@ -1367,6 +1368,14 @@ export function App() {
         openMenu={(item, position) => setMenu({ kind: 'bar', label: item.label, ...position })}
         connected={connected}
         adapterName={adapterName}
+        diagnostics={
+          <ConnectionDiagnostics
+            client={client}
+            connectionId={state.connectionId}
+            connected={connected}
+            remote={!!window.desktop?.remote}
+          />
+        }
       />
       <Rail
         page={place.page}

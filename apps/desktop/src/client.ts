@@ -17,6 +17,7 @@ import type {
   SessionEvent,
   TerminalControl,
 } from '@cc-desk-tunnel/protocol';
+import type { LatencyKind, LatencyProbe } from './latency.ts';
 
 type Response = Extract<ServerMessage, { type: 'response' }>;
 export type RequestOutcome = Response | Error;
@@ -208,6 +209,64 @@ export class ProxyClient {
       this.listeners.delete(listener);
     };
   };
+  // A diagnostic uses the already-authenticated bridge, never a second service connection. It
+  // owns its cancellation and timeout; failing a probe must not change the client's state.
+  measureLatency(kind: LatencyKind, signal: AbortSignal): Promise<LatencyProbe> {
+    if (signal.aborted) return Promise.reject(new DOMException('测试已取消。', 'AbortError'));
+    const connectionId = this.state.connectionId;
+    const host = typeof window === 'undefined' ? undefined : window.desktop;
+    if (kind !== 'service' || !host?.probeService || !host.cancelServiceProbe)
+      return Promise.reject(new Error('当前连接不支持服务延迟测试。'));
+    if (this.state.status !== 'connected' || !connectionId)
+      return Promise.reject(new Error('服务尚未连接。'));
+    const id = crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+      let finished = false;
+      let timer: ReturnType<typeof setTimeout>;
+      let unsubscribe = () => {};
+      const finish = (error?: Error, service?: number, cancel = false) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        signal.removeEventListener('abort', aborted);
+        unsubscribe();
+        if (cancel) void host.cancelServiceProbe!(id).catch(() => {});
+        if (error) reject(error);
+        else resolve({ elapsed: service!, service: service! });
+      };
+      const aborted = () => finish(new DOMException('测试已取消。', 'AbortError'), undefined, true);
+      signal.addEventListener('abort', aborted, { once: true });
+      unsubscribe = this.subscribe(() => {
+        if (this.state.connectionId !== connectionId || this.state.status !== 'connected')
+          finish(new DOMException('连接已变化，测试已取消。', 'AbortError'), undefined, true);
+      });
+      timer = setTimeout(
+        () => finish(new DOMException('延迟测试超时。', 'TimeoutError'), undefined, true),
+        4000,
+      );
+      try {
+        host.probeService!({ id, connectionId }).then(
+          (service) => {
+            if (!Number.isFinite(service) || service < 0 || service > 60000)
+              finish(new Error('延迟测试返回了无效结果。'));
+            else finish(undefined, service);
+          },
+          (reason: unknown) => {
+            const message = reason instanceof Error ? reason.message : '延迟测试失败。';
+            finish(
+              message.includes('延迟测试超时')
+                ? new DOMException('延迟测试超时。', 'TimeoutError')
+                : message.includes('已取消') || message.includes('连接已变化')
+                  ? new DOMException('连接已变化，测试已取消。', 'AbortError')
+                  : new Error(message),
+            );
+          },
+        );
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error('延迟测试失败。'), undefined, true);
+      }
+    });
+  }
   update(values: Partial<ClientState>) {
     this.state = { ...this.state, ...values };
     for (const listener of this.listeners) listener();
