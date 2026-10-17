@@ -146,3 +146,55 @@ test('renderer requests have bounded waits and do not replay unknown outcomes', 
   assert.equal(calls, 1);
   requests.cancel();
 });
+
+test('closing all views while business IPC is full releases adapter views before the next browser attaches', async (t) => {
+  const client = new ProxyClient();
+  const adapter = createRemoteClientAdapter(client, () => {});
+  adapter.setEnabled(true);
+  const held = [];
+  const sender = {
+    isDestroyed: () => false,
+    send: (_channel, request) => {
+      if (request.method === 'client:info') {
+        held.push(request);
+        return;
+      }
+      void Promise.resolve()
+        .then(() => adapter.invoke(request))
+        .then(
+          (result) => requests.reply(sender, { id: request.id, ok: true, result }),
+          (error) => requests.reply(sender, { id: request.id, error: error.message }),
+        );
+    },
+  };
+  const requests = createWebRequests({ window: () => ({ webContents: sender }) });
+  const transport = createWebControl((method, args, viewId) =>
+    requests.invoke(method, args, viewId),
+  );
+  t.after(() => {
+    requests.cancel();
+    adapter.dispose();
+  });
+  const sockets = Array.from({ length: 16 }, () => new PageSocket());
+  for (const socket of sockets) {
+    transport.attach(socket);
+    socket.request('state');
+  }
+  await setImmediate();
+  assert.ok(sockets.every((socket) => socket.messages.at(-1).ok));
+  const pending = Promise.all(
+    Array.from({ length: 128 }, () => requests.invoke('client:info', [])),
+  );
+  assert.equal(held.length, 128);
+  for (const socket of sockets) socket.close();
+  await setImmediate();
+  for (const request of held) requests.reply(sender, { id: request.id, ok: true, result: {} });
+  await pending;
+  const next = new PageSocket();
+  transport.attach(next);
+  next.request('state');
+  await setImmediate();
+  assert.equal(next.messages.at(-1).ok, true);
+  next.close();
+  await setImmediate();
+});
