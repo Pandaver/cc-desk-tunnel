@@ -1,0 +1,9 @@
+# Applied explicitly by manage.sh only when WEB_RELAY_ENABLED=1.
+services:
+  proxy:
+    ports:
+      - "${WEB_RELAY_BIND:-${CONTROL_BIND:-0.0.0.0}}:${WEB_RELAY_PORT:-5270}:5270"
+    environment:
+      PROXY_WEB_RELAY_ENABLED: "1"
+      PROXY_WEB_RELAY_PUBLIC_PORT: "${WEB_RELAY_PORT:-5270}"
+      PROXY_WEB_RELAY_ORIGIN: "${WEB_RELAY_ORIGIN:-}"

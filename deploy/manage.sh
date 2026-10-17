@@ -12,6 +12,8 @@ Usage:
   manage.sh init --host HOST [--mode fingerprint|certificate|nginx]
     [--data ABSOLUTE_PATH] [--control-port 8787]
     [--cert FULLCHAIN --key PRIVATE_KEY] [--url wss://DOMAIN/ws] [--token SECRET]
+    [--web-relay 0|1] [--web-relay-port 5270] [--web-relay-bind 0.0.0.0|127.0.0.1]
+    [--web-relay-origin https://DOMAIN]
   manage.sh build|up|status|logs|stop|restart|uninstall|connection|summary
   manage.sh upgrade [--from SERVER_ARCHIVE]   rebuild the image and replace the container in place
   manage.sh client INSTALLER_EXE              offer a Windows installer to connected clients
@@ -26,20 +28,53 @@ Requires Docker Engine + Compose v2+, Bash, OpenSSL, curl, tar.
 Use sudo if your user cannot access Docker. Config defaults to .local/docker.env;
 set PROXY_DEPLOY_CONFIG to manage a different isolated installation.
 Set PROXY_COMPOSE_FILE when managing an image-only standalone compose.yml.
+Web relay is off by default. Enabling it adds a port on the same container;
+nginx mode requires --web-relay-origin and binds the relay to loopback by default.
 Uninstall keeps all data; backup/restore pause the service.
 HELP
 }
 fail() { echo "$*" >&2; exit 1; }
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && ((10#$1 >= 1024 && 10#$1 <= 65535)); }
+valid_token() { ((${#1} >= 24 && ${#1} <= 512)) && [[ "$1" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; }
 safe_value() { [[ "$1" != *"'"* && "$1" != *$'\n'* && "$1" != *$'\r'* && "$1" != *'$'* && "$1" != *'`'* ]]; }
 write_var() { safe_value "$2" || fail "Unsupported characters in $1"; printf "%s='%s'\n" "$1" "$2"; }
-dc() { docker compose --env-file "$CONFIG" -p "$PROJECT_NAME" -f "$COMPOSE" "$@"; }
+dc() {
+  local files=(-f "$COMPOSE")
+  if [[ "${WEB_RELAY_ENABLED:-0}" = 1 ]]; then
+    [[ -f "$ROOT/deploy/compose.relay.yml" ]] || fail "Missing deploy/compose.relay.yml; unpack the complete server archive."
+    files+=(-f "$ROOT/deploy/compose.relay.yml")
+  fi
+  docker compose --env-file "$CONFIG" -p "$PROJECT_NAME" "${files[@]}" "$@"
+}
+relay_config() {
+  [[ "${WEB_RELAY_ENABLED:-0}" =~ ^[01]$ ]] || fail "WEB_RELAY_ENABLED must be 0 or 1."
+  [[ "${WEB_RELAY_ENABLED:-0}" = 1 ]] || return 0
+  WEB_RELAY_PORT="${WEB_RELAY_PORT:-5270}"
+  WEB_RELAY_BIND="${WEB_RELAY_BIND:-$CONTROL_BIND}"
+  WEB_RELAY_ORIGIN="${WEB_RELAY_ORIGIN:-}"
+  [[ "$WEB_RELAY_PORT" =~ ^[0-9]{1,5}$ ]] && ((10#$WEB_RELAY_PORT >= 1 && 10#$WEB_RELAY_PORT <= 65535)) \
+    || fail "The Web relay port must be 1..65535."
+  ((10#$WEB_RELAY_PORT != 10#$CONTROL_PORT)) || fail "Web relay and control need different host ports."
+  [[ "$WEB_RELAY_BIND" = 0.0.0.0 || "$WEB_RELAY_BIND" = 127.0.0.1 ]] \
+    || fail "WEB_RELAY_BIND must be 0.0.0.0 or 127.0.0.1."
+  if [[ -n "$WEB_RELAY_ORIGIN" ]]; then
+    [[ "$WEB_RELAY_ORIGIN" =~ ^https?://([A-Za-z0-9][A-Za-z0-9.-]*|\[[A-Fa-f0-9:]+\])(:[0-9]{1,5})?/?$ ]] \
+      || fail "Web relay origin must be an HTTP(S) origin without credentials, path, query or fragment."
+    local origin_port="${BASH_REMATCH[2]:-}"
+    [[ -z "$origin_port" ]] || { origin_port="${origin_port#:}"; ((10#$origin_port >= 1 && 10#$origin_port <= 65535)); } \
+      || fail "Invalid Web relay origin port."
+  fi
+  [[ ( "$MODE" != nginx && "$WEB_RELAY_BIND" != 127.0.0.1 ) || -n "$WEB_RELAY_ORIGIN" ]] \
+    || fail "A reverse-proxied relay needs --web-relay-origin (WEB_RELAY_ORIGIN) with the public HTTP(S) entrance."
+}
 load() {
   [[ -f "$CONFIG" ]] || fail "Run init first."
   # This file is a private, locally generated deployment configuration.
+  WEB_RELAY_ENABLED=0 WEB_RELAY_PORT='' WEB_RELAY_BIND='' WEB_RELAY_ORIGIN=''
   source "$CONFIG"
   [[ "$DATA_DIR" = /* && -f "$DATA_DIR/.cc-desk-tunnel-data" ]] || fail "Invalid managed data directory."
   DATA_DIR="$(realpath -- "$DATA_DIR")"
+  relay_config
 }
 cert_pair() {
   openssl x509 -in "$1" -noout -checkend 86400 >/dev/null || fail "Certificate expires within one day."
@@ -83,8 +118,15 @@ ask() {
   printf '%s' "${answer:-$default}"
 }
 # Everything the Windows client and the administrator need after an install or upgrade.
+public_port() {
+  local authority="${1#*://}"
+  authority="${authority%%/*}"
+  if [[ "$authority" =~ ^(\[[^]]+\]|[^:]+):([0-9]+)$ ]]; then printf '%s' "${BASH_REMATCH[2]}"
+  elif [[ "$1" = https://* || "$1" = wss://* ]]; then printf 443
+  else printf 80; fi
+}
 summary() {
-  local id
+  local id ports control_public relay_public
   echo
   echo "================ CC Desk Tunnel 部署汇总 ================"
   echo "客户端填写"
@@ -97,13 +139,37 @@ summary() {
   echo "  服务凭据   $(sed -n "s/^PROXY_TOKEN='\(.*\)'$/\1/p" "$DATA_DIR/config/service.env")"
   echo "服务器"
   echo "  入口模式   $MODE"
-  echo "  需放行端口 $([[ "$MODE" = nginx ]] && echo "nginx 的 443/TCP" || echo "$CONTROL_PORT/TCP")"
+  ports="$([[ "$MODE" = nginx ]] && echo "nginx 的 443/TCP" || echo "$CONTROL_PORT/TCP")"
+  control_public="$CONTROL_PORT"
+  if [[ "${WEB_RELAY_ENABLED:-0}" = 1 && "$MODE" = nginx ]]; then
+    control_public="$(public_port "$CONNECTION_URL")"
+    ports="nginx 的 $control_public/TCP"
+  fi
+  if [[ "${WEB_RELAY_ENABLED:-0}" = 1 && "$WEB_RELAY_BIND" = 0.0.0.0 && "$WEB_RELAY_PORT" != "$control_public" ]]; then
+    ports+=", $WEB_RELAY_PORT/TCP（Web 中继）"
+  fi
+  if [[ "${WEB_RELAY_ENABLED:-0}" = 1 && -n "$WEB_RELAY_ORIGIN" ]]; then
+    relay_public="$(public_port "$WEB_RELAY_ORIGIN")"
+    if [[ "$relay_public" != "$control_public" && ( "$WEB_RELAY_BIND" != 0.0.0.0 || "$relay_public" != "$WEB_RELAY_PORT" ) ]]; then
+      ports+=", $relay_public/TCP（中继反代入口）"
+    fi
+  fi
+  echo "  需放行端口 $ports"
+  if [[ "${WEB_RELAY_ENABLED:-0}" = 1 ]]; then
+    echo "  Web 中继  $WEB_RELAY_BIND:$WEB_RELAY_PORT → 容器 5270"
+    [[ -z "$WEB_RELAY_ORIGIN" ]] || echo "  浏览器入口 $WEB_RELAY_ORIGIN"
+    [[ "$WEB_RELAY_BIND" != 127.0.0.1 ]] || echo "  中继仅监听宿主回环，请由现有反代提供公网入口。"
+  fi
   echo "  数据目录   $DATA_DIR"
   echo "  部署配置   $CONFIG"
   id="$(dc ps -q proxy 2>/dev/null || true)"
   echo "  容器状态   $([[ -n "$id" ]] && docker inspect --format '{{.State.Health.Status}}' "$id" || echo 未启动)"
   echo "下一步"
-  echo "  1. 云防火墙只放行上面“需放行端口”一项；本项目不需要其他入站端口。"
+  if [[ "${WEB_RELAY_ENABLED:-0}" = 1 ]]; then
+    echo "  1. 云防火墙按上面“需放行端口”放行；回环中继端口无需公网放行。"
+  else
+    echo "  1. 云防火墙只放行上面“需放行端口”一项；本项目不需要其他入站端口。"
+  fi
   echo "  2. Windows 客户端填入服务地址、指纹和凭据并连接。"
   echo "  3. 在客户端账号页登录 Claude 账号。"
   echo "  使用第三方 API 时编辑 $DATA_DIR/config/provider.json 后执行 manage.sh restart。"
@@ -153,11 +219,16 @@ case "$command" in
     HOST='' MODE=fingerprint DATA_DIR="${HOME}/.local/share/cc-desk-tunnel-container"
     [[ "$(id -u)" != 0 ]] || DATA_DIR=/srv/cc-desk-tunnel
     CONTROL_PORT=8787 CERT='' KEY='' URL='' TOKEN=''
+    WEB_RELAY_ENABLED=0 WEB_RELAY_PORT='' WEB_RELAY_BIND='' WEB_RELAY_ORIGIN=''
     while (($#)); do
       [[ $# -ge 2 ]] || fail "Missing value for $1"
       case "$1" in
         --host) HOST="$2" ;; --mode) MODE="$2" ;; --data) DATA_DIR="$2" ;;
         --control-port) CONTROL_PORT="$2" ;;
+        --web-relay) WEB_RELAY_ENABLED="$2" ;;
+        --web-relay-port) WEB_RELAY_PORT="$2" ;;
+        --web-relay-bind) WEB_RELAY_BIND="$2" ;;
+        --web-relay-origin) WEB_RELAY_ORIGIN="$2" ;;
         # Given by scripts written for 0.2.9 and earlier, when the execution channel had a port of its own.
         --frps-port) ;;
         --cert) CERT="$2" ;; --key) KEY="$2" ;; --url) URL="$2" ;; --token) TOKEN="$2" ;;
@@ -168,6 +239,12 @@ case "$command" in
     [[ "$HOST" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || fail "--host needs an IPv4 address or DNS name reachable by Windows (no IPv6 yet)."
     [[ "$MODE" =~ ^(fingerprint|certificate|nginx)$ ]] || fail "Invalid mode."
     valid_port "$CONTROL_PORT" || fail "The port must be 1024..65535."
+    CONTROL_BIND=0.0.0.0
+    [[ "$MODE" != nginx ]] || CONTROL_BIND=127.0.0.1
+    if [[ "$WEB_RELAY_ENABLED" != 1 && -n "$WEB_RELAY_PORT$WEB_RELAY_BIND$WEB_RELAY_ORIGIN" ]]; then
+      fail "Use --web-relay 1 together with Web relay options."
+    fi
+    relay_config
     [[ "$DATA_DIR" = /* && "$DATA_DIR" != / && "$DATA_DIR" != "$HOME" ]] || fail "Choose an absolute dedicated data directory."
     DATA_DIR="$(realpath -m -- "$DATA_DIR")"
     [[ "$DATA_DIR" != / && "$DATA_DIR" != "$(realpath -- "$HOME")" ]] || fail "Choose a dedicated data directory."
@@ -182,11 +259,11 @@ case "$command" in
       cert_pair "$CERT" "$KEY"
       cert_name "$CERT" "$HOST"
     fi
-    CONTROL_BIND=0.0.0.0
-    [[ "$MODE" != nginx ]] || CONTROL_BIND=127.0.0.1
     URL="${URL:-wss://$HOST:$CONTROL_PORT/ws}"
     if [[ "$MODE" = nginx && "$URL" = "wss://$HOST:$CONTROL_PORT/ws" ]]; then URL="wss://$HOST/ws"; fi
     [[ "$URL" =~ ^wss://[^/@?#]+/ws$ ]] || fail "--url must be a WSS /ws address."
+    [[ -n "$TOKEN" ]] || TOKEN="$(openssl rand -hex 32)"
+    valid_token "$TOKEN" || fail "--token needs 24..512 characters from A-Z a-z 0-9 . _ ~ + / = -"
     mkdir -p "$DATA_DIR"/{config,tls,home,state,workspace} "$(dirname -- "$CONFIG")"
     touch "$DATA_DIR/.cc-desk-tunnel-data"
     CERT_NAME=cc-desk-tunnel.local
@@ -197,8 +274,6 @@ case "$command" in
       cp -- "$KEY" "$DATA_DIR/tls/control.key"
       CERT_NAME="$HOST"
     fi
-    [[ -n "$TOKEN" ]] || TOKEN="$(openssl rand -hex 32)"
-    [[ "$TOKEN" =~ ^[A-Za-z0-9._~+/=-]{24,512}$ ]] || fail "--token needs 24..512 characters from A-Z a-z 0-9 . _ ~ + / = -"
     {
       write_var PROXY_ADAPTER claude-code
       write_var PROXY_TOKEN "$TOKEN"
@@ -222,6 +297,12 @@ case "$command" in
       write_var MODE "$MODE"
       write_var CONNECTION_URL "$URL"
       write_var PROXY_IMAGE cc-desk-tunnel:local
+      if [[ "$WEB_RELAY_ENABLED" = 1 ]]; then
+        write_var WEB_RELAY_ENABLED 1
+        write_var WEB_RELAY_PORT "$WEB_RELAY_PORT"
+        write_var WEB_RELAY_BIND "$WEB_RELAY_BIND"
+        [[ -z "$WEB_RELAY_ORIGIN" ]] || write_var WEB_RELAY_ORIGIN "$WEB_RELAY_ORIGIN"
+      fi
     } > "$CONFIG"
     if [[ "$(id -u)" = 0 ]]; then
       chown -R 1000:1000 "$DATA_DIR"
@@ -263,7 +344,7 @@ case "$command" in
     # Every saved client login stops working; the summary prints the new token.
     [[ $# -le 1 ]] || fail "Specify at most one token."
     TOKEN="${1:-$(openssl rand -hex 32)}"
-    [[ "$TOKEN" =~ ^[A-Za-z0-9._~+/=-]{24,512}$ ]] || fail "The token needs 24..512 characters from A-Z a-z 0-9 . _ ~ + / = -"
+    valid_token "$TOKEN" || fail "The token needs 24..512 characters from A-Z a-z 0-9 . _ ~ + / = -"
     temp="$(mktemp "$DATA_DIR/config/service.env.XXXXXX")"
     { grep -v '^PROXY_TOKEN=' "$DATA_DIR/config/service.env"; write_var PROXY_TOKEN "$TOKEN"; } > "$temp"
     chmod 600 "$temp"

@@ -16,7 +16,7 @@ cleanup() {
 }
 trap cleanup EXIT
 docker image inspect "$IMAGE" >/dev/null
-for port in 19871 19873; do
+for port in 19871 19872 19873 19874; do
   if ss -lnt | grep -E ":$port[[:space:]]" >/dev/null; then
     echo "Test port $port is occupied." >&2; exit 1
   fi
@@ -29,6 +29,7 @@ manage up
 source "$PROXY_DEPLOY_CONFIG"
 compose=(docker compose --env-file "$PROXY_DEPLOY_CONFIG" -p "$PROJECT_NAME" -f "$ROOT/deploy/docker/compose.yaml")
 id="$("${compose[@]}" ps -q proxy)"
+[[ "$(docker inspect --format '{{if index .NetworkSettings.Ports "5270/tcp"}}published{{else}}absent{{end}}' "$id")" = absent ]]
 docker exec "$id" bash -c 'test "$(id -u)" = 1000; test ! -w /app/apps/server/src/main.ts; test ! -w /opt/runtime/cli/bin/claude; printf native-memory > /data/home/deploy-marker; printf workspace-memory > /data/workspace/deploy-marker; node --version; claude --version; python3 --version; git --version; command -v ssh g++ make jq rg'
 curl --cacert "$TEMP/data/tls/control.crt" --resolve cc-desk-tunnel.local:19871:127.0.0.1 -fsS https://cc-desk-tunnel.local:19871/health
 manage renew
@@ -40,9 +41,18 @@ manage uninstall
 [[ -f "$TEMP/data/home/deploy-marker" ]]
 
 export PROXY_DEPLOY_CONFIG="$TEMP/restore.env"
-manage init --host "$HOST" --data "$TEMP/restored" --control-port 19871
+manage init --host "$HOST" --data "$TEMP/restored" --control-port 19871 --web-relay 1 --web-relay-port 19872
 sed -i "s|cc-desk-tunnel:local|$IMAGE|" "$PROXY_DEPLOY_CONFIG"
 manage restore "$TEMP/backup.tar.gz"
+manage up
+source "$PROXY_DEPLOY_CONFIG"
+id="$(docker compose --env-file "$PROXY_DEPLOY_CONFIG" -p "$PROJECT_NAME" -f "$ROOT/deploy/docker/compose.yaml" -f "$ROOT/deploy/compose.relay.yml" ps -q proxy)"
+[[ "$(docker inspect --format '{{(index (index .NetworkSettings.Ports "5270/tcp") 0).HostPort}}' "$id")" = 19872 ]]
+[[ "$(docker exec "$id" printenv PROXY_WEB_RELAY_ENABLED)" = 1 ]]
+[[ "$(docker exec "$id" printenv PROXY_WEB_RELAY_PUBLIC_PORT)" = 19872 ]]
+[[ "$(curl --cacert "$TEMP/restored/tls/control.crt" --resolve cc-desk-tunnel.local:19872:127.0.0.1 -sS -o /dev/null -w '%{http_code}' https://cc-desk-tunnel.local:19872/remote/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/)" = 404 ]]
+manage backup "$TEMP/relay-backup.tar.gz"
+grep -Fx "WEB_RELAY_ENABLED='1'" "$PROXY_DEPLOY_CONFIG" >/dev/null
 manage up
 [[ "$(cat "$TEMP/restored/home/deploy-marker")" = native-memory ]]
 [[ "$(cat "$TEMP/restored/workspace/deploy-marker")" = workspace-memory ]]
@@ -50,13 +60,21 @@ manage stop
 manage uninstall
 
 export PROXY_DEPLOY_CONFIG="$TEMP/nginx.env"
-manage init --host "$HOST" --mode nginx --data "$TEMP/nginx" --control-port 19873
+if manage init --host "$HOST" --mode nginx --data "$TEMP/nginx" --control-port 19873 --web-relay 1 2>/dev/null; then
+  echo "nginx relay without its public origin was accepted." >&2; exit 1
+fi
+manage init --host "$HOST" --mode nginx --data "$TEMP/nginx" --control-port 19873 \
+  --web-relay 1 --web-relay-port 19874 --web-relay-origin https://relay.example:9443
 sed -i "s|cc-desk-tunnel:local|$IMAGE|" "$PROXY_DEPLOY_CONFIG"
 manage up
 source "$PROXY_DEPLOY_CONFIG"
 id="$(docker compose --env-file "$PROXY_DEPLOY_CONFIG" -p "$PROJECT_NAME" -f "$ROOT/deploy/docker/compose.yaml" ps -q proxy)"
 [[ "$(docker inspect --format '{{(index (index .NetworkSettings.Ports "8787/tcp") 0).HostIp}}' "$id")" = 127.0.0.1 ]]
+[[ "$(docker inspect --format '{{(index (index .NetworkSettings.Ports "5270/tcp") 0).HostIp}}' "$id")" = 127.0.0.1 ]]
+[[ "$(docker exec "$id" printenv PROXY_WEB_RELAY_ORIGIN)" = https://relay.example:9443 ]]
+manage summary | grep -F '9443/TCP' >/dev/null
 curl -fsS http://127.0.0.1:19873/health
+[[ "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:19874/remote/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/)" = 404 ]]
 manage stop
 manage uninstall
 
@@ -79,12 +97,18 @@ manage certificate "$TEMP/cert.crt" "$TEMP/cert.key"
 manage uninstall
 
 export PROXY_DEPLOY_CONFIG="$TEMP/standalone.env"
-manage init --host "$HOST" --data "$TEMP/standalone" --control-port 19871
+manage init --host "$HOST" --data "$TEMP/standalone" --control-port 19871 --web-relay 1 --web-relay-port 19872
 sed -i "s|cc-desk-tunnel:local|$IMAGE|" "$PROXY_DEPLOY_CONFIG"
 export PROXY_COMPOSE_FILE="$ROOT/deploy/compose.yml"
 manage up
 curl --cacert "$TEMP/standalone/tls/control.crt" --resolve cc-desk-tunnel.local:19871:127.0.0.1 -fsS https://cc-desk-tunnel.local:19871/health
+[[ "$(curl --cacert "$TEMP/standalone/tls/control.crt" --resolve cc-desk-tunnel.local:19872:127.0.0.1 -sS -o /dev/null -w '%{http_code}' https://cc-desk-tunnel.local:19872/remote/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/)" = 404 ]]
 manage backup "$TEMP/standalone-backup.tar.gz"
+sed -i "s/^WEB_RELAY_ENABLED='1'$/WEB_RELAY_ENABLED='0'/" "$PROXY_DEPLOY_CONFIG"
+manage up
+source "$PROXY_DEPLOY_CONFIG"
+id="$(docker compose --env-file "$PROXY_DEPLOY_CONFIG" -p "$PROJECT_NAME" -f "$PROXY_COMPOSE_FILE" ps -q proxy)"
+[[ "$(docker inspect --format '{{if index .NetworkSettings.Ports "5270/tcp"}}published{{else}}absent{{end}}' "$id")" = absent ]]
 manage uninstall
 unset PROXY_COMPOSE_FILE
-echo "PASS: direct TLS, certificate hostname, renewal, nginx loopback, private writable data, backup/restore, lifecycle."
+echo "PASS: direct TLS, certificate hostname, renewal, nginx loopback, optional relay port, standalone overlay, private writable data, backup/restore, lifecycle."
