@@ -41,6 +41,7 @@ type Frame = {
   origin: string;
   path: string;
   channelId: string;
+  capabilities?: string[];
 };
 async function fixture(
   t: TestContext,
@@ -157,7 +158,12 @@ async function fixture(
     target.pipe(stream).pipe(target);
     return socket;
   }
-  async function register(automatic = true, id = deviceId, hostname = 'relay.example') {
+  async function register(
+    automatic = true,
+    id = deviceId,
+    hostname = 'relay.example',
+    route?: string,
+  ) {
     const socket = await websocket('/_relay/control');
     const first = once(socket, 'message');
     socket.send(
@@ -168,6 +174,7 @@ async function fixture(
         deviceId: id,
         relayKey,
         hostname,
+        route,
       }),
     );
     const ready: Frame = JSON.parse((await first)[0].toString());
@@ -270,6 +277,7 @@ test('relay requires valid registration and keeps the first desktop on a duplica
   const { ready } = await f.register();
   assert.equal(ready.origin, origin);
   assert.equal(ready.path, path + '/');
+  assert.deepEqual(ready.capabilities, ['route']);
   const duplicate = await f.websocket('/_relay/control');
   const closed = once(duplicate, 'close');
   duplicate.send(
@@ -284,6 +292,201 @@ test('relay requires valid registration and keeps the first desktop on a duplica
   );
   assert.equal((await closed)[0], 4009);
   assert.equal((await f.request().result).body.toString(), 'desktop');
+});
+
+test('relay accepts independent canonical routes and redirects only their canonical browser address', async (t) => {
+  const f = await fixture(t);
+  for (const [index, route] of ['a', 'my-pc', 'a'.repeat(64)].entries()) {
+    const registered = await f.register(true, String(index).repeat(32), 'relay.example', route);
+    assert.equal(registered.ready.path, `/remote/${route}/`);
+    assert.deepEqual(registered.ready.capabilities, ['route']);
+    assert.equal((await f.request(registered.ready.path).result).body.toString(), 'desktop');
+    const redirect = await f.request(`/remote/${route}?next=test`).result;
+    assert.equal(redirect.status, 308);
+    assert.equal(redirect.headers.location, `/remote/${route}/?next=test`);
+    assert.equal((await f.request(`/remote/${String(index).repeat(32)}/`).result).status, 404);
+  }
+});
+
+test('relay rejects malformed registration routes without reserving the identity or route', async (t) => {
+  const f = await fixture(t);
+  for (const route of [
+    '',
+    '-pc',
+    'pc-',
+    'My-pc',
+    'a'.repeat(65),
+    '../pc',
+    'pc/other',
+    'pc%2fother',
+    ...['\n', '\r', '\r\n', '\u2028', '\u2029'].map((ending) => `my-pc${ending}`),
+    null,
+    1,
+  ]) {
+    const socket = await f.websocket('/_relay/control');
+    const closed = once(socket, 'close');
+    socket.send(
+      JSON.stringify({
+        type: 'relay.register',
+        version: 2,
+        token,
+        deviceId,
+        relayKey,
+        hostname: 'relay.example',
+        route,
+      }),
+    );
+    assert.equal((await closed)[0], 4002);
+  }
+  await f.register(true, deviceId, 'relay.example', 'my-pc');
+  assert.equal((await f.request('/remote/my-pc/').result).status, 200);
+});
+
+test('relay keeps registered routes when an alias, default identity or duplicate desktop conflicts', async (t) => {
+  const f = await fixture(t);
+  const otherId = 'c'.repeat(32);
+  await f.register(true, deviceId, 'relay.example', otherId);
+  for (const [id, route, code] of [
+    ['d'.repeat(32), otherId, 4010],
+    [otherId, undefined, 4010],
+    [deviceId, 'new-route', 4009],
+  ] as const) {
+    const socket = await f.websocket('/_relay/control');
+    const closed = once(socket, 'close');
+    socket.send(
+      JSON.stringify({
+        type: 'relay.register',
+        version: 2,
+        token,
+        deviceId: id,
+        relayKey,
+        hostname: 'relay.example',
+        route,
+      }),
+    );
+    assert.equal((await closed)[0], code);
+    assert.equal((await f.request(`/remote/${otherId}/`).result).body.toString(), 'desktop');
+  }
+});
+
+test('relay route updates reject invalid or occupied aliases while preserving both current routes', async (t) => {
+  const f = await fixture(t);
+  const first = await f.register(true, deviceId, 'relay.example', 'my-pc');
+  await f.register(true, 'c'.repeat(32), 'relay.example', 'other-pc');
+  for (const [route, error] of [
+    ['other-pc', 'route_in_use'],
+    ['', 'invalid_route'],
+    ['../pc', 'invalid_route'],
+    ['a'.repeat(65), 'invalid_route'],
+    ...['\n', '\r', '\r\n', '\u2028', '\u2029'].map((ending) => [
+      `my-pc${ending}`,
+      'invalid_route',
+    ]),
+    [null, 'invalid_route'],
+  ]) {
+    const id = randomUUID();
+    const received = once(first.socket, 'message');
+    first.socket.send(JSON.stringify({ type: 'relay.route', id, route }));
+    assert.deepEqual(JSON.parse((await received)[0].toString()), {
+      type: 'relay.route-result',
+      id,
+      ok: false,
+      error,
+    });
+    assert.equal(first.socket.readyState, WebSocket.OPEN);
+    assert.equal((await f.request('/remote/my-pc/').result).body.toString(), 'desktop');
+    assert.equal((await f.request('/remote/other-pc/').result).body.toString(), 'desktop');
+  }
+});
+
+test('relay rejects malformed route control frames and releases their routes', async (t) => {
+  const f = await fixture(t);
+  for (const frame of [
+    'not-json',
+    JSON.stringify({ type: 'relay.route', id: 'invalid', route: 'new-route' }),
+    JSON.stringify({ type: 'relay.route', id: randomUUID() + '\n', route: 'new-route' }),
+    Buffer.from(JSON.stringify({ type: 'relay.route', id: randomUUID(), route: 'new-route' })),
+  ]) {
+    const registered = await f.register(true, deviceId, 'relay.example', 'my-pc');
+    const closed = once(registered.socket, 'close');
+    registered.socket.send(frame);
+    assert.equal((await closed)[0], 4002);
+    assert.equal((await f.request('/remote/my-pc/').result).status, 404);
+    assert.equal((await f.request('/remote/new-route/').result).status, 404);
+  }
+});
+
+test('relay route updates preserve identity and credentials while moving HTTP and WebSocket access', async (t) => {
+  const f = await fixture(t, (request, response) => {
+    assert.equal(request.headers['x-ccdt-relay-key'], relayKey);
+    response.end(request.url);
+  });
+  const wss = new WebSocketServer({ noServer: true });
+  f.local.on('upgrade', (request, socket, head) => {
+    assert.equal(request.url, '/api/control');
+    assert.equal(request.headers['x-ccdt-relay-key'], relayKey);
+    wss.handleUpgrade(request, socket, head, (client) =>
+      client.on('message', (message) => client.send(message)),
+    );
+  });
+  const registered = await f.register();
+  for (const route of ['a'.repeat(64), 'my-pc', 'my-pc']) {
+    const id = randomUUID();
+    const received = once(registered.socket, 'message');
+    registered.socket.send(JSON.stringify({ type: 'relay.route', id, route }));
+    assert.deepEqual(JSON.parse((await received)[0].toString()), {
+      type: 'relay.route-result',
+      id,
+      ok: true,
+      path: `/remote/${route}/`,
+    });
+    assert.equal((await f.request().result).status, 404);
+    assert.equal(
+      (await f.request(`/remote/${route}/api/status?test=1`).result).body.toString(),
+      '/api/status?test=1',
+    );
+  }
+  const stale = new WebSocket(f.url.replace('http', 'ws') + path + '/api/control', {
+    headers: { host: 'relay.example', origin },
+  });
+  stale.on('error', () => {});
+  t.after(() => stale.terminate());
+  assert.match((await once(stale, 'error'))[0].message, /404/);
+  const browser = await f.websocket('/remote/my-pc/api/control', { host: 'relay.example', origin });
+  const received = once(browser, 'message');
+  browser.send('after-rename');
+  assert.equal((await received)[0].toString(), 'after-rename');
+  const duplicate = await f.websocket('/_relay/control');
+  const closed = once(duplicate, 'close');
+  duplicate.send(
+    JSON.stringify({
+      type: 'relay.register',
+      version: 2,
+      token,
+      deviceId,
+      relayKey,
+      hostname: 'relay.example',
+      route: 'different-route',
+    }),
+  );
+  assert.equal((await closed)[0], 4009);
+});
+
+test('relay releases only the current route and does not remove a reassigned old route on close', async (t) => {
+  const f = await fixture(t);
+  const first = await f.register(true, deviceId, 'relay.example', 'first-pc');
+  const received = once(first.socket, 'message');
+  first.socket.send(JSON.stringify({ type: 'relay.route', id: randomUUID(), route: 'renamed-pc' }));
+  assert.equal(JSON.parse((await received)[0].toString()).ok, true);
+  await f.register(true, 'c'.repeat(32), 'relay.example', 'first-pc');
+  const closed = once(first.socket, 'close');
+  first.socket.close();
+  await closed;
+  assert.equal((await f.request('/remote/renamed-pc/').result).status, 404);
+  assert.equal((await f.request('/remote/first-pc/').result).body.toString(), 'desktop');
+  const replacement = await f.register(true, deviceId, 'relay.example', 'renamed-pc');
+  assert.equal(replacement.ready.path, '/remote/renamed-pc/');
+  assert.equal((await f.request(replacement.ready.path).result).body.toString(), 'desktop');
 });
 
 test('v2 registration requires a canonical hostname without protocol, credentials, path or port', async (t) => {

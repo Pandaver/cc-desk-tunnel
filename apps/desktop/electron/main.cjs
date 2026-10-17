@@ -763,7 +763,7 @@ async function webInvoke(method, args) {
   }
   throw new Error('这个操作请在桌面客户端完成。');
 }
-function validateRemoteConfiguration(values, previous = { port: 17890, lan: false }) {
+function validateRemoteConfiguration(values, previous = { port: 5270, lan: false }) {
   if (!values || typeof values.enabled !== 'boolean')
     throw new Error('Invalid remote configuration');
   const port = Number(values.port ?? previous.port);
@@ -834,15 +834,33 @@ handle('remote:open', async () => {
     );
 });
 function relay() {
-  webRelay ??= require('./web-relay-lifecycle.cjs').createWebRelayLifecycle({
+  if (webRelay) return webRelay;
+  const { createWebRelayLifecycle, validateRelayRoute } = require('./web-relay-lifecycle.cjs');
+  let route = '';
+  try {
+    route = validateRelayRoute(readSettings().webRelay?.route ?? '');
+  } catch {
+    // A damaged preference must not prevent the optional relay from starting on its default path.
+  }
+  const deviceId = createHash('sha256')
+    .update(`${handlers.get('device:get')().id}\0${connectionId}`)
+    .digest('hex')
+    .slice(0, 32);
+  webRelay = createWebRelayLifecycle({
+    route,
+    defaultRoute: deviceId,
+    saveRoute: (value) => {
+      const settings = readSettings();
+      require('./web-auth.cjs').atomicPrivateWrite(
+        settingsPath(),
+        JSON.stringify({ ...settings, webRelay: { ...settings.webRelay, route: value } }, null, 2),
+      );
+    },
     start: async (options) => {
       const { startWebRelay } = await import('./desktop-web.mjs');
       return startWebRelay({
         ...options,
-        deviceId: createHash('sha256')
-          .update(`${handlers.get('device:get')().id}\0${connectionId}`)
-          .digest('hex')
-          .slice(0, 32),
+        deviceId,
         resolveProxy: (url) => session.defaultSession.resolveProxy(url),
       });
     },
@@ -855,6 +873,7 @@ function relay() {
   return webRelay;
 }
 handle('relay:status', () => relay().status);
+handle('relay:configure-route', (_event, route) => queueRemote(() => relay().setRoute(route)));
 handle('relay:configure', (_event, enabled) =>
   queueRemote(async () => {
     if (typeof enabled !== 'boolean') throw new Error('Invalid relay configuration');

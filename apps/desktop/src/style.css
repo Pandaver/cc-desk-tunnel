@@ -3,6 +3,9 @@
   color: var(--danger);
   overflow-wrap: anywhere;
 }
+.remote-control {
+  --remote-muted: color-mix(in srgb, var(--muted) 92%, var(--text));
+}
 .remote-control input {
   max-width: 100%;
   min-width: 0;
@@ -32,22 +35,68 @@
   gap: 4px;
   max-width: 100%;
   min-width: 0;
+  flex-shrink: 0;
 }
-.remote-address-text {
+.relay-route-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(400px, 100%);
+  flex: 0 1 400px;
+  min-width: 0;
+}
+.relay-route-input > span {
+  color: var(--remote-muted);
+  flex-shrink: 0;
+  font-size: 13px;
+}
+.relay-route-input input {
+  flex: 1;
+  min-width: 0;
+}
+.relay-route-input .icon-button {
+  flex-shrink: 0;
+}
+.remote-sessions > summary {
+  list-style: none;
+  cursor: pointer;
+  border-bottom: 0;
+}
+.remote-sessions > summary::-webkit-details-marker {
+  display: none;
+}
+.remote-sessions-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.remote-sessions-summary .setting-value {
+  color: var(--remote-muted);
+}
+.remote-sessions-summary svg {
+  width: 16px;
+  height: 16px;
+  color: var(--muted);
+}
+.remote-sessions[open] .remote-sessions-summary svg {
+  transform: rotate(90deg);
+}
+.remote-sessions-list {
+  padding: 0 0 4px 20px;
+}
+.remote-sessions-help,
+.remote-sessions-empty {
+  color: var(--remote-muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+  margin: 0 0 12px;
+}
+.remote-sessions-list .remote-session-row:first-of-type {
+  padding-top: 0;
+}
+.remote-session-row strong,
+.remote-session-row small {
   overflow-wrap: anywhere;
-  user-select: text;
-}
-.remote-control .relay-address-row {
-  flex-wrap: wrap;
-  gap: 8px 18px;
-}
-.relay-address-row > span:first-child {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-.relay-address-row > .remote-address {
-  flex: 1 1 360px;
-  justify-content: flex-end;
 }
 .remote-control .remote-pairing-row {
   align-items: center;
@@ -60,10 +109,6 @@
   flex: 1;
   flex-wrap: nowrap;
   min-width: 0;
-}
-.remote-pairing > .button {
-  flex-shrink: 0;
-  white-space: nowrap;
 }
 .remote-pairing-value {
   display: flex;

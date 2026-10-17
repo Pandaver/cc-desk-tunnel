@@ -8,6 +8,7 @@ declare global {
       remoteStatus?: () => Promise<RemoteStatus>;
       relayStatus?: () => Promise<RelayStatus>;
       configureRelay?: (enabled: boolean) => Promise<RelayStatus>;
+      configureRelayRoute?: (route: string) => Promise<RelayStatus>;
       openRelay?: () => Promise<void>;
       onRelayChanged?: (callback: (status: RelayStatus) => void) => () => void;
       resetRemotePairing?: () => Promise<RemoteStatus>;
@@ -154,6 +155,7 @@ export type RemoteBrowserSession = {
 };
 export type RelayStatus = {
   enabled: boolean;
+  route: string;
   state: 'disabled' | 'connecting' | 'online' | 'offline' | 'error';
   url: string | null;
   error: string | null;

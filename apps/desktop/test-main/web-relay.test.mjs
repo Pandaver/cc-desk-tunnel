@@ -258,7 +258,7 @@ test('relay context requires loopback, active key and a valid visitor IP; ordina
     assert.throws(() => controller.context(request), { statusCode: 403 });
   controller.close();
   assert.throws(() => controller.context(valid), { statusCode: 403 });
-  assert.deepEqual(controller.status, { state: 'offline', url: null, error: null });
+  assert.deepEqual(controller.status, { state: 'offline', url: null, error: null, route: '' });
 });
 
 test('the server chooses the public origin independently of service credentials and the fixed local port', async (t) => {
@@ -1152,3 +1152,275 @@ test(
     );
   },
 );
+
+async function routeFixture(
+  t,
+  update = (control, message) => {
+    control.ws.send(
+      JSON.stringify({
+        type: 'relay.route-result',
+        id: message.id,
+        ok: true,
+        path: `/remote/${message.route}/`,
+      }),
+    );
+  },
+) {
+  const updates = [];
+  const f = await fixture(t, {
+    register: (control) => {
+      control.ready.capabilities = ['route'];
+      control.ready.path = `/remote/${control.message.route || deviceId}/`;
+      control.ws.on('message', (raw) => {
+        const message = JSON.parse(raw.toString());
+        updates.push(message);
+        update(control, message);
+      });
+      control.ws.send(JSON.stringify(control.ready));
+    },
+  });
+  return { ...f, updates };
+}
+
+test('route changes wait for acknowledgement, keep the authenticated connection and restore the default alias', async (t) => {
+  const f = await routeFixture(t, () => {});
+  const { controller } = f.start();
+  await until(() => controller.status.state === 'online');
+  const context = f.requestContext();
+  const registration = f.controls[0].message;
+  const updating = controller.setRoute('my-pc');
+  await until(() => f.updates.length === 1);
+  assert.equal(controller.status.route, '');
+  assert.equal(controller.context(context).basePath, `/remote/${deviceId}/`);
+  const request = f.updates[0];
+  assert.equal(request.type, 'relay.route');
+  assert.match(request.id, /^[a-f0-9-]{36}$/);
+  assert.equal(request.route, 'my-pc');
+  await assert.rejects(controller.setRoute('second'), /正在应用/);
+  f.controls[0].ws.send(
+    JSON.stringify({
+      type: 'relay.route-result',
+      id: request.id,
+      ok: true,
+      path: '/remote/my-pc/',
+    }),
+  );
+  const status = await updating;
+  assert.equal(status.route, 'my-pc');
+  assert.equal(status.url, `${f.origin}/remote/my-pc/`);
+  assert.equal(controller.context(context).basePath, '/remote/my-pc/');
+  assert.equal(f.controls.length, 1);
+  assert.deepEqual(f.controls[0].message, registration);
+  const resetting = controller.setRoute('');
+  await until(() => f.updates.length === 2);
+  assert.equal(f.updates[1].route, deviceId);
+  f.controls[0].ws.send(
+    JSON.stringify({
+      type: 'relay.route-result',
+      id: f.updates[1].id,
+      ok: true,
+      path: `/remote/${deviceId}/`,
+    }),
+  );
+  await resetting;
+  assert.equal(controller.status.route, '');
+  assert.equal(controller.context(context).basePath, `/remote/${deviceId}/`);
+  await controller.setRoute('');
+  assert.equal(f.updates.length, 2);
+});
+
+test('custom registration preserves device identity and validates aliases without normalization', async (t) => {
+  const f = await routeFixture(t);
+  const invalid = [
+    null,
+    1,
+    {},
+    'PC',
+    '-pc',
+    'pc-',
+    'a/b',
+    'a b',
+    ' a',
+    'a ',
+    'a\n',
+    'a\r\n',
+    'a'.repeat(65),
+    '电脑',
+  ];
+  for (const route of invalid) assert.throws(() => f.start({ route }), /访问路径须/);
+  assert.equal(f.controls.length, 0);
+  const { controller } = f.start({ route: 'my-pc' });
+  await until(() => controller.status.state === 'online');
+  assert.equal(f.controls[0].message.deviceId, deviceId);
+  assert.equal(f.controls[0].message.route, 'my-pc');
+  assert.equal(controller.status.url, `${f.origin}/remote/my-pc/`);
+  for (const route of invalid) await assert.rejects(controller.setRoute(route), /访问路径须/);
+  assert.equal(f.updates.length, 0);
+  await controller.setRoute('a'.repeat(64));
+  assert.equal(controller.status.route.length, 64);
+  assert.equal(f.controls.length, 1);
+});
+
+test('legacy servers keep the default path online but clearly reject custom route changes', async (t) => {
+  const f = await fixture(t);
+  const { controller } = f.start();
+  await until(() => controller.status.state === 'online');
+  const before = controller.status;
+  await assert.rejects(controller.setRoute('my-pc'), /尚不支持自定义访问路径/);
+  assert.deepEqual(controller.status, before);
+  assert.equal(controller.context(f.requestContext()).basePath, `/remote/${deviceId}/`);
+  assert.equal(f.controls.length, 1);
+  const custom = f.start({ route: 'my-pc' }).controller;
+  await until(() => custom.status.state === 'error');
+  assert.match(custom.status.error, /尚不支持自定义访问路径/);
+  assert.equal(custom.status.url, null);
+  await delay(80);
+  assert.equal(f.controls.length, 2);
+});
+
+test('route conflict and validation replies preserve the running public URL and context', async (t) => {
+  let reason = 'route_in_use';
+  const f = await routeFixture(t, (control, message) => {
+    control.ws.send(
+      JSON.stringify({ type: 'relay.route-result', id: message.id, ok: false, error: reason }),
+    );
+  });
+  const { controller } = f.start({ route: 'old-pc' });
+  await until(() => controller.status.state === 'online');
+  const before = controller.status;
+  await assert.rejects(controller.setRoute('new-pc'), /已被其他工作台使用/);
+  assert.deepEqual(controller.status, before);
+  reason = 'invalid_route';
+  await assert.rejects(controller.setRoute('new-pc'), /拒绝了访问路径/);
+  assert.deepEqual(controller.status, before);
+  assert.equal(controller.context(f.requestContext()).basePath, '/remote/old-pc/');
+  assert.equal(f.controls.length, 1);
+});
+
+test('initial path conflicts stop retrying until the user changes the alias', async (t) => {
+  const f = await fixture(t, {
+    register: (control) => {
+      if (control.message.route === 'taken') control.ws.close(4010, 'route_in_use');
+      else {
+        control.ready.capabilities = ['route'];
+        control.ready.path = `/remote/${control.message.route || deviceId}/`;
+        control.ws.send(JSON.stringify(control.ready));
+      }
+    },
+  });
+  const { controller } = f.start({ route: 'taken' });
+  await until(() => controller.status.state === 'error');
+  assert.match(controller.status.error, /已被其他工作台使用/);
+  await delay(80);
+  assert.equal(f.controls.length, 1);
+  const changed = await controller.setRoute('available');
+  assert.equal(changed.state, 'connecting');
+  await until(() => controller.status.state === 'online');
+  assert.equal(controller.status.url, `${f.origin}/remote/available/`);
+});
+
+test('a lost route acknowledgement expires, revokes uncertain context and reconnects on the previous path', async (t) => {
+  const f = await routeFixture(t, () => {});
+  const { controller } = f.start({
+    route: 'old-pc',
+    timing: { ...timing, route: 40, reconnectMin: 150, reconnectMax: 150 },
+  });
+  await until(() => controller.status.state === 'online');
+  const context = f.requestContext();
+  await assert.rejects(controller.setRoute('new-pc'), /更改访问路径超时/);
+  assert.equal(controller.status.route, 'old-pc');
+  assert.equal(controller.status.url, null);
+  assert.throws(() => controller.context(context), { statusCode: 403 });
+  await until(() => controller.status.state === 'online' && f.controls.length === 2);
+  assert.equal(f.controls[1].message.route, 'old-pc');
+  assert.equal(controller.context(f.requestContext()).basePath, '/remote/old-pc/');
+  assert.throws(() => controller.context(context), { statusCode: 403 });
+});
+
+test('control loss rejects an in-flight route request and a subsequent request is not left busy', async (t) => {
+  let disconnect = true;
+  const f = await routeFixture(t, (control, message) => {
+    if (disconnect) control.ws.terminate();
+    else
+      control.ws.send(
+        JSON.stringify({
+          type: 'relay.route-result',
+          id: message.id,
+          ok: true,
+          path: `/remote/${message.route}/`,
+        }),
+      );
+  });
+  const { controller } = f.start({ route: 'old-pc' });
+  await until(() => controller.status.state === 'online');
+  await assert.rejects(controller.setRoute('new-pc'), /连接已断开/);
+  assert.equal(controller.status.route, 'old-pc');
+  await until(() => controller.status.state === 'online' && f.controls.length === 2);
+  disconnect = false;
+  await controller.setRoute('new-pc');
+  assert.equal(controller.status.url, `${f.origin}/remote/new-pc/`);
+});
+
+test('editing a route while registration is pending starts a fresh generation without waiting for the network', async (t) => {
+  const f = await fixture(t, { register: () => {} });
+  const { controller } = f.start();
+  await until(() => f.controls.length === 1);
+  const status = await controller.setRoute('offline-pc');
+  assert.equal(status.state, 'connecting');
+  assert.equal(status.route, 'offline-pc');
+  assert.equal(status.url, null);
+  await until(() => f.controls.length === 2);
+  assert.equal(f.controls[1].message.route, 'offline-pc');
+  const ready = { ...f.controls[1].ready, capabilities: ['route'], path: '/remote/offline-pc/' };
+  f.controls[1].ws.send(JSON.stringify(ready));
+  await until(() => controller.status.state === 'online');
+  assert.equal(controller.status.url, `${f.origin}/remote/offline-pc/`);
+});
+
+test('invalid route acknowledgements and noncanonical ready paths never grant a mismatched context', async (t) => {
+  for (const path of [
+    '/remote/other/',
+    '/remote/my-pc/../',
+    '/remote/my-pc/?x=1',
+    '//remote/my-pc/',
+    'https://other.example/remote/my-pc/',
+  ]) {
+    const f = await fixture(t, { ready: { capabilities: ['route'], path } });
+    const { controller } = f.start({ route: 'my-pc' });
+    await until(() => controller.status.state === 'error');
+    assert.equal(controller.status.url, null);
+    assert.throws(() => controller.context(f.requestContext()), { statusCode: 403 });
+  }
+  const f = await routeFixture(t, (control, message) => {
+    control.ws.send(
+      JSON.stringify({
+        type: 'relay.route-result',
+        id: message.id,
+        ok: true,
+        path: '/remote/not-requested/',
+      }),
+    );
+  });
+  const { controller } = f.start();
+  await until(() => controller.status.state === 'online');
+  await assert.rejects(controller.setRoute('my-pc'), /无效协议消息/);
+  assert.equal(controller.status.route, '');
+  assert.equal(controller.status.url, null);
+  assert.equal(controller.status.state, 'error');
+  assert.throws(() => controller.context(f.requestContext()), { statusCode: 403 });
+});
+
+test('disabling during a route change rejects its promise immediately and does not reconnect', async (t) => {
+  const f = await routeFixture(t, () => {});
+  const { controller } = f.start();
+  await until(() => controller.status.state === 'online');
+  const pending = controller.setRoute('new-pc');
+  const rejected = assert.rejects(pending, /连接已断开/);
+  await until(() => f.updates.length === 1);
+  controller.close();
+  await rejected;
+  await delay(80);
+  assert.equal(f.controls.length, 1);
+  assert.equal(controller.status.url, null);
+  assert.equal(controller.status.route, '');
+});

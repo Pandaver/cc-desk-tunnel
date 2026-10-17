@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -38,6 +38,7 @@ function fixture(initialFiles) {
   const marks = [];
   let openGate;
   let listenerFailure;
+  let writeFailure;
   let quits = 0;
   const profile = join(dirname(filename), 'memory-profile');
   const sender = Object.assign(new EventEmitter(), {
@@ -94,7 +95,10 @@ function fixture(initialFiles) {
     if (name === './client-log.cjs') return { openLog: () => ({ write() {} }) };
     if (name === './web-auth.cjs')
       return {
-        atomicPrivateWrite: (path, text) => files.set(path, text),
+        atomicPrivateWrite: (path, text) => {
+          if (writeFailure) throw writeFailure;
+          files.set(path, text);
+        },
         createWebAuthStore: () => ({ token: 'pairing-code', list: () => [], subscribe() {} }),
       };
     if (name === './git-branch.cjs') return { gitBranch: async () => null };
@@ -141,6 +145,19 @@ function fixture(initialFiles) {
               relay.closed++;
             },
             context: () => ({ origin: 'https://relay.example', basePath: '/remote/test/' }),
+            async setRoute(route) {
+              relay.routes ??= [];
+              relay.routes.push(route);
+              if (relay.routeFailure) throw relay.routeFailure;
+              relay.status = {
+                state: 'online',
+                url: `https://relay.example/remote/${route || options.deviceId}/`,
+                error: null,
+                route,
+              };
+              options.onStatus(relay.status);
+              return relay.status;
+            },
           };
           relays.push(relay);
           return relay;
@@ -192,6 +209,7 @@ function fixture(initialFiles) {
     quits: () => quits,
     holdOpen: (gate) => (openGate = gate),
     failListener: () => (listenerFailure = new Error('EADDRINUSE')),
+    failWrite: (enabled = true) => (writeFailure = enabled ? new Error('disk full') : undefined),
   };
 }
 
@@ -565,4 +583,121 @@ test('rapid successful service probe IPC requests are rate limited', async () =>
   await assert.rejects(host.call('proxy:probe', probeRequest()), /频繁/);
   assert.equal(host.bridges[0].closed, 0);
   assert.equal(host.sender.listenerCount('destroyed'), 0);
+});
+
+test('local Web defaults to 5270 while previously saved ports are retained', async () => {
+  const host = fixture();
+  assert.equal(host.call('remote:status').port, 5270);
+  await host.call('remote:configure', { enabled: true });
+  assert.equal(host.listeners[0].port, 5270);
+  await host.call('remote:configure', { enabled: false, port: 17890 });
+  const restarted = fixture(host.files);
+  assert.equal(restarted.call('remote:status').port, 17890);
+  await restarted.call('remote:configure', { enabled: true });
+  assert.equal(restarted.listeners[0].port, 17890);
+});
+
+test('relay alias settings persist independently of local Web settings and remain desktop-only', async () => {
+  const host = fixture();
+  assert.match(host.call('relay:status').route, /^[a-f0-9]{32}$/);
+  await host.call('relay:configure-route', 'my-pc');
+  assert.equal(host.call('relay:status').route, 'my-pc');
+  assert.equal(host.call('relay:status').enabled, false);
+  assert.equal(host.relays.length, 0);
+  await host.call('remote:configure', { enabled: false, port: 5271 });
+  const saved = JSON.parse(
+    [...host.files.entries()].find(([name]) => name.endsWith('settings.json'))[1],
+  );
+  assert.deepEqual(saved.webRelay, { route: 'my-pc' });
+  assert.deepEqual(saved.remoteControl, { port: 5271, lan: false });
+  const restarted = fixture(host.files);
+  assert.equal(restarted.call('relay:status').route, 'my-pc');
+  assert.equal(restarted.call('remote:status').port, 5271);
+  assert.throws(
+    () =>
+      restarted.callAs(
+        'relay:configure-route',
+        { senderFrame: { url: 'http://localhost/' } },
+        'from-browser',
+      ),
+    /Untrusted renderer/,
+  );
+  assert.equal(restarted.call('relay:status').route, 'my-pc');
+  await restarted.call('login:save', { ...config, mode: 'remote' });
+  await restarted.call('remote:configure', { enabled: true });
+  await restarted.call('relay:configure', true);
+  assert.equal(restarted.relays[0].options.route, 'my-pc');
+});
+
+test('relay settings expose the stable generated path before enabling without sending a custom route', async () => {
+  const host = fixture();
+  const expected = createHash('sha256')
+    .update(`${host.call('device:get').id}\0`)
+    .digest('hex')
+    .slice(0, 32);
+  assert.equal(host.call('relay:status').route, expected);
+  assert.equal(host.imported.length, 0);
+  assert.equal(host.relays.length, 0);
+  await host.call('relay:configure-route', expected);
+  assert.equal(host.call('relay:status').route, expected);
+  const restarted = fixture(host.files);
+  assert.equal(restarted.call('relay:status').route, expected);
+  await restarted.call('login:save', { ...config, mode: 'remote' });
+  await restarted.call('remote:configure', { enabled: true });
+  await restarted.call('relay:configure', true);
+  assert.equal(restarted.relays[0].options.deviceId, expected);
+  assert.equal(restarted.relays[0].options.route, '');
+  await restarted.call('relay:configure-route', expected);
+  assert.equal(restarted.relays[0].routes, undefined);
+  await restarted.call('relay:configure-route', 'custom-pc');
+  await restarted.call('relay:configure-route', '');
+  assert.equal(restarted.call('relay:status').route, expected);
+  assert.equal(restarted.call('relay:status').url, `https://relay.example/remote/${expected}/`);
+  assert.deepEqual(restarted.relays[0].routes, ['custom-pc', '']);
+  const saved = JSON.parse(
+    [...restarted.files.entries()].find(([name]) => name.endsWith('settings.json'))[1],
+  );
+  assert.deepEqual(saved.webRelay, { route: '' });
+});
+
+test('route IPC preserves the business connection and rolls back the live route when saving fails', async () => {
+  const host = fixture();
+  await host.call('login:save', { ...config, mode: 'remote' });
+  await host.call('proxy:connect', config);
+  await host.call('remote:configure', { enabled: true });
+  await host.call('relay:configure-route', 'old-pc');
+  await host.call('relay:configure', true);
+  const relay = host.relays[0];
+  const identity = relay.options.deviceId;
+  await relay.setRoute('old-pc');
+  host.failWrite();
+  await assert.rejects(host.call('relay:configure-route', 'new-pc'), /disk full/);
+  assert.equal(host.call('relay:status').route, 'old-pc');
+  assert.equal(host.call('relay:status').url, 'https://relay.example/remote/old-pc/');
+  assert.deepEqual(relay.routes, ['old-pc', 'new-pc', 'old-pc']);
+  assert.equal(relay.closed, 0);
+  host.failWrite(false);
+  await host.call('relay:configure-route', 'new-pc');
+  assert.equal(host.call('relay:status').route, 'new-pc');
+  assert.equal(host.relays.length, 1);
+  assert.equal(host.relays[0].options.deviceId, identity);
+  assert.equal(host.bridges.length, 1);
+  assert.equal(host.bridges[0].closed, 0);
+  await host.call('relay:open');
+  assert.equal(host.opened.at(-1), 'https://relay.example/remote/new-pc/#pair=pairing-code');
+  const restarted = fixture(host.files);
+  assert.equal(restarted.call('relay:status').route, 'new-pc');
+});
+
+test('invalid saved aliases fall back to the default without changing stored local listener settings', async () => {
+  const host = fixture();
+  await host.call('remote:configure', { enabled: false, port: 17890 });
+  const path = [...host.files.keys()].find((name) => name.endsWith('settings.json'));
+  const saved = JSON.parse(host.files.get(path));
+  host.files.set(path, JSON.stringify({ ...saved, webRelay: { route: '../bad' } }));
+  const restarted = fixture(host.files);
+  assert.match(restarted.call('relay:status').route, /^[a-f0-9]{32}$/);
+  assert.equal(restarted.call('remote:status').port, 17890);
+  for (const route of [null, 'UPPER', ' a', 'a\n'])
+    await assert.rejects(restarted.call('relay:configure-route', route), /访问路径须/);
 });

@@ -9,7 +9,7 @@ import type {
 } from '@playwright/test';
 import { execFile } from 'node:child_process';
 import { randomUUID, X509Certificate } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer as createHttpsServer } from 'node:https';
 import { connect, createServer } from 'node:net';
 import type { Socket } from 'node:net';
@@ -36,6 +36,11 @@ const test = base.extend<{ desktop: Desktop }>({
     const profile = mkdtempSync(join(profiles, 'web-profile-'));
     const project = join(profile, 'project');
     mkdirSync(project);
+    // Give each isolated desktop a private loopback port before the first UI enable.
+    writeFileSync(
+      join(profile, 'settings.json'),
+      JSON.stringify({ remoteControl: { port: await unusedPort(), lan: false } }),
+    );
     const env = Object.fromEntries(
       Object.entries(process.env).filter(
         (entry): entry is [string, string] =>
@@ -94,12 +99,13 @@ async function unusedPort() {
 
 async function enable(page: Page) {
   await general(page);
-  await page
-    .getByRole('spinbutton', { name: '监听端口', exact: true })
-    .fill(String(await unusedPort()));
-  await page.getByRole('spinbutton', { name: '监听端口', exact: true }).blur();
+  await expect(page.getByRole('spinbutton', { name: '本地监听端口', exact: true })).toBeHidden();
   await page.getByRole('switch', { name: '启用 Web 工作台', exact: true }).click();
-  await expect(page.locator('.remote-address-text')).toHaveText(/^http:\/\/127\.0\.0\.1:/);
+  await page
+    .getByRole('spinbutton', { name: '本地监听端口', exact: true })
+    .fill(String(await unusedPort()));
+  await page.getByRole('spinbutton', { name: '本地监听端口', exact: true }).blur();
+  await expect(page.getByRole('button', { name: '复制本机地址', exact: true })).toBeEnabled();
   const status = await page.evaluate(() => window.desktop!.remoteStatus!());
   expect(status.enabled).toBe(true);
   return { url: status.url!, token: status.token! };
@@ -744,10 +750,68 @@ test.describe('Electron Web workbench', () => {
           desktop.page.evaluate(() => window.desktop!.relayStatus!().then((s) => s.state)),
         )
         .toBe('online');
-      const relay = await desktop.page.evaluate(() => window.desktop!.relayStatus!());
+      let relay = await desktop.page.evaluate(() => window.desktop!.relayStatus!());
       expect(relay.url).toMatch(
         new RegExp(`^http://127.0.0.1:${publicPort}/remote/[a-f0-9]{32}/$`),
       );
+      const generatedUrl = relay.url!;
+      const path = desktop.page.getByRole('textbox', { name: '服务端访问路径', exact: true });
+      await path.fill('my-desktop');
+      await path.blur();
+      await expect
+        .poll(() =>
+          desktop.page.evaluate(() => window.desktop!.relayStatus!().then((s) => s.route)),
+        )
+        .toBe('my-desktop');
+      relay = await desktop.page.evaluate(() => window.desktop!.relayStatus!());
+      expect(relay.url).toBe(`http://127.0.0.1:${publicPort}/remote/my-desktop/`);
+      expect((await direct.context.request.get(generatedUrl)).status()).toBe(404);
+      // A second authenticated desktop owns this alias; editing cannot steal its route.
+      const other = new WebSocket(`${origin.replace('http:', 'ws:')}/_relay/control`);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          other.once('error', reject);
+          other.once('open', () => {
+            other.send(
+              JSON.stringify({
+                type: 'relay.register',
+                version: 2,
+                token,
+                deviceId: 'f'.repeat(32),
+                relayKey: 'e'.repeat(64),
+                hostname: '127.0.0.1',
+                route: 'occupied',
+              }),
+            );
+          });
+          other.once('message', (raw) => {
+            if (JSON.parse(String(raw)).type === 'relay.ready') resolve();
+            else reject(new Error('Other route did not register'));
+          });
+        });
+        await path.fill('occupied');
+        await path.blur();
+        await expect(desktop.page.locator('.remote-control').getByRole('alert')).toContainText(
+          '已被',
+        );
+        await expect(path).toHaveValue('my-desktop');
+        expect((await desktop.page.evaluate(() => window.desktop!.relayStatus!())).url).toBe(
+          relay.url,
+        );
+      } finally {
+        other.terminate();
+      }
+      await path.fill('workstation');
+      await path.blur();
+      await expect
+        .poll(() =>
+          desktop.page.evaluate(() => window.desktop!.relayStatus!().then((s) => s.route)),
+        )
+        .toBe('workstation');
+      expect((await direct.context.request.get(relay.url!)).status()).toBe(404);
+      relay = await desktop.page.evaluate(() => window.desktop!.relayStatus!());
+      expect(relay.url).toBe(`http://127.0.0.1:${publicPort}/remote/workstation/`);
+      await expect(desktop.page.locator('.remote-control').getByRole('alert')).toHaveCount(0);
       expect(new URL(local.url).port).not.toBe(String(publicPort));
       expect(publicPort).not.toBe(port);
       expect(publicPort).not.toBe(relayPort);
@@ -814,9 +878,9 @@ test.describe('Electron Web workbench', () => {
 
       const nextLocalPort = await unusedPort();
       await desktop.page
-        .getByRole('spinbutton', { name: '监听端口', exact: true })
+        .getByRole('spinbutton', { name: '本地监听端口', exact: true })
         .fill(String(nextLocalPort));
-      await desktop.page.getByRole('spinbutton', { name: '监听端口', exact: true }).blur();
+      await desktop.page.getByRole('spinbutton', { name: '本地监听端口', exact: true }).blur();
       await expect
         .poll(() =>
           desktop.page.evaluate(() => window.desktop!.remoteStatus!().then((s) => s.port)),
@@ -1210,6 +1274,7 @@ test.describe('Electron Web workbench', () => {
       const grants = desktop.page
         .locator('.remote-control')
         .getByRole('button', { name: /^撤销 / });
+      await desktop.page.locator('.remote-control summary').click();
       await expect(grants).toHaveCount(2);
       await expect(desktop.page.locator('.remote-control')).toContainText('登录有效期为 30 天');
       await desktop.page

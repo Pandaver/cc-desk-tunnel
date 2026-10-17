@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('desktop', {
   configureRemote: (values) => ipcRenderer.invoke('remote:configure', values),
   relayStatus: () => ipcRenderer.invoke('relay:status'),
   configureRelay: (enabled) => ipcRenderer.invoke('relay:configure', enabled),
+  configureRelayRoute: (route) => ipcRenderer.invoke('relay:configure-route', route),
   openRelay: () => ipcRenderer.invoke('relay:open'),
   onRelayChanged: (callback) => {
     const listener = (_event, status) => callback(status);

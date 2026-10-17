@@ -1,7 +1,13 @@
 // Relay pages keep the same relative assets and API as the local workbench. The service
 // removes only this fixed prefix; it does not rewrite HTML, scripts or business messages.
 export function browserBasePath(pathname = globalThis.location?.pathname ?? '/') {
-  return pathname.match(/^\/remote\/[a-f0-9]{32}(?:\/|$)/)?.[0].replace(/\/?$/, '/') ?? '/';
+  const [root, prefix, route] = pathname.split('/');
+  return root === '' &&
+    prefix === 'remote' &&
+    route &&
+    /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.exec(route)?.[0] === route
+    ? `/remote/${route}/`
+    : '/';
 }
 
 export function browserApi(path: string) {

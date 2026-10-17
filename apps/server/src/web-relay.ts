@@ -7,6 +7,8 @@ import { createWebSocketStream, WebSocket, WebSocketServer } from 'ws';
 import { Throttle } from './throttle.ts';
 
 const DEVICE_ID = /^[a-f0-9]{32}$/;
+const ROUTE = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
+const REQUEST_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const SECRET = /^[a-f0-9]{64}$/;
 const MAX_DEVICES = 64;
 const MAX_CHANNELS = 512;
@@ -92,6 +94,7 @@ type Desktop = {
   socket: WebSocket;
   origin: URL;
   deviceId: string;
+  route: string;
   connectionId: string;
   secret: string;
   relayKey: string;
@@ -124,6 +127,7 @@ export class WebRelay {
     perMessageDeflate: false,
   });
   private desktops = new Map<string, Desktop>();
+  private routes = new Map<string, Desktop>();
   private connections = new Map<string, Desktop>();
   private throttle = new Throttle();
   private signingIn = new Map<string, number>();
@@ -145,9 +149,11 @@ export class WebRelay {
   }
 
   private route(request: IncomingMessage) {
-    const match = /^\/remote\/([a-f0-9]{32})(\/[^\r\n]*|\?[^\r\n]*|)$/.exec(request.url ?? '');
+    const match = /^\/remote\/([a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)(\/[^\r\n]*|\?[^\r\n]*|)$/.exec(
+      request.url ?? '',
+    );
     if (!match) return undefined;
-    return { desktop: this.desktops.get(match[1]), deviceId: match[1], path: match[2] || '/' };
+    return { desktop: this.routes.get(match[1]), route: match[1], path: match[2] || '/' };
   }
 
   private validOrigin(request: IncomingMessage, desktop: Desktop, upgrade = false) {
@@ -176,10 +182,10 @@ export class WebRelay {
       response.writeHead(503).end();
       return true;
     }
-    if (!request.url.startsWith(`/remote/${route.deviceId}/`)) {
+    if (!request.url.startsWith(`/remote/${route.route}/`)) {
       response
         .writeHead(308, {
-          Location: `/remote/${route.deviceId}/${route.path.startsWith('?') ? route.path : ''}`,
+          Location: `/remote/${route.route}/${route.path.startsWith('?') ? route.path : ''}`,
         })
         .end();
       return true;
@@ -326,6 +332,8 @@ export class WebRelay {
           typeof value.token !== 'string' ||
           typeof value.deviceId !== 'string' ||
           !DEVICE_ID.test(value.deviceId) ||
+          (value.route !== undefined &&
+            (typeof value.route !== 'string' || ROUTE.exec(value.route)?.[0] !== value.route)) ||
           typeof value.relayKey !== 'string' ||
           !SECRET.test(value.relayKey)
         ) {
@@ -345,6 +353,11 @@ export class WebRelay {
           socket.close(4009, 'Desktop already registered');
           return;
         }
+        const route = (value.route as string | undefined) ?? value.deviceId;
+        if (this.routes.has(route)) {
+          socket.close(4010, 'Relay route already registered');
+          return;
+        }
         if (this.desktops.size >= MAX_DEVICES) {
           socket.close(1013, 'Relay capacity reached');
           return;
@@ -357,6 +370,7 @@ export class WebRelay {
           socket,
           origin,
           deviceId: value.deviceId,
+          route,
           connectionId: randomUUID(),
           secret: randomBytes(32).toString('hex'),
           relayKey: value.relayKey,
@@ -365,9 +379,10 @@ export class WebRelay {
           responses: new Set(),
         };
         this.desktops.set(desktop.deviceId, desktop);
+        this.routes.set(desktop.route, desktop);
         this.connections.set(desktop.connectionId, desktop);
         socket.once('close', () => this.release(desktop));
-        socket.on('message', () => socket.close(4002, 'Unexpected relay control frame'));
+        socket.on('message', (raw, binary) => this.control(desktop, raw, binary));
         socket.send(
           JSON.stringify({
             type: 'relay.ready',
@@ -375,7 +390,8 @@ export class WebRelay {
             connectionId: desktop.connectionId,
             secret: desktop.secret,
             origin: desktop.origin.origin,
-            path: `/remote/${desktop.deviceId}/`,
+            path: `/remote/${desktop.route}/`,
+            capabilities: ['route'],
           }),
         );
       } else {
@@ -432,6 +448,48 @@ export class WebRelay {
         pending.resolve(stream);
       }
     });
+  }
+
+  private control(desktop: Desktop, raw: unknown, binary: boolean) {
+    let value: Record<string, unknown>;
+    try {
+      if (binary || !Buffer.isBuffer(raw) || raw.length > 8192) throw new Error('Invalid frame');
+      value = JSON.parse(raw.toString());
+      if (
+        !value ||
+        value.type !== 'relay.route' ||
+        typeof value.id !== 'string' ||
+        REQUEST_ID.exec(value.id)?.[0] !== value.id
+      )
+        throw new Error('Invalid frame');
+    } catch {
+      desktop.socket.close(4002, 'Unexpected relay control frame');
+      return;
+    }
+    if (this.desktops.get(desktop.deviceId) !== desktop) return;
+    const error =
+      typeof value.route !== 'string' || ROUTE.exec(value.route)?.[0] !== value.route
+        ? 'invalid_route'
+        : this.routes.has(value.route) && this.routes.get(value.route) !== desktop
+          ? 'route_in_use'
+          : undefined;
+    if (error) {
+      desktop.socket.send(
+        JSON.stringify({ type: 'relay.route-result', id: value.id, ok: false, error }),
+      );
+      return;
+    }
+    if (this.routes.get(desktop.route) === desktop) this.routes.delete(desktop.route);
+    desktop.route = value.route as string;
+    this.routes.set(desktop.route, desktop);
+    desktop.socket.send(
+      JSON.stringify({
+        type: 'relay.route-result',
+        id: value.id,
+        ok: true,
+        path: `/remote/${desktop.route}/`,
+      }),
+    );
   }
 
   private open(desktop: Desktop, signal: AbortSignal, drain: () => void) {
@@ -743,6 +801,7 @@ export class WebRelay {
   private release(desktop: Desktop) {
     if (this.desktops.get(desktop.deviceId) !== desktop) return;
     this.desktops.delete(desktop.deviceId);
+    if (this.routes.get(desktop.route) === desktop) this.routes.delete(desktop.route);
     this.connections.delete(desktop.connectionId);
     for (const pending of desktop.pending.values()) {
       this.pendingCount--;

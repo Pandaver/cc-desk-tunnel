@@ -91,11 +91,15 @@ async function fixture(t, entrance) {
     await instance.start();
     return instance;
   }
-  async function request(desktop, path, { method = 'GET', body, cookie, headers = {} } = {}) {
+  async function request(
+    desktop,
+    path,
+    { method = 'GET', body, cookie, headers = {}, route = desktop.id } = {},
+  ) {
     return new Promise((resolve, reject) => {
       const payload = body === undefined ? undefined : JSON.stringify(body);
       const request = httpRequest(
-        `${connectUrl}/remote/${desktop.id}/${path}`,
+        `${connectUrl}/remote/${route}/${path}`,
         {
           method,
           agent: false,
@@ -126,20 +130,21 @@ async function fixture(t, entrance) {
       request.end(payload);
     });
   }
-  async function pair(desktop) {
+  async function pair(desktop, route = desktop.id) {
     const result = await request(desktop, 'api/login', {
       method: 'POST',
       body: { token: desktop.auth.token },
+      route,
     });
     assert.equal(result.status, 200);
     const setCookie = result.headers['set-cookie'][0];
-    assert.ok(setCookie.includes(`Path=/remote/${desktop.id}/;`));
+    assert.ok(setCookie.includes(`Path=/remote/${route}/;`));
     assert.ok(!setCookie.includes(serviceToken));
     return { cookie: setCookie.split(';')[0], setCookie };
   }
-  async function websocket(desktop, cookie) {
+  async function websocket(desktop, cookie, route = desktop.id) {
     const socket = new WebSocket(
-      `${connectUrl.replace('http:', 'ws:')}/remote/${desktop.id}/api/control`,
+      `${connectUrl.replace('http:', 'ws:')}/remote/${route}/api/control`,
       {
         origin: origin.origin,
         headers: { Host: origin.host, Cookie: cookie },
@@ -276,5 +281,47 @@ test(
     );
     desktop.auth.reset();
     assert.equal((await f.request(desktop, 'api/info', { cookie: paired.cookie })).status, 401);
+  },
+);
+
+test(
+  'renaming a real relay keeps an established workbench socket and moves new HTTP and WebSocket requests atomically',
+  { timeout: 20_000 },
+  async (t) => {
+    const f = await fixture(t);
+    const desktop = await f.desktop('e');
+    const paired = await f.pair(desktop);
+    const existing = await f.websocket(desktop, paired.cookie);
+    const before = once(existing, 'message');
+    existing.send('before rename');
+    assert.equal((await before)[0].toString(), 'before rename');
+    const renamed = await desktop.relay.setRoute('my-pc');
+    assert.equal(renamed.url, `${f.connectUrl}/remote/my-pc/`);
+    assert.equal((await f.request(desktop, '')).status, 404);
+    assert.equal(existing.readyState, WebSocket.OPEN);
+    const after = once(existing, 'message');
+    existing.send('after rename');
+    assert.equal((await after)[0].toString(), 'after rename');
+    const page = await f.request(desktop, '', { route: 'my-pc' });
+    assert.equal(page.status, 200);
+    assert.match(page.body.toString(), new RegExp(desktop.id));
+    const pairedAgain = await f.pair(desktop, 'my-pc');
+    assert.match(pairedAgain.setCookie, /Path=\/remote\/my-pc\/;/);
+    const info = await f.request(desktop, 'api/info', {
+      route: 'my-pc',
+      cookie: pairedAgain.cookie,
+    });
+    assert.equal(info.status, 200);
+    assert.deepEqual(JSON.parse(info.body), { id: desktop.id });
+    const replacement = await f.websocket(desktop, pairedAgain.cookie, 'my-pc');
+    const newResponse = once(replacement, 'message');
+    replacement.send('new route workbench');
+    assert.equal((await newResponse)[0].toString(), 'new route workbench');
+    assert.equal(existing.readyState, WebSocket.OPEN);
+    await desktop.relay.setRoute('');
+    assert.equal((await f.request(desktop, '', { route: 'my-pc' })).status, 404);
+    assert.equal((await f.request(desktop, 'api/info', { cookie: paired.cookie })).status, 200);
+    assert.equal(existing.readyState, WebSocket.OPEN);
+    assert.equal(replacement.readyState, WebSocket.OPEN);
   },
 );

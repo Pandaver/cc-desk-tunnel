@@ -1,12 +1,13 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { connect, isIP } from 'node:net';
 import { WebSocket, createWebSocketStream } from 'ws';
 import { certificateMatches, connectService, controlTlsOptions } from './proxy-bridge.mjs';
 import { httpProxy, openSocket } from './system-proxy.mjs';
+import { validateRelayRoute } from './web-relay-lifecycle.cjs';
 
 const hex = /^[a-f0-9]{64}$/;
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
-const fatalClose = new Set([1002, 1003, 1007, 1008, 1009, 4001, 4002]);
+const fatalClose = new Set([1002, 1003, 1007, 1008, 1009, 4001, 4002, 4010]);
 const refused = () =>
   Object.assign(new Error('中继请求校验失败。'), { status: 403, statusCode: 403 });
 const fault = (message, fatal = false) => Object.assign(new Error(message), { fatal });
@@ -32,7 +33,16 @@ function certificateError(error) {
 
 // A separate, optional connection: neither the business bridge nor its SSH channels own its lifetime.
 // The relay can reach only this already-running Web listener. The service never supplies a target port.
-export function startWebRelay({ config, deviceId, port, resolveProxy, onStatus, timing = {} }) {
+export function startWebRelay({
+  config,
+  deviceId,
+  port,
+  route = '',
+  resolveProxy,
+  onStatus,
+  timing = {},
+}) {
+  validateRelayRoute(route);
   const address = new URL(config.url);
   if (
     !['ws:', 'wss:'].includes(address.protocol) ||
@@ -58,6 +68,7 @@ export function startWebRelay({ config, deviceId, port, resolveProxy, onStatus, 
     connect: duration('connect', 15000),
     channel: duration('channel', 10000),
     register: duration('register', 15000),
+    route: duration('route', 5000),
     heartbeat: duration('heartbeat', 15000),
     reconnectMin: duration('reconnectMin', 1000),
     reconnectMax: duration('reconnectMax', 30000),
@@ -69,21 +80,27 @@ export function startWebRelay({ config, deviceId, port, resolveProxy, onStatus, 
   let active = null;
   let retry;
   let attempts = 0;
-  let status = { state: 'connecting', url: null, error: null };
+  let status = { state: 'connecting', url: null, error: null, route };
 
   function publish(state, url = null, error = null) {
-    status = { state, url, error };
+    status = { state, url, error, route };
     onStatus?.({ ...status });
   }
   function current(generation) {
     return !closed && active === generation && !generation.ended;
   }
-  function stopGeneration(generation) {
+  function stopGeneration(generation, reason = '更改访问路径时中继连接已断开，请重试。') {
     if (generation.ended) return;
     generation.ended = true;
     generation.ready = null;
     clearTimeout(generation.timer);
     clearInterval(generation.heartbeat);
+    if (generation.routeRequest) {
+      const request = generation.routeRequest;
+      generation.routeRequest = null;
+      clearTimeout(request.timer);
+      request.reject(new Error(reason));
+    }
     for (const dispose of generation.disposers) dispose();
     generation.disposers.clear();
     for (const socket of generation.sockets) socket.terminate();
@@ -95,7 +112,7 @@ export function startWebRelay({ config, deviceId, port, resolveProxy, onStatus, 
   }
   function fail(generation, message, fatal = false) {
     if (!current(generation)) return;
-    stopGeneration(generation);
+    stopGeneration(generation, message);
     publish(fatal ? 'error' : 'offline', null, message);
     if (fatal || closed) return;
     const backoff = Math.min(
@@ -318,6 +335,8 @@ export function startWebRelay({ config, deviceId, port, resolveProxy, onStatus, 
     const generation = {
       ended: false,
       ready: null,
+      route,
+      routeRequest: null,
       relayKey: randomBytes(32).toString('hex'),
       sockets: new Set(),
       transports: new Set(),
@@ -334,6 +353,7 @@ export function startWebRelay({ config, deviceId, port, resolveProxy, onStatus, 
       return;
     }
     if (!current(generation)) return control.terminate();
+    generation.control = control;
     let heard = Date.now();
     const alive = () => (heard = Date.now());
     control.on('ping', alive);
@@ -345,11 +365,13 @@ export function startWebRelay({ config, deviceId, port, resolveProxy, onStatus, 
     control.once('close', (code) => {
       const fatal = fatalClose.has(code);
       const message =
-        code === 4009
-          ? '正在等待这个工作台的旧中继连接释放。'
-          : fatal
-            ? '中继接入或协议校验失败，请检查服务配置。'
-            : '中继连接已断开，正在重新连接。';
+        code === 4010
+          ? '访问路径已被其他工作台使用，请更换路径。'
+          : code === 4009
+            ? '正在等待这个工作台的旧中继连接释放。'
+            : fatal
+              ? '中继接入或协议校验失败，请检查服务配置。'
+              : '中继连接已断开，正在重新连接。';
       fail(generation, message, fatal);
     });
     control.on('message', (data, binary) => {
@@ -362,18 +384,55 @@ export function startWebRelay({ config, deviceId, port, resolveProxy, onStatus, 
         if (!message || typeof message !== 'object' || Array.isArray(message)) throw new Error();
         if (!generation.ready) {
           if (
+            message.type === 'relay.ready' &&
+            generation.route &&
+            !message.capabilities?.includes('route')
+          ) {
+            fail(generation, '服务端尚不支持自定义访问路径，请更新服务端或恢复默认路径。', true);
+            return;
+          }
+          if (
             message.type !== 'relay.ready' ||
             message.version !== 2 ||
             !uuid.test(message.connectionId) ||
             !hex.test(message.secret) ||
             !publicOrigin(message.origin) ||
-            message.path !== `/remote/${deviceId}/`
+            (message.capabilities !== undefined &&
+              (!Array.isArray(message.capabilities) ||
+                !message.capabilities.every((value) => typeof value === 'string'))) ||
+            message.path !== `/remote/${generation.route || deviceId}/`
           )
             throw new Error();
           generation.ready = message;
           clearTimeout(generation.timer);
           attempts = 0;
           publish('online', `${message.origin}${message.path}`);
+        } else if (message.type === 'relay.route-result') {
+          const request = generation.routeRequest;
+          if (!request || message.id !== request.id) throw new Error();
+          if (message.ok === true) {
+            if (message.path !== `/remote/${request.route || deviceId}/`) throw new Error();
+            route = request.route;
+            generation.route = route;
+            generation.ready.path = message.path;
+            generation.routeRequest = null;
+            clearTimeout(request.timer);
+            publish('online', `${generation.ready.origin}${message.path}`);
+            request.resolve({ ...status });
+          } else if (
+            message.ok === false &&
+            ['route_in_use', 'invalid_route'].includes(message.error)
+          ) {
+            generation.routeRequest = null;
+            clearTimeout(request.timer);
+            request.reject(
+              new Error(
+                message.error === 'route_in_use'
+                  ? '访问路径已被其他工作台使用，请更换路径。'
+                  : '服务端拒绝了访问路径，请检查格式。',
+              ),
+            );
+          } else throw new Error();
         } else {
           if (message.type !== 'relay.open' || !uuid.test(message.channelId)) throw new Error();
           void attach(generation, message.channelId);
@@ -402,6 +461,7 @@ export function startWebRelay({ config, deviceId, port, resolveProxy, onStatus, 
         version: 2,
         token: config.token,
         deviceId,
+        ...(generation.route ? { route: generation.route } : {}),
         relayKey: generation.relayKey,
         hostname: address.hostname,
       }),
@@ -410,8 +470,42 @@ export function startWebRelay({ config, deviceId, port, resolveProxy, onStatus, 
 
   // No connection is opened until the owner explicitly calls startWebRelay. Defer the first notification
   // so the owner can store the returned controller before its onStatus callback runs.
-  queueMicrotask(() => void begin());
+  queueMicrotask(() => {
+    if (!active) void begin();
+  });
   return {
+    async setRoute(value) {
+      validateRelayRoute(value);
+      if (closed) throw new Error('中继连接已结束。');
+      if (active?.routeRequest) throw new Error('正在应用访问路径，请稍后重试。');
+      if (route === value) return { ...status };
+      const generation = active;
+      if (!generation || !current(generation) || !generation.ready) {
+        route = value;
+        clearTimeout(retry);
+        if (generation) stopGeneration(generation);
+        void begin();
+        return { ...status };
+      }
+      if (!generation.ready.capabilities?.includes('route'))
+        throw new Error('服务端尚不支持自定义访问路径，请更新服务端。');
+      return new Promise((resolve, reject) => {
+        const id = randomUUID();
+        const request = { id, route: value, resolve, reject };
+        generation.routeRequest = request;
+        request.timer = setTimeout(
+          () => fail(generation, '更改访问路径超时，正在恢复原地址。'),
+          waits.route,
+        );
+        request.timer.unref?.();
+        generation.control.send(
+          JSON.stringify({ type: 'relay.route', id, route: value || deviceId }),
+          (error) => {
+            if (error) fail(generation, '更改访问路径时中继连接已断开，请重试。');
+          },
+        );
+      });
+    },
     close() {
       if (closed) return;
       closed = true;
