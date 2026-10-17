@@ -13,10 +13,11 @@ export type ScheduleSnapshot = {
 export type WorkbenchSchedules = Omit<Schedules, 'next' | 'save'> & {
   remote: boolean;
   revision?: string | null;
+  editGeneration?: number;
   timeZone?: string;
   next: (task: Task) => number | null | undefined;
   refresh?: () => Promise<void>;
-  save: (tasks: Task[], revision?: string | null) => Promise<void>;
+  save: (tasks: Task[], revision?: string | null, editGeneration?: number) => Promise<void>;
 };
 export type RemoteScheduleRequest = { id: string; method: string; args: unknown[] };
 export type ScheduleRequests = {
@@ -192,7 +193,11 @@ export async function saveDesktopScheduleChanges(
   shared: boolean,
   tasks: Task[],
   revision?: string | null,
+  editGeneration = 0,
+  currentGeneration = 0,
 ) {
+  if (editGeneration !== currentGeneration)
+    throw new Error('共享状态已更改。草稿已保留，请核对最新任务后重新打开编辑。');
   if (!shared) {
     if (revision !== undefined)
       throw new Error('共享编辑已结束。草稿已保留，请核对最新任务后重新打开编辑。');
@@ -208,19 +213,25 @@ function useDesktopSchedules(
   report?: (task: Task, outcome: Outcome) => void,
 ): WorkbenchSchedules {
   const schedules = useSchedules(send, report);
-  const [shared, setShared] = useState(false);
-  const sharedNow = useRef(false);
-  const [version, setVersion] = useState<{ tasks: Task[]; revision: string | null } | null>(null);
+  const [sharing, setSharing] = useState({ enabled: false, generation: 0 });
+  const sharingNow = useRef(sharing);
+  const [version, setVersion] = useState<{
+    tasks: Task[];
+    revision: string | null;
+    generation: number;
+  } | null>(null);
   useEffect(
     () =>
       window.desktop?.onRemoteEnabledChanged?.((enabled) => {
-        sharedNow.current = enabled;
-        setShared(enabled);
+        if (sharingNow.current.enabled === enabled) return;
+        // Count transitions at receipt, not in an effect: React may batch a complete on/off cycle.
+        sharingNow.current = { enabled, generation: sharingNow.current.generation + 1 };
+        setSharing(sharingNow.current);
       }),
     [],
   );
   useEffect(() => {
-    if (!shared || !window.desktop?.readRemoteSchedules) return;
+    if (!sharing.enabled || !window.desktop?.readRemoteSchedules) return;
     let active = true;
     const tasks = schedules.tasks;
     void window.desktop.readRemoteSchedules().then(
@@ -231,27 +242,38 @@ function useDesktopSchedules(
           !parsed.broken &&
           !parsed.problems.length &&
           JSON.stringify(parsed.tasks) === JSON.stringify(tasks);
-        setVersion({ tasks, revision: matches ? file.revision : null });
+        setVersion({
+          tasks,
+          revision: matches ? file.revision : null,
+          generation: sharing.generation,
+        });
       },
       () => {
-        if (active) setVersion({ tasks, revision: null });
+        if (active) setVersion({ tasks, revision: null, generation: sharing.generation });
       },
     );
     return () => {
       active = false;
     };
-  }, [shared, schedules.tasks, schedules.problems]);
+  }, [sharing, schedules.tasks, schedules.problems]);
   return {
     ...schedules,
     remote: false,
-    revision: shared ? (version?.tasks === schedules.tasks ? version.revision : null) : undefined,
-    save: (tasks, revision) =>
+    revision: sharing.enabled
+      ? version?.tasks === schedules.tasks && version.generation === sharing.generation
+        ? version.revision
+        : null
+      : undefined,
+    editGeneration: sharing.generation,
+    save: (tasks, revision, editGeneration) =>
       saveDesktopScheduleChanges(
         schedules.save,
         window.desktop?.saveRemoteSchedules,
-        sharedNow.current,
+        sharingNow.current.enabled,
         tasks,
         revision,
+        editGeneration,
+        sharingNow.current.generation,
       ),
   };
 }

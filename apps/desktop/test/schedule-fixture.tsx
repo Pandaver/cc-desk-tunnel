@@ -36,6 +36,7 @@ export function mount(remote: boolean) {
     runNow: [] as string[],
     saves: [] as { text: string; revision: string }[],
     revision: undefined as string | null | undefined,
+    editGeneration: undefined as number | undefined,
     intervals: [] as number[],
     showPanel: (_show: boolean) => {},
     enable: (enabled: boolean) => enabledChanged.forEach((callback) => callback(enabled)),
@@ -115,6 +116,7 @@ export function mount(remote: boolean) {
     fixture.showPanel = setShow;
     fixture.refresh = schedules.refresh ?? (async () => {});
     fixture.revision = schedules.revision;
+    fixture.editGeneration = schedules.editGeneration;
     return show ? (
       <SchedulePanel schedules={schedules} sessions={[]} projects={[]} capabilities={null} />
     ) : (
@@ -135,6 +137,7 @@ declare global {
       runNow: string[];
       saves: { text: string; revision: string }[];
       revision: string | null | undefined;
+      editGeneration?: number;
       intervals: number[];
       showPanel: (show: boolean) => void;
       enable: (enabled: boolean) => void;

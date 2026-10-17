@@ -199,3 +199,117 @@ test('a draft keeps its original revision across polling and cannot restore a de
   ).toEqual(['0']);
   expect(await page.evaluate(() => window.scheduleFixture.snapshot!.tasks)).toEqual([]);
 });
+
+test('an unshared desktop draft cannot restore a browser deletion after Web is enabled then disabled', async ({
+  page,
+}) => {
+  await mount(page, false);
+  await page.getByRole('button', { name: '编辑 示例任务', exact: true }).click();
+  await page.getByLabel('提示词', { exact: true }).fill('启用 Web 前留下的草稿');
+  await page.evaluate(() => window.scheduleFixture.enable(true));
+  await expect.poll(() => page.evaluate(() => window.scheduleFixture.revision)).toBe('0');
+  await page.evaluate(async () => {
+    const snapshot = (await window.scheduleFixture.request('schedules:state')) as ScheduleSnapshot;
+    await window.scheduleFixture.request('schedules:save', '{"tasks":[]}', snapshot.revision);
+    window.scheduleFixture.enable(false);
+  });
+  await expect(page.getByText('暂无已安排的任务', { exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.scheduleFixture.revision)).toBeUndefined();
+  await page.getByRole('button', { name: '保存任务', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('共享状态已更改');
+  await expect(page.getByLabel('提示词', { exact: true })).toHaveValue('启用 Web 前留下的草稿');
+  expect(await page.evaluate(() => window.scheduleFixture.snapshot!.tasks)).toEqual([]);
+  expect(await page.evaluate(() => window.scheduleFixture.saves.length)).toBe(1);
+
+  await page.getByRole('button', { name: '取消', exact: true }).click();
+  await page.getByRole('button', { name: '新建任务', exact: true }).first().click();
+  await page.getByLabel('任务名称', { exact: true }).fill('关闭共享后新建');
+  await page.getByLabel('提示词', { exact: true }).fill('新的桌面编辑仍可保存');
+  await page.getByLabel('项目目录', { exact: true }).fill('/project');
+  await page.getByRole('button', { name: '保存任务', exact: true }).click();
+  await expect(page.getByText('关闭共享后新建', { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => window.scheduleFixture.saves.length)).toBe(1);
+  await page.evaluate(() => window.scheduleFixture.enable(true));
+  await expect.poll(() => page.evaluate(() => window.scheduleFixture.revision)).toBe('2');
+  const snapshot = (await page.evaluate(() =>
+    window.scheduleFixture.request('schedules:state'),
+  )) as ScheduleSnapshot;
+  expect(snapshot.tasks.map((task) => task.name)).toEqual(['关闭共享后新建']);
+  expect(snapshot.tasks[0].prompt).toBe('新的桌面编辑仍可保存');
+  await page.getByRole('button', { name: '编辑 关闭共享后新建', exact: true }).click();
+  await page.getByLabel('提示词', { exact: true }).fill('再次共享后仍可保存');
+  await page.getByRole('button', { name: '保存任务', exact: true }).click();
+  await expect
+    .poll(() => page.evaluate(() => window.scheduleFixture.snapshot!.tasks[0].prompt))
+    .toBe('再次共享后仍可保存');
+  expect(
+    await page.evaluate(() => window.scheduleFixture.saves.map(({ revision }) => revision)),
+  ).toEqual(['0', '2']);
+});
+
+test('a complete Web toggle batched in one turn still invalidates an old desktop draft', async ({
+  page,
+}) => {
+  await mount(page, false);
+  await page.getByRole('button', { name: '编辑 示例任务', exact: true }).click();
+  await page.getByLabel('提示词', { exact: true }).fill('批处理启停前的草稿');
+  await page.evaluate(() => {
+    window.scheduleFixture.enable(true);
+    window.scheduleFixture.enable(false);
+  });
+  await expect.poll(() => page.evaluate(() => window.scheduleFixture.editGeneration)).toBe(2);
+  expect(await page.evaluate(() => window.scheduleFixture.revision)).toBeUndefined();
+  await page.getByRole('button', { name: '保存任务', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('草稿已保留');
+  await expect(page.getByLabel('提示词', { exact: true })).toHaveValue('批处理启停前的草稿');
+  expect(await page.evaluate(() => window.scheduleFixture.snapshot!.tasks[0].prompt)).toBe(
+    '检查项目',
+  );
+  expect(await page.evaluate(() => window.scheduleFixture.saves)).toEqual([]);
+
+  await page.getByRole('button', { name: '取消', exact: true }).click();
+  await page.getByRole('button', { name: '编辑 示例任务', exact: true }).click();
+  await page.getByLabel('提示词', { exact: true }).fill('启停后新打开的草稿');
+  await page.evaluate(() => window.scheduleFixture.enable(false));
+  await page.getByRole('button', { name: '保存任务', exact: true }).click();
+  await expect
+    .poll(() => page.evaluate(() => window.scheduleFixture.snapshot!.tasks[0].prompt))
+    .toBe('启停后新打开的草稿');
+  expect(await page.evaluate(() => window.scheduleFixture.editGeneration)).toBe(2);
+  expect(await page.evaluate(() => window.scheduleFixture.saves)).toEqual([]);
+});
+
+test('restarting Web cannot reuse a revision read in the previous sharing generation', async ({
+  page,
+}) => {
+  await mount(page, false);
+  await page.evaluate(() => window.scheduleFixture.enable(true));
+  await expect.poll(() => page.evaluate(() => window.scheduleFixture.revision)).toBe('0');
+  await page.evaluate(() => {
+    const read = window.desktop!.readRemoteSchedules!;
+    const release = new Promise<void>((resolve) =>
+      window.addEventListener('release-schedule-read', () => resolve(), { once: true }),
+    );
+    window.desktop!.readRemoteSchedules = async () => {
+      await release;
+      return read();
+    };
+    window.scheduleFixture.enable(false);
+    window.scheduleFixture.enable(true);
+  });
+  await expect.poll(() => page.evaluate(() => window.scheduleFixture.editGeneration)).toBe(3);
+  expect(await page.evaluate(() => window.scheduleFixture.revision)).toBeNull();
+  await page.getByRole('button', { name: '编辑 示例任务', exact: true }).click();
+  await page.getByLabel('提示词', { exact: true }).fill('重新共享但版本尚未就绪时的草稿');
+  await page.evaluate(() => window.dispatchEvent(new Event('release-schedule-read')));
+  await expect.poll(() => page.evaluate(() => window.scheduleFixture.revision)).toBe('0');
+  await page.getByRole('button', { name: '保存任务', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('版本尚未就绪');
+  await expect(page.getByLabel('提示词', { exact: true })).toHaveValue(
+    '重新共享但版本尚未就绪时的草稿',
+  );
+  expect(await page.evaluate(() => window.scheduleFixture.saves)).toEqual([]);
+  expect(await page.evaluate(() => window.scheduleFixture.snapshot!.tasks[0].prompt)).toBe(
+    '检查项目',
+  );
+});

@@ -95,6 +95,7 @@ function Editor({
   timeZone,
   remote,
   revision,
+  editGeneration,
   save,
   cancel,
 }: {
@@ -105,14 +106,16 @@ function Editor({
   timeZone?: string;
   remote: boolean;
   revision?: string | null;
-  save: (task: Task, revision?: string | null) => Promise<void>;
+  editGeneration?: number;
+  save: (task: Task, revision?: string | null, editGeneration?: number) => Promise<void>;
   cancel: () => void;
 }) {
   const [form, setForm] = useState(() => formOf(task, sessions, projects, timeZone, remote));
   const [failure, setFailure] = useState<string | null>(null);
   // Polling may refresh the list while this form stays open. Its draft still belongs to the version
   // it was opened from; assigning the latest revision here would silently overwrite another edit.
-  const draftRevision = useRef(revision);
+  // Keep the sharing generation too, including drafts opened before a complete Web on/off cycle.
+  const draft = useRef({ revision, editGeneration });
   const awaitingTimeZone = useRef(remote && !timeZone && task?.schedule.type !== 'once');
   const timeEdited = useRef(false);
   useEffect(() => {
@@ -143,8 +146,8 @@ function Editor({
         // The same check the file goes through, so the window cannot write a task it would then refuse.
         const checked = parseTasks(JSON.stringify({ tasks: [taskOf(form)] }));
         if (!checked.tasks[0]) return setFailure(checked.problems[0] ?? '任务内容不完整。');
-        save(checked.tasks[0], draftRevision.current).catch((error: Error) =>
-          setFailure(error.message),
+        save(checked.tasks[0], draft.current.revision, draft.current.editGeneration).catch(
+          (error: Error) => setFailure(error.message),
         );
       }}
     >
@@ -377,7 +380,9 @@ export default function SchedulePanel({
     };
   }, [refresh]);
   const store = (next: Task[]) =>
-    schedules.save(next, schedules.revision).catch((error: Error) => setFailure(error.message));
+    schedules
+      .save(next, schedules.revision, schedules.editGeneration)
+      .catch((error: Error) => setFailure(error.message));
   const where = (task: Task) => {
     if (task.target.type === 'new') return `新会话 · ${folderName(task.target.projectPath)}`;
     const { sessionId } = task.target;
@@ -486,13 +491,15 @@ export default function SchedulePanel({
                   timeZone={schedules.timeZone}
                   remote={schedules.remote}
                   revision={schedules.revision}
+                  editGeneration={schedules.editGeneration}
                   cancel={() => setEditing(undefined)}
-                  save={async (task, revision) => {
+                  save={async (task, revision, editGeneration) => {
                     await schedules.save(
                       tasks.some((item) => item.id === task.id)
                         ? tasks.map((item) => (item.id === task.id ? task : item))
                         : [...tasks, task],
                       revision,
+                      editGeneration,
                     );
                     setEditing(undefined);
                   }}

@@ -246,6 +246,27 @@ test('desktop edits keep the original save when Web is off and never upgrade or 
   assert.deepEqual(ordinary, [[]]);
 });
 
+test('desktop drafts cannot cross a sharing lifecycle but new disabled drafts keep the original save', async () => {
+  const ordinary = [];
+  const conditional = [];
+  const save = async (tasks) => ordinary.push(tasks);
+  const compare = async (text, revision) => conditional.push({ text, revision });
+  await assert.rejects(
+    saveDesktopScheduleChanges(save, compare, false, [], undefined, 0, 2),
+    /共享状态已更改.*草稿已保留/,
+  );
+  await assert.rejects(
+    saveDesktopScheduleChanges(save, compare, true, [], 'old-shared-revision', 1, 3),
+    /共享状态已更改.*草稿已保留/,
+  );
+  assert.deepEqual(ordinary, []);
+  assert.deepEqual(conditional, []);
+  await saveDesktopScheduleChanges(save, compare, false, [], undefined, 2, 2);
+  assert.deepEqual(ordinary, [[]]);
+  await saveDesktopScheduleChanges(save, compare, true, [], 'current-revision', 3, 3);
+  assert.equal(conditional[0].revision, 'current-revision');
+});
+
 test('browser schedule timestamps use the desktop timezone without changing desktop formatting', () => {
   const time = Date.UTC(2030, 0, 1, 0, 30);
   assert.equal(scheduleStamp(time, 'Asia/Tokyo'), '2030-01-01 09:30');
