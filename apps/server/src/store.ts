@@ -150,7 +150,11 @@ export class SessionStore {
       return;
     this.database.exec('BEGIN');
     try {
-      for (const file of readdirSync(this.directory).filter((file) => file.endsWith('.json'))) {
+      // Browser authorizations belong to the optional Web module, not the old session format. Even
+      // unreadable Web storage must not prevent the ordinary proxy from importing its own sessions.
+      for (const file of readdirSync(this.directory).filter(
+        (file) => file.endsWith('.json') && file !== 'web-grants.json',
+      )) {
         const value = JSON.parse(readFileSync(join(this.directory, file), 'utf8'));
         const record = snapshotSchema.parse(value);
         if (

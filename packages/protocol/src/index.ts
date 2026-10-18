@@ -457,7 +457,31 @@ export const serviceUpdateSchema = z.object({
 });
 export type ServiceUpdate = z.infer<typeof serviceUpdateSchema>;
 const request = { requestId: id };
+// Browser access is an opt-in extension of the existing control protocol, not an execution channel.
+export const webAccessStateSchema = z.object({
+  enabled: z.boolean(),
+  origin: z.url().optional(),
+  pairing: z
+    .object({
+      code: z.string(),
+      expiresAt: timestamp,
+      // A duration avoids depending on the desktop clock matching the service's clock.
+      remainingMs: z.number().nonnegative().optional(),
+    })
+    .optional(),
+  grants: z.array(z.object({ id, name: z.string(), createdAt: timestamp, expiresAt: z.null() })),
+});
+export type WebAccessState = z.infer<typeof webAccessStateSchema>;
+export const webStateSchema = webAccessStateSchema.extend({
+  type: z.literal('web.state'),
+  requestId: id,
+});
+export type WebState = z.infer<typeof webStateSchema>;
 export const commandSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('web.status'), ...request, watch: z.boolean().optional() }).strict(),
+  z.object({ type: z.literal('web.configure'), ...request, enabled: z.boolean() }).strict(),
+  z.object({ type: z.literal('web.pair'), ...request, ifAbsent: z.boolean().optional() }).strict(),
+  z.object({ type: z.literal('web.revoke'), ...request, grantId: id }).strict(),
   z
     .object({
       type: z.literal('session.create'),
@@ -654,6 +678,12 @@ export const terminalControlSchema = z.discriminatedUnion('type', [
 ]);
 export type TerminalControl = z.infer<typeof terminalControlSchema>;
 const tunnelSecret = z.string().min(32).max(128);
+export const webAuthSchema = z
+  .object({
+    type: z.literal('web.auth'),
+    protocolVersion: z.number().int().positive(),
+  })
+  .strict();
 export const authSchema = z
   .object({
     type: z.literal('auth'),
@@ -673,11 +703,22 @@ export const deviceIdentitySchema = z
 // The client is closing the connection on purpose. Without it a connection that ends is taken for a fault on
 // the way, and what the device was running is kept for it to come back to.
 export const leaveSchema = z.object({ type: z.literal('leave') }).strict();
+// A diagnostic stays on the authenticated control connection and never runs a session command.
+export const connectionProbeSchema = z
+  .object({ type: z.literal('connection.probe'), requestId: id })
+  .strict();
 export const serverMessageSchema = z.discriminatedUnion('type', [
+  webStateSchema,
+  webAccessStateSchema.extend({ type: z.literal('web.changed') }),
+  z.object({ type: z.literal('connection.probe.result'), requestId: id }).strict(),
   z.object({
     type: z.literal('ready'),
     protocolVersion: z.literal(PROTOCOL_VERSION),
     connectionId: id,
+    web: z.boolean().optional(),
+    webControl: z.boolean().optional(),
+    webPairing: z.boolean().optional(),
+    diagnostics: z.literal(true).optional(),
     adapter: z.enum(['simulation', 'claude-code']),
     model: z.string().optional(),
     // The service's own release version, and where it stands against the published releases if it follows them.

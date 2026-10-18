@@ -14,7 +14,9 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import {
   authSchema,
+  webAuthSchema,
   commandSchema,
+  connectionProbeSchema,
   continues,
   deviceIdentitySchema,
   isFragment,
@@ -34,6 +36,7 @@ import type {
   EventPayload,
   Fragment,
   ServerMessage,
+  WebAccessState,
   Session,
   TerminalControl,
   TunnelCredentials,
@@ -57,12 +60,20 @@ import type { TunnelOptions } from './tunnel.ts';
 import { ServiceUpdates, serviceVersion } from './updates.ts';
 import type { UpdateOptions } from './updates.ts';
 import { UsageLog, createUsageReceiver, telemetryEnvironment } from './usage.ts';
+import { WebAccess } from './web-access.ts';
+import type { WebAccessOptions, WebGrant } from './web-access.ts';
 
 type Peer = {
   socket: WebSocket;
   id: string;
   address: string;
   authenticated: boolean;
+  // A browser controls existing devices; it never owns an execution seat.
+  browser?: WebGrant;
+  webPending?: number;
+  webRate?: { count: number; until: number };
+  webWatch?: boolean;
+  probeRate?: { count: number; since: number };
   // The computer it is from: the name it signed in with, and the identity that follows in a frame of its own.
   name: string;
   device?: Device;
@@ -122,6 +133,8 @@ export type ServerOptions = {
   host?: string;
   // Where an administrator puts the Windows installer offered to clients; defaults to <dataDir>/client.
   clientDir?: string;
+  // Opt-in static frontend and independent browser authentication on the existing listener.
+  web?: WebAccessOptions;
   // How many native runs and terminals may be going at once, over all connections; by default what the
   // memory of this machine holds.
   maxRuns?: number;
@@ -134,6 +147,25 @@ export type ServerOptions = {
 
 // How many answered requests a connection remembers, to answer a resend of one the same way.
 const REMEMBERED = 256;
+const browserCommands = new Set<Command['type']>([
+  'session.subscribe',
+  'session.history',
+  'session.status',
+  'session.stats',
+  'session.configure',
+  'session.compact',
+  'session.rename',
+  'session.delete',
+  'message.send',
+  'run.cancel',
+  'run.continue',
+  'run.task.stop',
+  'approval.reply',
+  'terminal.open',
+  'terminal.close',
+  'usage.summary',
+  'usage.query',
+]);
 // How much unfinished output a run holds before recording it, in characters.
 const OPEN_LIMIT = 64 * 1024;
 // What the "continue" button sends in the user's place. The turn before it was stopped or cut off, and a
@@ -149,6 +181,9 @@ export function createProxyServer(options: ServerOptions) {
       'Native mode requires TLS or explicit reverse proxy mode, and the execution channel.',
     );
   const store = new SessionStore(options.dataDir);
+  // Configuration advertises a capability, not a running HTTP surface. No Web storage, socket or
+  // timer is touched until an authenticated desktop explicitly enables it for this service lifetime.
+  let web: WebAccess | undefined;
   const usage = new UsageLog(store.database);
   const usageReceiver = options.claude ? createUsageReceiver(usage) : undefined;
   const peers = new Set<Peer>();
@@ -228,6 +263,11 @@ export function createProxyServer(options: ServerOptions) {
           .on('error', () => response.destroy())
           .pipe(response);
       }
+    } else if (web) {
+      void web.handle(request, response, addressOf(request)).catch(() => {
+        if (response.headersSent) response.destroy();
+        else response.writeHead(500, { 'Cache-Control': 'no-store' }).end();
+      });
     } else {
       response.writeHead(404);
       response.end();
@@ -236,6 +276,36 @@ export function createProxyServer(options: ServerOptions) {
   const server = options.tls ? createHttpsServer(options.tls, handler) : createServer(handler);
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
   server.on('upgrade', (request, socket, head) => {
+    if (web && request.url === '/web/ws') {
+      const current = web;
+      const grant = current.trusted(request, true) ? current.authenticate(request) : undefined;
+      if (closing || !grant) {
+        socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+        return;
+      }
+      const address = addressOf(request);
+      if (!throttle.enter(address)) {
+        socket.end('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n');
+        return;
+      }
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        if (web !== current || !current.attach(grant, ws)) {
+          throttle.leave(address);
+          const active = current.active(grant.id);
+          ws.close(
+            web !== current ? 1012 : active ? 1013 : 4001,
+            web !== current
+              ? 'Web access stopped'
+              : active
+                ? 'Browser connection limit'
+                : 'Browser session revoked',
+          );
+          return;
+        }
+        wss.emit('connection', ws, address, grant);
+      });
+      return;
+    }
     if (
       closing ||
       request.url !== '/ws' ||
@@ -257,6 +327,14 @@ export function createProxyServer(options: ServerOptions) {
   function send(peer: Peer, message: ServerMessage) {
     if (peer.socket.readyState === WebSocket.OPEN) peer.socket.send(JSON.stringify(message));
   }
+  function webState(peer: Peer): WebAccessState {
+    return web?.state(peer.device?.id) ?? { enabled: false, grants: [] };
+  }
+  function webChanged() {
+    for (const peer of peers)
+      if (peer.authenticated && !peer.browser && peer.webWatch)
+        send(peer, { type: 'web.changed', ...webState(peer) });
+  }
   function broadcast(message: ServerMessage, sessionId?: string) {
     for (const peer of peers) {
       if (peer.authenticated && (!sessionId || peer.subscriptions.has(sessionId)))
@@ -273,6 +351,8 @@ export function createProxyServer(options: ServerOptions) {
   function target(peer: Peer, session: Session) {
     const device = deviceOf(peer);
     if (!session.device) {
+      if (peer.browser)
+        throw new DomainError('device_unknown', '请先在桌面端为旧会话选择执行设备。');
       // Before computers were told apart they were all Windows ones, and so is the session's project path.
       if (platformOf(device) !== 'win32')
         throw new DomainError(
@@ -909,7 +989,54 @@ export function createProxyServer(options: ServerOptions) {
 
   // Resolves to the session ID carried in the response frame; account and usage commands have none.
   async function execute(peer: Peer, command: Command): Promise<string | undefined> {
+    // Enumerate the browser's supported capabilities, so a new desktop-only command is not accidentally
+    // exposed merely by adding it to the shared protocol. Existing session operations share the same core.
+    if (peer.browser && !browserCommands.has(command.type))
+      throw new DomainError('browser_unavailable', '此操作需要在桌面客户端完成。');
     switch (command.type) {
+      case 'web.status':
+      case 'web.configure':
+      case 'web.pair':
+      case 'web.revoke': {
+        if (command.type === 'web.status' && command.watch !== undefined)
+          peer.webWatch = command.watch;
+        if (command.type === 'web.configure') {
+          if (command.enabled && !web) {
+            if (!options.web)
+              throw new DomainError('web_unconfigured', '请先在服务端配置 Web 访问地址。');
+            try {
+              web = new WebAccess(
+                options.web,
+                options.dataDir,
+                { ...options, tls: !!options.tls },
+                undefined,
+                webChanged,
+              );
+            } catch {
+              throw new DomainError(
+                'web_start_failed',
+                'Web 访问启动失败，请检查服务端的入口配置和浏览器授权文件。',
+              );
+            }
+            webChanged();
+          } else if (!command.enabled && web) {
+            const previous = web;
+            web = undefined;
+            previous.close();
+            webChanged();
+          }
+        }
+        if (!web && command.type !== 'web.status' && command.type !== 'web.configure')
+          throw new DomainError('web_disabled', '服务端尚未启用 Web 访问。');
+        if (command.type === 'web.pair') web!.pair(deviceOf(peer).id, command.ifAbsent);
+        if (command.type === 'web.revoke') web!.revoke(command.grantId);
+        send(peer, {
+          type: 'web.state',
+          requestId: command.requestId,
+          ...webState(peer),
+        });
+        return undefined;
+      }
       case 'account.status':
       case 'account.login':
       case 'account.code':
@@ -1087,6 +1214,45 @@ export function createProxyServer(options: ServerOptions) {
       ? (({ version, size, sha256 }) => ({ version, size, sha256 }))(releases.current)
       : undefined;
   // The first frame must authenticate; a desktop client also asks for its execution channel here.
+  function authenticateBrowser(peer: Peer, value: unknown) {
+    if (!web) {
+      peer.socket.close(1012, 'Web access stopped');
+      return false;
+    }
+    const auth = webAuthSchema.safeParse(value);
+    const valid = web?.active(peer.browser!.id);
+    if (!auth.success || !valid || auth.data.protocolVersion !== PROTOCOL_VERSION) {
+      const mismatch = auth.success && valid && auth.data.protocolVersion !== PROTOCOL_VERSION;
+      send(peer, {
+        type: 'connection.error',
+        code: mismatch ? 'version_mismatch' : 'unauthorized',
+        message: mismatch
+          ? '浏览器与服务端版本不一致，请刷新页面。'
+          : '浏览器登录状态已失效，请重新配对。',
+      });
+      peer.socket.close(
+        mismatch ? 4002 : 4001,
+        mismatch ? 'Version mismatch' : 'Browser authentication failed',
+      );
+      return false;
+    }
+    peer.authenticated = true;
+    peer.device = { id: peer.browser!.id, name: peer.browser!.name };
+    peer.name = peer.device.name;
+    send(peer, {
+      type: 'ready',
+      protocolVersion: PROTOCOL_VERSION,
+      connectionId: peer.id,
+      web: true,
+      diagnostics: true,
+      adapter,
+      model: options.claude?.model,
+      version,
+      sessions: store.list(),
+    });
+    send(peer, devices());
+    return true;
+  }
   function authenticate(peer: Peer, value: unknown) {
     const auth = authSchema.safeParse(value);
     // Only a wrong token counts against the address: an outdated client holding the right one is not guessing.
@@ -1128,6 +1294,9 @@ export function createProxyServer(options: ServerOptions) {
       type: 'ready',
       protocolVersion: PROTOCOL_VERSION,
       connectionId: peer.id,
+      ...(web ? { web: true } : {}),
+      ...(options.web ? { webControl: true, webPairing: true } : {}),
+      diagnostics: true,
       adapter,
       model: options.claude?.model,
       version,
@@ -1243,6 +1412,21 @@ export function createProxyServer(options: ServerOptions) {
   }
   // A request ID is answered once: a resend gets the same response, never a second execution.
   function dispatch(peer: Peer, command: Command) {
+    if (peer.browser) {
+      const now = Date.now();
+      if (!peer.webRate || peer.webRate.until <= now)
+        peer.webRate = { count: 0, until: now + 10_000 };
+      if (++peer.webRate.count > 100 || (peer.webPending ?? 0) >= 16) {
+        send(peer, {
+          type: 'response',
+          requestId: command.requestId,
+          ok: false,
+          code: 'too_many_requests',
+          message: '请求过多，请稍后再试。',
+        });
+        return;
+      }
+    }
     const serialized = JSON.stringify(command);
     const previous = peer.responses.get(command.requestId);
     if (previous) {
@@ -1258,6 +1442,7 @@ export function createProxyServer(options: ServerOptions) {
         });
       return;
     }
+    if (peer.browser) peer.webPending = (peer.webPending ?? 0) + 1;
     const response = execute(peer, command).then(
       (sessionId): ServerMessage => ({
         type: 'response',
@@ -1277,7 +1462,12 @@ export function createProxyServer(options: ServerOptions) {
     // A resend follows its request closely: the latest few are all that can still be asked for again.
     if (peer.responses.size > REMEMBERED)
       peer.responses.delete(peer.responses.keys().next().value!);
-    track(response.then((value) => send(peer, value)));
+    track(
+      response.then((value) => {
+        if (peer.browser) peer.webPending!--;
+        send(peer, value);
+      }),
+    );
   }
   // The computer's place here, made when the first of its connections says which computer it is.
   function enter(peer: Peer) {
@@ -1351,13 +1541,14 @@ export function createProxyServer(options: ServerOptions) {
     announce();
   }
 
-  wss.on('connection', (socket: WebSocket, address: string) => {
+  wss.on('connection', (socket: WebSocket, address: string, browser?: WebGrant) => {
     void releases.refresh();
     const peer: Peer = {
       socket,
       id: randomUUID(),
       address,
       authenticated: false,
+      browser,
       name: '',
       registering: false,
       left: false,
@@ -1406,11 +1597,54 @@ export function createProxyServer(options: ServerOptions) {
         if (greeted) return;
         greeted = true;
         const channel = (value as { type?: unknown } | null)?.type === 'tunnel.attach';
-        if (channel ? attachChannel(peer, value) : authenticate(peer, value)) {
+        if (
+          browser
+            ? authenticateBrowser(peer, value)
+            : channel
+              ? attachChannel(peer, value)
+              : authenticate(peer, value)
+        ) {
           clearTimeout(authTimer);
           signedIn = true;
           throttle.leave(address);
         }
+        return;
+      }
+      if (browser) {
+        if (socket.readyState !== WebSocket.OPEN) return;
+        if (!web) {
+          socket.close(1012, 'Web access stopped');
+          return;
+        }
+        if (!web?.active(browser.id)) {
+          socket.close(4001, 'Browser session revoked');
+          return;
+        }
+        const type = (value as { type?: unknown } | null)?.type;
+        if (
+          type === 'device' ||
+          type === 'auth' ||
+          type === 'web.auth' ||
+          (typeof type === 'string' && type.startsWith('tunnel.'))
+        ) {
+          send(peer, {
+            type: 'connection.error',
+            code: 'browser_unavailable',
+            message: '浏览器没有本机执行通道。',
+          });
+          socket.close(4002, 'Browser cannot become an execution device');
+          return;
+        }
+      }
+      const probe = connectionProbeSchema.safeParse(value);
+      if (probe.success) {
+        // Probes do no business work and do not compete for the command cache. Bound replies on every
+        // authenticated connection, including desktop connections; excess probes simply time out.
+        const now = performance.now();
+        if (!peer.probeRate || now - peer.probeRate.since >= 1000)
+          peer.probeRate = { count: 0, since: now };
+        if (++peer.probeRate.count <= 10 && socket.bufferedAmount <= 64 * 1024)
+          send(peer, { type: 'connection.probe.result', requestId: probe.data.requestId });
         return;
       }
       const credentials = tunnelCredentialsSchema.safeParse(value);
@@ -1494,6 +1728,7 @@ export function createProxyServer(options: ServerOptions) {
     },
     async close() {
       closing = true;
+      web?.close();
       updates?.stop();
       login?.process.cancel();
       const terminalCleanup = Promise.all(

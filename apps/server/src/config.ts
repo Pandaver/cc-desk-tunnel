@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { ServerOptions } from './server.ts';
 
 function port(value: string | undefined, fallback: number, name: string) {
@@ -40,6 +41,7 @@ export function environmentConfig(env: NodeJS.ProcessEnv, defaultDataDir: string
     throw new Error('Invalid PROXY_GRACE_SECONDS');
   if (native && !reverseProxy && (!env.PROXY_TLS_CERT || !env.PROXY_TLS_KEY))
     throw new Error('Direct mode requires PROXY_TLS_CERT and PROXY_TLS_KEY.');
+  const webOrigin = env.PROXY_WEB_ORIGIN?.trim();
   const options: ServerOptions = {
     token: env.PROXY_TOKEN ?? '',
     dataDir: resolve(env.PROXY_DATA_DIR ?? defaultDataDir),
@@ -56,6 +58,17 @@ export function environmentConfig(env: NodeJS.ProcessEnv, defaultDataDir: string
     maxRuns,
     graceMs: grace === undefined ? undefined : grace * 1000,
     allowedOrigins: env.PROXY_ORIGINS?.split(','),
+    // This is only the capability. Web-only validation and storage reads wait for explicit enablement,
+    // so an unused or broken Web configuration cannot keep the proxy from starting. Resolve beside the
+    // running program, not the image: client-driven upgrades bring matching UI assets.
+    web: webOrigin
+      ? {
+          origin: webOrigin,
+          directory: env.PROXY_WEB_DIR
+            ? resolve(env.PROXY_WEB_DIR)
+            : fileURLToPath(new URL('../web', import.meta.url)),
+        }
+      : undefined,
     claude: native
       ? {
           executable: env.CLAUDE_PATH ?? 'claude',

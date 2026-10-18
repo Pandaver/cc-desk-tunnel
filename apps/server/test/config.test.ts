@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { clearServiceVariables, environmentConfig } from '../src/config.ts';
 import { createProxyServer } from '../src/server.ts';
+import { WebAccess } from '../src/web-access.ts';
 
 const native = {
   PROXY_ADAPTER: 'claude-code',
@@ -52,11 +55,66 @@ test('explicit native TLS mode is required', () => {
     /RETENTION/,
   );
 });
+test('Web capability is absent without a configured public origin', () => {
+  for (const origin of [undefined, '', ' ']) {
+    const { options } = environmentConfig(
+      { ...native, PROXY_WEB_ORIGIN: origin, PROXY_WEB_DIR: '/missing/not-read' },
+      '/state',
+    );
+    assert.equal(options.web, undefined);
+  }
+});
+test('Web assets follow the running program unless an asset directory is explicit', () => {
+  const { options, port } = environmentConfig(
+    { ...native, PROXY_WEB_ORIGIN: 'https://proxy.example.com' },
+    '/state',
+  );
+  assert.deepEqual(options.web, {
+    origin: 'https://proxy.example.com',
+    directory: fileURLToPath(new URL('../web', import.meta.url)),
+  });
+  assert.equal(port, 8787);
+  assert.equal(
+    environmentConfig(
+      {
+        ...native,
+        PROXY_WEB_ORIGIN: 'http://127.0.0.1:8787',
+        PROXY_WEB_DIR: 'apps/desktop/dist',
+      },
+      '/state',
+    ).options.web?.directory,
+    resolve('apps/desktop/dist'),
+  );
+});
+test('invalid Web-only configuration is deferred to explicit enablement, without stopping ordinary service startup', () => {
+  for (const origin of [
+    'https://proxy.example.com/',
+    'https://proxy.example.com/web',
+    'https://user:secret@proxy.example.com',
+    'https://proxy.example.com?token=secret',
+    'https://proxy.example.com#fragment',
+    'http://proxy.example.com',
+    'http://192.168.1.2',
+    'file:///private',
+    'not a URL',
+  ]) {
+    const { options } = environmentConfig({ ...native, PROXY_WEB_ORIGIN: origin }, '/state');
+    assert.equal(options.web?.origin, origin);
+    assert.throws(() => new WebAccess(options.web!, '/must-not-read', { reverseProxy: true }));
+  }
+  for (const origin of ['http://localhost:8787', 'http://[::1]:8787'])
+    assert.equal(
+      environmentConfig({ PROXY_WEB_ORIGIN: origin }, '/state').options.web?.origin,
+      origin,
+    );
+});
 test('service settings are removed from the environment inherited by the native CLI, leaving everything else', () => {
   const env = {
     ...native,
     FRPS_PORT: '7000',
     PROXY_DATA_DIR: '/state',
+    PROXY_WEB_ORIGIN: 'https://proxy.example.com',
+    PROXY_WEB_DIR: '/app/apps/server/web',
     CLAUDE_PATH: 'claude',
     CLAUDE_MODEL: 'opus',
     CLAUDE_SETTINGS_PATH: '/private/provider.json',
