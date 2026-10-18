@@ -21,7 +21,7 @@ sudo tar -xzf cc-desk-tunnel-server-X.Y.Z.tar.gz -C /opt/cc-desk-tunnel
 cd /opt/cc-desk-tunnel
 ```
 
-程序包不含秘密、Windows UI、开发测试和依赖。也可以自己打包：本机运行 `npm run package:server`，或直接使用完整仓库。
+程序包包含服务端源码和同版本的共享 Web 前端构建，不含秘密、Electron 桌面程序、开发测试和依赖。也可以自己打包：本机先安装依赖，再运行 `npm run package:server`，或直接使用完整仓库。
 
 交互安装：不带参数运行，脚本依次询问公网地址（默认自动探测）、入口方式、端口、数据目录和服务凭据（留空自动生成），随后自动构建、启动，并在结尾汇总客户端要填的地址 / 指纹 / 凭据、需放行的端口和下一步。已有部署配置时跳过问答，只重新构建启动。
 
@@ -82,6 +82,8 @@ sudo bash deploy/manage.sh connection
 默认一个公网 TCP 端口：WSS / HTTPS `8787`，登录、对话和执行通道都经它。运维 SSH 遵循服务器已有端口。云防火墙与主机策略自行放行，**不需要 UDP 或公开 Windows / Linux 随机 SSH 端口**。从 0.2.9 及更早版本升级的部署原先还放行了 `7000`，不再使用，可以去掉；用 `manage.sh upgrade` 升级时容器也不再发布它。Docker 发布端口可能绕过 UFW 的常规 INPUT 规则，应采用云安全组或 Docker 对应防火墙策略，不把启用 UFW 当成已限制发布端口。
 
 nginx 模式下服务按 `X-Real-IP` 区分来源地址做登录限速，请保留示例里的这一行。
+
+可选的[服务端 Web 客户端](../docs/server-web.md)默认关闭；设置 `config/service.env` 中的 `PROXY_WEB_ORIGIN` 并重启后，再由已连接桌面的设置开关明确启用，浏览器才可直接操作已有会话。日常启停不重启代理服务；服务端重启后入口恢复关闭。页面和浏览器连接共用现有入口，不增加容器或端口；需要可信 HTTPS 和单独的浏览器配对，不向浏览器提供服务凭据。
 
 ## 三种 TLS 入口
 
