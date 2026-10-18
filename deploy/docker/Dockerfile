@@ -32,6 +32,7 @@ COPY --chown=ccdesktunnel:ccdesktunnel packages/protocol/src packages/protocol/s
 FROM build AS web-build
 # A source checkout builds the same frontend as Electron. Release bundles already contain its matching
 # build, so Docker deployment and in-client upgrades do not need desktop development dependencies.
+COPY --chown=ccdesktunnel:ccdesktunnel CHANGELOG.md ./
 COPY --chown=ccdesktunnel:ccdesktunnel apps/desktop apps/desktop
 COPY --chown=ccdesktunnel:ccdesktunnel apps/server apps/server
 RUN if [ -f apps/desktop/src/main.tsx ]; then \

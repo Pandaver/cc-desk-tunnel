@@ -39,6 +39,7 @@ export function packageServer(root, output) {
         '.dockerignore',
         'package.json',
         'package-lock.json',
+        'CHANGELOG.md',
         'apps/server/package.json',
         'apps/server/src',
         'apps/desktop/package.json',

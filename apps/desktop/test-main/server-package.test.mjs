@@ -10,11 +10,13 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { packageServer } from '../../../scripts/package-server.mjs';
 
 const tar = process.platform === 'win32' ? 'tar.exe' : 'tar';
+const sourceRoot = fileURLToPath(new URL('../../..', import.meta.url));
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'cc-server-package-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -48,6 +50,8 @@ function fixture(t) {
     'docs/server-web.md',
   ])
     put(name, `fixture ${name}\n`);
+  for (const name of ['.dockerignore', 'deploy/docker/Dockerfile', 'CHANGELOG.md'])
+    put(name, readFileSync(join(sourceRoot, name)));
   put('package.json', '{"type":"module"}');
   // Stand in for the build executable, not an already-built dist. The archive must request a fresh
   // build and use its output, with nothing from an earlier package or the developer's live app.
@@ -119,6 +123,47 @@ test('a build without index.html is not packaged as a usable Web release', (t) =
   assert.throws(() => packageServer(root, output), /no index.html/);
   assert.equal(existsSync(output), false);
   assert.deepEqual(readdirSync(join(root, '.local')), ['credentials.json']);
+});
+
+test('source and release Docker contexts include every COPY input and the carried release notes', (t) => {
+  const { root, output } = fixture(t);
+  const dockerfile = readFileSync(join(sourceRoot, 'deploy/docker/Dockerfile'), 'utf8');
+  // Validate the actual local COPY sources, not only the presence of a build-stage declaration.
+  // Stage-to-stage copies are outputs of the build, not files supplied by the Docker context.
+  const inputs = dockerfile
+    .split(/\r?\n/)
+    .filter((line) => /^COPY /.test(line) && !/--from=/.test(line))
+    .flatMap((line) =>
+      line
+        .split(/\s+/)
+        .filter((part) => !part.startsWith('--'))
+        .slice(1, -1),
+    );
+  const releaseNotes = join(sourceRoot, 'apps/desktop/src/ReleaseNotes.tsx');
+  const imported = readFileSync(releaseNotes, 'utf8').match(/from ['"]([^'"]+)\?raw['"]/);
+  assert.ok(imported, 'ReleaseNotes must carry its release notes into the shared frontend');
+  const notesPath = relative(sourceRoot, resolve(dirname(releaseNotes), imported[1])).replaceAll(
+    '\\',
+    '/',
+  );
+  assert.ok(inputs.includes(notesPath), `${notesPath} must be a Docker COPY input`);
+  const ignore = readFileSync(join(sourceRoot, '.dockerignore'), 'utf8').split(/\r?\n/);
+  assert.ok(ignore.includes(`!${notesPath}`), `${notesPath} must reach the Docker context`);
+  for (const input of inputs)
+    assert.ok(existsSync(join(sourceRoot, input)), `Source context is missing ${input}`);
+
+  packageServer(root, output);
+  const extracted = join(root, 'extracted');
+  mkdirSync(extracted);
+  execFileSync(tar, ['-xzf', output, '-C', extracted]);
+  for (const input of inputs)
+    assert.ok(existsSync(join(extracted, input)), `Release context is missing ${input}`);
+  assert.deepEqual(
+    readFileSync(join(extracted, notesPath)),
+    readFileSync(join(sourceRoot, notesPath)),
+  );
+  assert.equal(existsSync(join(extracted, 'apps/desktop/src')), false);
+  assert.ok(existsSync(join(extracted, 'apps/server/web/index.html')));
 });
 
 test('Docker keeps frontend tooling in a separate build stage and accepts prebuilt release assets', () => {
