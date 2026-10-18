@@ -1,0 +1,68 @@
+.server-web-code {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.server-web-access .server-web-pairing {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: nowrap;
+}
+.server-web-pairing > span:first-child {
+  flex-shrink: 0;
+}
+.server-web-pairing .setting-actions {
+  flex: 1;
+  min-width: 0;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+.server-web-pairing .icon-button {
+  flex-shrink: 0;
+}
+.server-web-grants > summary {
+  cursor: pointer;
+  list-style: none;
+  border-bottom: 0;
+}
+.server-web-grants > summary::-webkit-details-marker {
+  display: none;
+}
+.server-web-grants-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.server-web-grants-summary svg {
+  width: 16px;
+  height: 16px;
+  color: var(--muted);
+}
+.server-web-grants[open] .server-web-grants-summary svg {
+  transform: rotate(90deg);
+}
+.server-web-grants-list {
+  padding: 0 0 4px 16px;
+}
+.server-web-grants-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12.5px;
+}
+.server-web-grants-list .setting-row strong,
+.server-web-grants-list .setting-row small {
+  overflow-wrap: anywhere;
+}
+.server-web-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 15px 0;
+  font-size: 12.5px;
+}

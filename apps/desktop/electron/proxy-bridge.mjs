@@ -12,6 +12,7 @@ import { startPosixSsh } from './posix-ssh.mjs';
 import { openChannels } from './tunnel-channels.mjs';
 import { httpProxy, openSocket } from './system-proxy.mjs';
 import { channelFailure, controlFailure, passing } from './connect-errors.mjs';
+import { webOrigin } from './external-links.cjs';
 // Loaded by the main process from here, so that the package's bundle of this module holds it.
 export { upgradeService } from './service-upgrade.mjs';
 
@@ -121,6 +122,7 @@ export async function openProxyBridge(
   // Kept for the installer download, which uses the same secret and certificate check as the connection.
   let token = '';
   let release;
+  let browserOrigin = null;
   let closed = false;
   let closing;
   // The window said it is ending the connection on purpose; the service is told, so that it keeps nothing.
@@ -160,6 +162,7 @@ export async function openProxyBridge(
     const current = pair;
     const queue = [];
     let verified = false;
+    let webAvailable = false;
     let nativeReady;
     let offerReceived = false;
     const target = `${address.hostname}:${address.port || 443}`;
@@ -292,6 +295,26 @@ export async function openProxyBridge(
         fail('服务端的消息无法识别。\n客户端与服务端的版本可能不一致，请把两者升级到同一版本。');
         return;
       }
+      // Only a ready, authenticated service can announce the browser entry; renderer messages never set it.
+      if (message.type === 'ready') {
+        webAvailable = verified && (message.web === true || message.webControl === true);
+        browserOrigin = null;
+      } else if (message.type === 'web.state' || message.type === 'web.changed') {
+        browserOrigin = webAvailable && message.enabled ? webOrigin(message.origin) : null;
+      } else if (
+        message.type === 'connection.error' &&
+        [
+          'unauthorized',
+          'version_mismatch',
+          'tunnel_failed',
+          'ssh_failed',
+          'connection_lost',
+          'client_failed',
+        ].includes(message.code)
+      ) {
+        webAvailable = false;
+        browserOrigin = null;
+      }
       // A service of another version refuses the connection but may still offer the installer for its own.
       if (message.type === 'connection.error' && message.client) release = message.client;
       if (message.type === 'connection.error')
@@ -364,6 +387,7 @@ export async function openProxyBridge(
     if (closing) return closing;
     if (pair && !notify) log('Connection closed from this client.');
     closed = true;
+    browserOrigin = null;
     closing = (async () => {
       pair?.controller.abort();
       pair?.local.close();
@@ -421,6 +445,7 @@ export async function openProxyBridge(
     url: `ws://127.0.0.1:${server.address().port}/bridge/${nonce}`,
     close,
     downloadInstaller,
+    webOrigin: () => (closed ? null : browserOrigin),
     // The installer the service last announced, if any.
     release: () => release,
   };

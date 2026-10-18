@@ -1,0 +1,298 @@
+import { test, expect } from '@playwright/test';
+import type { Page } from '@playwright/test';
+import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { extname, join, resolve } from 'node:path';
+import { WebSocket } from 'ws';
+import { PROTOCOL_VERSION, serverMessageSchema } from '@cc-desk-tunnel/protocol';
+import type { ServerMessage } from '@cc-desk-tunnel/protocol';
+import { createProxyServer } from '../../server/src/server.ts';
+import { send, settled } from './helpers.ts';
+
+// Only OS calls and local renderer assets are substituted. The desktop's real ProxyClient talks to
+// the same server as the browser, including conditional pairing and live status subscriptions.
+async function desktopSettings(
+  page: Page,
+  origin: string,
+  token: string,
+  device: { id: string; name: string },
+) {
+  await page.route('**/desktop-settings/**', async (route) => {
+    const path = new URL(route.request().url()).pathname.slice('/desktop-settings/'.length);
+    const file = path || 'index.html';
+    if (file.includes('..')) return route.abort();
+    const mime: Record<string, string> = {
+      '.html': 'text/html',
+      '.js': 'text/javascript',
+      '.css': 'text/css',
+      '.png': 'image/png',
+      '.woff2': 'font/woff2',
+    };
+    return route.fulfill({
+      body: await readFile(resolve('apps/desktop/dist', file)),
+      contentType: mime[extname(file)] ?? 'application/octet-stream',
+    });
+  });
+  // Installed desktop uses a Node WebSocket bridge, not a renderer-origin connection. Forward raw
+  // frames through the same kind of transport so the server's browser-origin rejection stays intact.
+  await page.routeWebSocket(origin.replace('http', 'ws') + '/ws', (socket) => {
+    const proxy = new WebSocket(origin.replace('http', 'ws') + '/ws');
+    const pending: (string | Buffer)[] = [];
+    socket.onMessage((raw) => {
+      if (proxy.readyState === WebSocket.OPEN) proxy.send(raw);
+      else pending.push(raw);
+    });
+    proxy.on('open', () => {
+      for (const raw of pending) proxy.send(raw);
+      pending.length = 0;
+    });
+    proxy.on('message', (raw) => socket.send(String(raw)));
+    proxy.on('error', () => socket.close({ code: 1011 }));
+    proxy.on('close', (code, reason) =>
+      socket.close({ code: code === 1005 || code === 1006 ? 1000 : code, reason: String(reason) }),
+    );
+    socket.onClose(() => proxy.close());
+  });
+  await page.addInitScript(
+    ({ origin, token, device }) => {
+      const nothing = async () => undefined;
+      const listen = () => () => {};
+      window.desktop = {
+        platform: 'win32',
+        dev: true,
+        boot: { connection: '', shared: { connections: [], busy: [] } },
+        version: async () => '0.3.4',
+        device: async () => device,
+        loadLogin: async () => ({
+          url: origin.replace('http', 'ws') + '/ws',
+          token,
+          fingerprint: '',
+          mode: 'local',
+          remember: true,
+          autoLogin: true,
+        }),
+        saveLogin: nothing,
+        disconnectProxy: nothing,
+        onSharedChanged: listen,
+        onUpdateProgress: listen,
+        onNotifyClicked: listen,
+        onSchedulesChanged: listen,
+        saveShared: nothing,
+        loadDrafts: async () => ({}),
+        saveDrafts: nothing,
+        setBusy: nothing,
+        notify: nothing,
+        workspaceRoots: async () => [],
+        foldersExist: async (paths: string[]) => paths.map(() => true),
+        loadSchedules: async () => ({ path: '', text: '{"tasks":[]}' }),
+        windowSettings: async () => ({ closeToTray: true }),
+        connections: async () => [{ id: '', name: '当前连接', current: true, open: true }],
+        copyText: nothing,
+        openExternal: nothing,
+      } as unknown as NonNullable<typeof window.desktop>;
+    },
+    { origin, token, device },
+  );
+  await page.goto('/desktop-settings/');
+  await expect(page.locator('.connection-status')).toContainText('已连接');
+  await page.getByRole('button', { name: '设置与账号' }).click();
+  await page.getByRole('menuitem', { name: '设置', exact: true }).click();
+  return page.locator('.server-web-access');
+}
+
+// Unlike the UI fixtures, this uses the real HTTP cookie exchange, WebSocket authentication and
+// session core, with the existing model-free adapter and an isolated data directory.
+test('desktop settings initialize pairing and the production browser controls an existing device session', async ({
+  page,
+  context,
+}, info) => {
+  test.setTimeout(60000);
+  const reservation = createServer();
+  await new Promise<void>((done) => reservation.listen(0, '127.0.0.1', done));
+  const address = reservation.address();
+  if (!address || typeof address === 'string') throw new Error('Missing test port');
+  await new Promise<void>((done, fail) =>
+    reservation.close((error) => (error ? fail(error) : done())),
+  );
+  const origin = `http://127.0.0.1:${address.port}`;
+  const directory = mkdtempSync(join(tmpdir(), 'cc-web-ui-'));
+  const token = randomUUID();
+  const executor = { id: randomUUID(), name: '在线开发电脑' };
+  const server = createProxyServer({
+    token,
+    dataDir: directory,
+    stepMs: 40,
+    web: { origin, directory: resolve('apps/desktop/dist') },
+  });
+  const messages: ServerMessage[] = [];
+  let desktop: WebSocket | undefined;
+  const controlPage = await context.newPage();
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  controlPage.on('pageerror', (error) => errors.push(error.message));
+  async function wait(predicate: (message: ServerMessage) => boolean) {
+    await expect.poll(() => messages.findIndex(predicate)).toBeGreaterThanOrEqual(0);
+    return messages.splice(messages.findIndex(predicate), 1)[0];
+  }
+  async function request(command: object) {
+    const requestId = randomUUID();
+    desktop!.send(JSON.stringify({ ...command, requestId }));
+    const response = await wait((m) => m.type === 'response' && m.requestId === requestId);
+    if (response.type !== 'response' || !response.ok) throw new Error(JSON.stringify(response));
+    return response;
+  }
+  async function select(target: Page, name = '浏览器验收会话') {
+    await target
+      .locator('.session-row')
+      .filter({ hasText: name })
+      .getByRole('button')
+      .first()
+      .click();
+    await expect(target.getByRole('textbox', { name: '消息' })).toBeVisible();
+  }
+  try {
+    await server.listen(address.port);
+    desktop = new WebSocket(origin.replace('http', 'ws') + '/ws');
+    desktop.on('message', (raw) =>
+      messages.push(serverMessageSchema.parse(JSON.parse(String(raw)))),
+    );
+    await new Promise<void>((done, fail) => {
+      desktop!.once('open', done);
+      desktop!.once('error', fail);
+    });
+    desktop.send(
+      JSON.stringify({
+        type: 'auth',
+        token,
+        protocolVersion: PROTOCOL_VERSION,
+        deviceName: executor.name,
+      }),
+    );
+    desktop.send(JSON.stringify({ type: 'device', id: executor.id }));
+    await wait((m) => m.type === 'ready');
+    const created = await request({
+      type: 'session.create',
+      title: '浏览器验收会话',
+      projectPath: 'C:\\test-project',
+    });
+    await request({
+      type: 'session.create',
+      title: '另一个会话',
+      projectPath: 'C:\\another-project',
+    });
+    expect((await fetch(origin)).status).toBe(404);
+    await request({ type: 'web.status', watch: true });
+    const panel = await desktopSettings(controlPage, origin, token, executor);
+    await expect(panel.getByRole('switch')).not.toBeChecked();
+    await expect(panel.getByRole('button')).toHaveCount(0);
+    await panel.getByRole('switch').click();
+    await expect(panel.getByLabel('配对码已隐藏')).toBeVisible();
+    await panel.getByRole('button', { name: '显示配对码', exact: true }).click();
+    const code = await panel.getByLabel('配对码', { exact: true }).innerText();
+    expect(code).toMatch(/^[a-f0-9]{24}$/);
+    const categories = controlPage.getByRole('navigation', { name: '设置分类' });
+    await categories.getByRole('button', { name: '通知', exact: true }).click();
+    await categories.getByRole('button', { name: '常规', exact: true }).click();
+    await panel.getByRole('button', { name: '显示配对码', exact: true }).click();
+    await expect(panel.getByLabel('配对码', { exact: true })).toHaveText(code);
+    await page.goto(`${origin}/#pair=${code}`);
+    await expect(page.locator('.connection-status')).toContainText('已连接');
+    expect(new URL(page.url()).hash).toBe('');
+    await expect(panel.locator('summary')).toContainText('1');
+    await expect(panel.getByLabel('配对码未生成')).toHaveText('—');
+    await page.getByRole('button', { name: '连接诊断', exact: true }).click();
+    const diagnostics = page.getByRole('dialog', { name: '连接诊断' });
+    await diagnostics.getByRole('button', { name: '测试延迟', exact: true }).click();
+    await expect(diagnostics).toContainText('5/5 次成功');
+    await expect(diagnostics.locator('.latency-route')).toContainText('浏览器');
+    await page.keyboard.press('Escape');
+    await expect(diagnostics).toHaveCount(0);
+    await select(page);
+    await send(page, '从浏览器操作现有会话');
+    await settled(page);
+    await expect(page.locator('.message.assistant strong')).toContainText('离线模拟回复');
+    expect(server.store.get(created.sessionId!).session.device?.id).toBe(executor.id);
+    expect(desktop.readyState).toBe(WebSocket.OPEN);
+    const pairedState = await wait((m) => m.type === 'web.changed' && m.grants.length === 1);
+    expect(pairedState.type === 'web.changed' && pairedState.pairing).toBeUndefined();
+    const cookies = await context.cookies(origin);
+    expect(cookies).toHaveLength(1);
+    expect(cookies[0]).toMatchObject({
+      httpOnly: true,
+      sameSite: 'Strict',
+    });
+    expect(cookies[0].name).toMatch(/^cc_web_session_[a-f0-9]{16}$/);
+    const storage = await page.evaluate(
+      () => `${document.cookie}\n${JSON.stringify({ ...localStorage, ...sessionStorage })}`,
+    );
+    for (const secret of [token, code, cookies[0].value]) expect(storage).not.toContain(secret);
+    await page.screenshot({ path: info.outputPath('server-web-desktop.png') });
+    await categories.getByRole('button', { name: '通知', exact: true }).click();
+    await categories.getByRole('button', { name: '常规', exact: true }).click();
+    await expect(panel.getByLabel('配对码已隐藏')).toBeVisible();
+    await panel.getByRole('button', { name: '显示配对码', exact: true }).click();
+    await expect(panel.getByLabel('配对码', { exact: true })).not.toHaveText(code);
+    expect((await context.cookies(origin))[0].value).toBe(cookies[0].value);
+
+    const other = await context.newPage();
+    await other.goto(origin);
+    await select(other, '另一个会话');
+    await expect(page.locator('.session-row.selected strong')).toHaveText('浏览器验收会话');
+    await expect(other.locator('.session-row.selected strong')).toHaveText('另一个会话');
+    await other.close();
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await send(page, '审批链路', 'tool');
+    await expect(page.getByRole('button', { name: '允许', exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    await page.screenshot({ path: info.outputPath('server-web-mobile-approval.png') });
+    await page.getByRole('button', { name: '允许', exact: true }).click();
+    await settled(page);
+    await send(page, '停止链路', 'tool');
+    await expect(page.getByRole('button', { name: '允许', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '停止运行', exact: true }).click();
+    await settled(page);
+    expect(server.store.get(created.sessionId!).session.activeRun).toBeNull();
+    const session = await (await context.request.get(origin + '/web/session')).json();
+    await request({ type: 'web.revoke', grantId: session.device.id });
+    await expect(page.getByLabel('配对码', { exact: true })).toBeVisible();
+    await expect(page.getByRole('alert')).toContainText('登录已失效');
+    await page.screenshot({ path: info.outputPath('server-web-mobile-login.png') });
+    await expect(page.locator('.shell')).toHaveCount(0);
+    expect(desktop.readyState).toBe(WebSocket.OPEN);
+    await request({ type: 'session.rename', sessionId: created.sessionId, title: '桌面仍可操作' });
+    const pairRequest = await request({ type: 'web.pair' });
+    const nextPairing = await wait(
+      (m) => m.type === 'web.state' && m.requestId === pairRequest.requestId && !!m.pairing,
+    );
+    if (nextPairing.type !== 'web.state' || !nextPairing.pairing)
+      throw new Error('Missing new pairing code');
+    await page.goto(`${origin}/#pair=${nextPairing.pairing.code}`);
+    await expect(page.locator('.connection-status')).toContainText('已连接');
+    await request({ type: 'web.configure', enabled: false });
+    await expect(page.locator('.connection-status')).toContainText('重连中');
+    expect((await fetch(origin)).status).toBe(404);
+    expect((await fetch(origin + '/web/session')).status).toBe(404);
+    expect(desktop.readyState).toBe(WebSocket.OPEN);
+    await request({
+      type: 'session.rename',
+      sessionId: created.sessionId,
+      title: '关闭 Web 后桌面仍可操作',
+    });
+    await request({ type: 'web.configure', enabled: true });
+    expect((await fetch(origin)).status).toBe(200);
+    await expect(page.locator('.connection-status')).toContainText('已连接');
+    expect(errors).toEqual([]);
+  } finally {
+    await page.goto('about:blank');
+    await controlPage.close();
+    desktop?.terminate();
+    await server.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

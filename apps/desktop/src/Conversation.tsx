@@ -481,7 +481,7 @@ export default function Conversation({
   native: boolean;
   ownsRun: boolean;
   busy: boolean;
-  newSession: () => void;
+  newSession?: () => void;
   loadEarlier: () => Promise<void>;
   findRequest: number;
   // Ends one background task of the run, or the run with all of them.
@@ -746,16 +746,20 @@ export default function Conversation({
         {!session ? (
           <div className="empty-state">
             <MessageSquare />
-            <h2>新会话</h2>
-            <button
-              type="button"
-              className="button primary"
-              disabled={!connected}
-              onClick={newSession}
-            >
-              <Plus />
-              新建会话
-            </button>
+            <h2>{newSession ? '新会话' : '选择设备会话'}</h2>
+            {newSession ? (
+              <button
+                type="button"
+                className="button primary"
+                disabled={!connected}
+                onClick={newSession}
+              >
+                <Plus />
+                新建会话
+              </button>
+            ) : (
+              <p>从侧栏选择已有会话；新建项目和会话请使用桌面客户端。</p>
+            )}
           </div>
         ) : (
           <div className="transcript" ref={transcriptRoot}>

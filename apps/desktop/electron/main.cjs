@@ -30,6 +30,7 @@ const { mkdtemp, stat, writeFile } = require('node:fs/promises');
 const { gitBranch } = require('./git-branch.cjs');
 const { asOnDisk } = require('./disk-path.cjs');
 const { openLog } = require('./client-log.cjs');
+const { externalLink } = require('./external-links.cjs');
 const { hostname, tmpdir } = require('node:os');
 const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
@@ -200,16 +201,10 @@ handle('clipboard:write', (_event, text) => {
   if (typeof text !== 'string') throw new Error('Expected clipboard text');
   clipboard.writeText(text);
 });
-// The official sign-in page and this project's own page open in the user's browser; nothing else is handed to the
-// system.
+// Official pages and the current service's validated browser entry open in the user's browser. A closed
+// connection's remembered installer bridge does not authorize links.
 handle('external:open', async (event, target) => {
-  const url = new URL(String(target));
-  if (
-    url.protocol !== 'https:' ||
-    !/(^|\.)(claude\.com|claude\.ai|anthropic\.com)$|^github\.com$/.test(url.hostname)
-  )
-    throw new Error('Unexpected link');
-  await shell.openExternal(url.toString());
+  await shell.openExternal(externalLink(target, bridge?.webOrigin()));
 });
 // Sessions without a project still need a working directory on this computer; they get one under Documents, grouped by
 // day, unless the user chose another folder. Folders used before are remembered: their sessions are still

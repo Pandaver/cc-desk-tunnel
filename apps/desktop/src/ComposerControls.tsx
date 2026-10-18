@@ -37,7 +37,7 @@ export default function ComposerControls({
   capabilities: NativeCapabilities | null;
   nativeSession: NativeSession | null;
   metrics: NativeMetrics | null;
-  openAccount: () => void;
+  openAccount?: () => void;
   disabled: boolean;
   configure: (values: { model?: string | null; effort?: Effort | null }) => Promise<void>;
   refresh: () => void;
@@ -94,7 +94,7 @@ export default function ComposerControls({
     commitPending.current = false;
     dragging.current = false;
   }, [model]);
-  const quota = usePrefs().quota ? quotaFigures(metrics?.rateLimits) : [];
+  const quota = usePrefs().quota && openAccount ? quotaFigures(metrics?.rateLimits) : [];
   const fullest = Math.max(0, ...quota.map((figure) => figure.used));
   return (
     <div className="composer-controls" ref={container}>

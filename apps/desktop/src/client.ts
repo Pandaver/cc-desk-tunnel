@@ -5,6 +5,7 @@ import {
   serverMessageSchema,
 } from '@cc-desk-tunnel/protocol';
 import type { EventPayload } from '@cc-desk-tunnel/protocol';
+import { getWebSession, WebAccessError } from './browser-api.ts';
 import type {
   AccountState,
   Command,
@@ -16,6 +17,8 @@ import type {
   Session,
   SessionEvent,
   TerminalControl,
+  WebAccessState,
+  WebState,
 } from '@cc-desk-tunnel/protocol';
 
 type Response = Extract<ServerMessage, { type: 'response' }>;
@@ -23,7 +26,12 @@ type DataMessage = Extract<
   ServerMessage,
   {
     type:
-      'usage.summary' | 'usage.page' | 'session.stats' | 'settings.state' | 'instructions.state';
+      | 'usage.summary'
+      | 'usage.page'
+      | 'session.stats'
+      | 'settings.state'
+      | 'instructions.state'
+      | 'web.state';
   }
 >;
 // Commands answered with a data frame, and the frame each one gets.
@@ -35,6 +43,10 @@ type Replies = {
   'settings.update': 'settings.state';
   'instructions.get': 'instructions.state';
   'instructions.update': 'instructions.state';
+  'web.configure': 'web.state';
+  'web.status': 'web.state';
+  'web.pair': 'web.state';
+  'web.revoke': 'web.state';
 };
 type TerminalMessage = Extract<
   ServerMessage,
@@ -61,6 +73,7 @@ export class RequestInterruptedError extends Error {
       'settings.get',
       'instructions.get',
       'service.update.check',
+      'web.status',
     ].includes(type);
     super(
       readOnly
@@ -88,6 +101,16 @@ export type HistoryState = {
 export type ClientState = {
   status: 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
   connectionId: string | null;
+  webEnabled: boolean;
+  webControl: boolean;
+  webPairing: boolean;
+  webState: WebAccessState | null;
+  webPending: boolean;
+  webPreparing: boolean;
+  webError: string | null;
+  hasConnected: boolean;
+  diagnosticsEnabled: boolean;
+  webSessionExpired: boolean;
   // The computer this client signed in as; a session's commands run on the one it is on.
   device: Device | null;
   // The user's computers connected to the service now, and whether commands reach each yet. Another
@@ -131,6 +154,16 @@ export class ProxyClient {
   state: ClientState = {
     status: 'disconnected',
     connectionId: null,
+    webEnabled: false,
+    webControl: false,
+    webPairing: false,
+    webState: null,
+    webPending: false,
+    webPreparing: false,
+    webError: null,
+    hasConnected: false,
+    diagnosticsEnabled: false,
+    webSessionExpired: false,
     device: null,
     devices: [],
     sessions: [],
@@ -160,6 +193,8 @@ export class ProxyClient {
     token: string;
     device: Device;
     reconnect: boolean;
+    // A same-origin cookie-authenticated controller, never an execution device or an Electron bridge.
+    web?: boolean;
     // Remote mode: opens the bridge in the main process and resolves to its address. A bridge serves one
     // connection, so every attempt asks for a new one.
     bridge?: () => Promise<string>;
@@ -169,6 +204,51 @@ export class ProxyClient {
   // Whether this sign-in has stood once. Until then a failure is the user's to look at; after it, a fault on
   // the way is tried again.
   private established = false;
+  private webTimer: ReturnType<typeof setTimeout> | undefined;
+  private webDeadline = 0;
+  private webOperation: symbol | null = null;
+  private webPreparation: { enable: boolean; promise: Promise<WebState> } | null = null;
+  // A cache shared by settings mounts, never persisted or carried to another connection.
+  private applyWeb(state: WebAccessState, authoritative = true) {
+    let pairing = state.enabled ? state.pairing : undefined;
+    if (!pairing && state.enabled && !authoritative && performance.now() < this.webDeadline)
+      pairing = this.state.webState?.pairing;
+    const same = pairing && pairing.code === this.state.webState?.pairing?.code;
+    clearTimeout(this.webTimer);
+    this.webTimer = undefined;
+    if (pairing) {
+      // Old services do not send a duration. Keep their five-minute lifetime on a monotonic clock;
+      // reading status again must not extend it, and desktop clock skew must not expire a fresh code.
+      const remaining =
+        pairing.remainingMs ?? (same ? this.webDeadline - performance.now() : 300000);
+      this.webDeadline = performance.now() + Math.max(0, remaining);
+      if (remaining <= 0) pairing = undefined;
+      else
+        this.webTimer = setTimeout(() => {
+          this.webTimer = undefined;
+          const current = this.state.webState;
+          if (current?.pairing) this.update({ webState: { ...current, pairing: undefined } });
+        }, remaining);
+    }
+    if (!pairing) this.webDeadline = 0;
+    this.update({ webState: { ...state, pairing }, webEnabled: state.enabled });
+  }
+  private clearWeb() {
+    clearTimeout(this.webTimer);
+    this.webTimer = undefined;
+    this.webDeadline = 0;
+    this.webOperation = null;
+    this.webPreparation = null;
+    this.update({
+      webState: null,
+      webPending: false,
+      webPreparing: false,
+      webError: null,
+      webControl: false,
+      webPairing: false,
+      webEnabled: false,
+    });
+  }
   // Tells the answer of the bridge asked for last from those of earlier attempts.
   private turn = 0;
   // Streamed events and fragments are taken in batches, in the order they came, so a fast reply does not
@@ -194,6 +274,12 @@ export class ProxyClient {
       type: Command['type'];
     }
   >();
+  private probe: {
+    requestId: string;
+    socket: WebSocket;
+    connectionId: string;
+    finish: (error?: Error) => void;
+  } | null = null;
   getSnapshot = () => this.state;
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
@@ -202,6 +288,12 @@ export class ProxyClient {
     };
   };
   update(values: Partial<ClientState>) {
+    if (
+      this.probe &&
+      ((values.status !== undefined && values.status !== 'connected') ||
+        (values.connectionId !== undefined && values.connectionId !== this.probe.connectionId))
+    )
+      this.probe.finish(new DOMException('连接已变化，测试已取消。', 'AbortError'));
     this.state = { ...this.state, ...values };
     for (const listener of this.listeners) listener();
   }
@@ -227,13 +319,32 @@ export class ProxyClient {
     )
       throw new Error('当前离线原型仅连接本机环回服务。');
     if (token.trim().length < 24) throw new Error('服务凭据至少 24 个字符。');
+    this.begin({ url: address.toString(), token: token.trim(), device, reconnect, bridge });
+  }
+  connectWeb(device: Device) {
+    const address = new URL('/web/ws', window.location.href);
+    if (
+      address.protocol !== 'https:' &&
+      !(
+        address.protocol === 'http:' &&
+        ['127.0.0.1', 'localhost', '[::1]'].includes(address.hostname)
+      )
+    )
+      throw new Error('请使用 HTTPS 地址访问 Web 客户端。');
+    address.protocol = address.protocol === 'https:' ? 'wss:' : 'ws:';
+    this.begin({ url: address.href, token: '', device, reconnect: true, web: true });
+  }
+  private begin(credentials: NonNullable<ProxyClient['credentials']>) {
     this.disconnect();
-    this.credentials = { url: address.toString(), token: token.trim(), device, reconnect, bridge };
+    this.credentials = credentials;
     this.established = false;
     this.cacheOrder = [];
     this.update({
       status: 'connecting',
-      device,
+      device: credentials.device,
+      webEnabled: false,
+      diagnosticsEnabled: false,
+      webSessionExpired: false,
       devices: [],
       error: null,
       release: null,
@@ -255,6 +366,26 @@ export class ProxyClient {
   private open() {
     const credentials = this.credentials;
     if (!credentials) return;
+    if (credentials.web && this.retryAttempt > 0) {
+      // A rejected WebSocket handshake cannot expose its HTTP status to browser JavaScript. Check the
+      // cookie before retrying so an expired/revoked session, even across a restart, returns to login.
+      const turn = ++this.turn;
+      const current = () => this.credentials === credentials && this.turn === turn;
+      void getWebSession().then(
+        (session) => {
+          if (!current()) return;
+          if (!session || session.device.id !== credentials.device.id) this.expireWeb();
+          else this.attach(credentials);
+        },
+        (error) => {
+          if (!current()) return;
+          if (error instanceof WebAccessError && [401, 403].includes(error.status))
+            this.expireWeb();
+          else this.retry(credentials);
+        },
+      );
+      return;
+    }
     if (!credentials.bridge) {
       this.attach(credentials);
       return;
@@ -284,6 +415,11 @@ export class ProxyClient {
     this.socket = socket;
     const timeout = setTimeout(() => socket.close(), 50000);
     socket.onopen = () => {
+      if (this.socket !== socket) return;
+      if (credentials.web) {
+        socket.send(JSON.stringify({ type: 'web.auth', protocolVersion: PROTOCOL_VERSION }));
+        return;
+      }
       socket.send(
         JSON.stringify({
           type: 'auth',
@@ -306,7 +442,8 @@ export class ProxyClient {
         return;
       }
       if (message.type === 'ready') {
-        if (message.adapter === 'claude-code' && !credentials.bridge) credentials.reconnect = false;
+        if (message.adapter === 'claude-code' && !credentials.bridge && !credentials.web)
+          credentials.reconnect = false;
         this.established = true;
         clearTimeout(timeout);
         this.retryAttempt = 0;
@@ -315,6 +452,9 @@ export class ProxyClient {
           : null;
         this.update({
           status: 'connected',
+          hasConnected: true,
+          webControl: message.webControl === true,
+          webPairing: message.webPairing === true,
           connectionId: message.connectionId,
           sessions: message.sessions,
           selectedId,
@@ -324,17 +464,38 @@ export class ProxyClient {
           service: message.version,
           update: message.update ?? null,
           model: message.model ?? null,
+          webEnabled: message.web === true,
+          diagnosticsEnabled: message.diagnostics === true,
         });
         if (selectedId) this.load(selectedId);
+      } else if (message.type === 'connection.probe.result') {
+        const probe = this.probe;
+        if (
+          probe?.requestId === message.requestId &&
+          probe.socket === socket &&
+          probe.connectionId === this.state.connectionId &&
+          this.state.status === 'connected'
+        )
+          probe.finish();
       } else if (message.type === 'response') {
         const request = this.pending.get(message.requestId);
         if (!request) return;
         clearTimeout(request.timer);
         this.pending.delete(message.requestId);
         if (message.ok) request.resolve(message);
-        else request.reject(new Error(message.message ?? '请求失败。'));
+        else {
+          this.results.delete(message.requestId);
+          request.reject(new Error(message.message ?? '请求失败。'));
+        }
+      } else if (message.type === 'web.changed') {
+        const { type: _type, ...state } = message;
+        if (this.state.webControl) this.applyWeb(state);
       } else if (message.type === 'connection.error') {
         this.update({ error: message.message });
+        if (credentials.web && message.code === 'unauthorized') {
+          this.expireWeb();
+          return;
+        }
         if (message.code === 'version_mismatch')
           this.update({
             mismatch: true,
@@ -369,9 +530,16 @@ export class ProxyClient {
         message.type === 'usage.page' ||
         message.type === 'session.stats' ||
         message.type === 'settings.state' ||
-        message.type === 'instructions.state'
+        message.type === 'instructions.state' ||
+        message.type === 'web.state'
       ) {
-        if (this.pending.has(message.requestId)) this.results.set(message.requestId, message);
+        if (this.pending.has(message.requestId)) {
+          this.results.set(message.requestId, message);
+          if (message.type === 'web.state') {
+            const { type: _type, requestId: _id, ...state } = message;
+            this.applyWeb(state, this.state.webControl);
+          }
+        }
       } else if (message.type === 'service.update') {
         const { type: _type, ...update } = message;
         this.update(
@@ -459,12 +627,17 @@ export class ProxyClient {
         this.streamTimer ??= setTimeout(() => this.flushStream(), 32);
       }
     };
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       clearTimeout(timeout);
       if (this.socket !== socket) return;
       this.socket = null;
       this.flushStream();
       this.rejectPending();
+      this.clearWeb();
+      if (credentials.web && event.code === 4001) {
+        this.expireWeb();
+        return;
+      }
       if (
         !this.credentials ||
         !this.credentials.reconnect ||
@@ -479,18 +652,25 @@ export class ProxyClient {
         });
         return;
       }
-      this.update({ status: 'reconnecting', connectionId: null, devices: [] });
-      this.retryTimer = setTimeout(
-        () => {
-          this.retryTimer = undefined;
-          this.open();
-        },
-        Math.min(1000 * 2 ** this.retryAttempt++, credentials.bridge ? 10000 : 5000),
-      );
+      this.retry(credentials);
     };
     socket.onerror = () => {
       /* onclose owns reconnect and pending request cleanup. */
     };
+  }
+  private expireWeb() {
+    this.disconnect();
+    this.update({ webSessionExpired: true, devices: [], error: '网页登录已失效，请重新配对。' });
+  }
+  private retry(credentials: NonNullable<ProxyClient['credentials']>) {
+    this.update({ status: 'reconnecting', connectionId: null, devices: [] });
+    this.retryTimer = setTimeout(
+      () => {
+        this.retryTimer = undefined;
+        this.open();
+      },
+      Math.min(1000 * 2 ** this.retryAttempt++, credentials.bridge ? 10000 : 5000),
+    );
   }
   // Makes the attempt that is waiting for its turn now: the network just came back.
   retryNow() {
@@ -512,14 +692,54 @@ export class ProxyClient {
     socket?.close();
     this.rejectPending();
     this.retryAttempt = 0;
-    this.update({ status: 'disconnected', connectionId: null });
+    this.clearWeb();
+    this.update({ status: 'disconnected', connectionId: null, hasConnected: false });
   }
   private rejectPending() {
+    this.probe?.finish(new DOMException('连接已变化，测试已取消。', 'AbortError'));
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
       request.reject(new RequestInterruptedError(request.type));
     }
     this.pending.clear();
+    this.results.clear();
+  }
+  // Both hosts measure the same authenticated application round trip. The desktop includes its local
+  // bridge; neither path starts a model, opens a second socket or measures the execution device's SSH leg.
+  measureLatency(signal: AbortSignal): Promise<{ elapsed: number }> {
+    if (signal.aborted) return Promise.reject(new DOMException('测试已取消。', 'AbortError'));
+    const socket = this.socket;
+    const connectionId = this.state.connectionId;
+    if (this.state.status !== 'connected' || !connectionId || socket?.readyState !== WebSocket.OPEN)
+      return Promise.reject(new Error('服务尚未连接。'));
+    if (!this.state.diagnosticsEnabled)
+      return Promise.reject(new Error('当前服务不支持连接诊断。'));
+    if (this.probe) return Promise.reject(new Error('延迟测试正在进行。'));
+    if (socket.bufferedAmount > 64 * 1024)
+      return Promise.reject(new Error('服务连接正忙，请稍后测试。'));
+    const requestId = crypto.randomUUID();
+    const started = performance.now();
+    return new Promise((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const finish = (error?: Error) => {
+        if (this.probe !== current) return;
+        this.probe = null;
+        clearTimeout(timer);
+        signal.removeEventListener('abort', aborted);
+        if (error) reject(error);
+        else resolve({ elapsed: Math.max(0, performance.now() - started) });
+      };
+      const aborted = () => finish(new DOMException('测试已取消。', 'AbortError'));
+      const current = { requestId, socket, connectionId, finish };
+      this.probe = current;
+      signal.addEventListener('abort', aborted, { once: true });
+      timer = setTimeout(() => finish(new DOMException('延迟测试超时。', 'TimeoutError')), 3000);
+      try {
+        socket.send(JSON.stringify({ type: 'connection.probe', requestId }));
+      } catch {
+        finish(new Error('延迟测试发送失败。'));
+      }
+    });
   }
   private upsert(session: Session) {
     this.update({
@@ -697,12 +917,93 @@ export class ProxyClient {
       this.socket.send(JSON.stringify(command));
   }
   // Data replies arrive just before their response frame.
-  async fetch<T extends keyof Replies>(command: Extract<NewCommand, { type: T }>) {
+  private async fetchData<T extends keyof Replies>(command: Extract<NewCommand, { type: T }>) {
+    const socket = this.socket;
+    const connectionId = this.state.connectionId;
     const response = await this.request(command);
     const result = this.results.get(response.requestId);
     this.results.delete(response.requestId);
+    if (this.socket !== socket || this.state.connectionId !== connectionId)
+      throw new RequestInterruptedError((command as NewCommand).type);
     if (!result) throw new Error('服务没有返回数据。');
     return result as Extract<ServerMessage, { type: Replies[T] }>;
+  }
+  private async manageWeb<T>(action: (current: () => void) => Promise<T>, preparing = false) {
+    if (this.webOperation) throw new Error('浏览器访问设置正在更新。');
+    const operation = Symbol();
+    const socket = this.socket;
+    const connectionId = this.state.connectionId;
+    this.webOperation = operation;
+    const current = () => {
+      if (
+        this.webOperation !== operation ||
+        this.socket !== socket ||
+        this.state.connectionId !== connectionId ||
+        this.state.status !== 'connected'
+      )
+        throw new RequestInterruptedError('web.status');
+    };
+    this.update({ webPending: true, webPreparing: preparing, webError: null });
+    try {
+      return await action(current);
+    } catch (error) {
+      if (this.webOperation === operation)
+        this.update({
+          webError: error instanceof Error ? error.message : '浏览器访问设置更新失败。',
+        });
+      throw error;
+    } finally {
+      if (this.webOperation === operation) {
+        this.webOperation = null;
+        this.update({ webPending: false, webPreparing: false });
+      }
+    }
+  }
+  async fetch<T extends keyof Replies>(command: Extract<NewCommand, { type: T }>) {
+    if ((command as NewCommand).type.startsWith('web.'))
+      return this.manageWeb(() => this.fetchData(command));
+    return this.fetchData(command);
+  }
+  // Visiting settings is an explicit preparation, not a poll or a background code-renewal loop.
+  // The whole read/enable + initialize operation stays locked, including across settings remounts.
+  prepareWebAccess(enable = false): Promise<WebState> {
+    if (this.webPreparation && (!enable || this.webPreparation.enable))
+      return this.webPreparation.promise;
+    if (this.webOperation) return Promise.reject(new Error('浏览器访问设置正在更新。'));
+    let resolve!: (value: WebState) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<WebState>((yes, no) => {
+      resolve = yes;
+      reject = no;
+    });
+    const preparation = { enable, promise };
+    this.webPreparation = preparation;
+    void this.manageWeb(async (current) => {
+      let result = enable
+        ? await this.fetchData({ type: 'web.configure', enabled: true })
+        : await this.fetchData({
+            type: 'web.status',
+            ...(this.state.webControl ? { watch: true } : {}),
+          });
+      current();
+      // A pushed disable or a code generated by another connection can overtake the reply. Consult
+      // the latest authoritative state; the server's ifAbsent operation resolves any remaining race.
+      if (this.state.webPairing && this.state.webState?.enabled && !this.state.webState.pairing) {
+        result = await this.fetchData({ type: 'web.pair', ifAbsent: true });
+        current();
+      }
+      return { ...result, ...this.state.webState };
+    }, true).then(
+      (result) => {
+        if (this.webPreparation === preparation) this.webPreparation = null;
+        resolve(result);
+      },
+      (error) => {
+        if (this.webPreparation === preparation) this.webPreparation = null;
+        reject(error);
+      },
+    );
+    return promise;
   }
   async request(command: NewCommand): Promise<Response> {
     if (this.state.status !== 'connected' || this.socket?.readyState !== WebSocket.OPEN)
@@ -712,6 +1013,7 @@ export class ProxyClient {
       const timer = setTimeout(
         () => {
           this.pending.delete(requestId);
+          this.results.delete(requestId);
           reject(new Error('请求超时；请查看历史确认结果，未自动重发。'));
         },
         command.type === 'session.status' ||
@@ -721,7 +1023,14 @@ export class ProxyClient {
           : 10000,
       );
       this.pending.set(requestId, { resolve, reject, timer, type: command.type });
-      this.socket!.send(JSON.stringify({ ...command, requestId }));
+      try {
+        this.socket!.send(JSON.stringify({ ...command, requestId }));
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(requestId);
+        this.results.delete(requestId);
+        reject(error instanceof Error ? error : new Error('请求发送失败。'));
+      }
     });
   }
 }

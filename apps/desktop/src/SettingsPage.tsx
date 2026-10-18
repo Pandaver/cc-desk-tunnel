@@ -12,6 +12,9 @@ import {
   UserRound,
 } from 'lucide-react';
 import type { ProxyClient } from './client.ts';
+import ServerWebAccess from './ServerWebAccess.tsx';
+import { hostCapabilities } from './host-capabilities.ts';
+import type { HostCapabilities } from './host-capabilities.ts';
 import Help from './Help.tsx';
 import type { ConnectionForm } from './LoginPage.tsx';
 import { connectionWaits, setPrefs, usePrefs, waitRange } from './prefs.ts';
@@ -51,7 +54,7 @@ const sections: { id: Section; name: string; group: string; icon: typeof Bell; w
     group: '客户端',
     icon: SlidersHorizontal,
     words:
-      '额度 输入框 托盘 后台 记住凭据 自动登录 启动 普通会话 文件夹 连接 超时 等待 SSH 回复小结 会话栏 用量 首字 速度 缓存 多开 多个连接 窗口 服务端',
+      '额度 输入框 托盘 后台 记住凭据 自动登录 启动 普通会话 文件夹 连接 超时 等待 SSH 回复小结 会话栏 用量 首字 速度 缓存 多开 多个连接 窗口 服务端 浏览器 Web 配对 授权',
   },
   {
     id: 'notifications',
@@ -434,11 +437,13 @@ function Connections() {
 }
 
 function General({
+  client,
   form,
   changeForm,
   workspaceRoot,
   chooseWorkspace,
 }: {
+  client: ProxyClient;
   form: ConnectionForm;
   changeForm: (values: Partial<ConnectionForm>) => void;
   workspaceRoot: string;
@@ -524,6 +529,7 @@ function General({
                 />
               </Row>
             </div>
+            <ServerWebAccess client={client} />
             <Connections />
             <h2 className="page-heading">连接等待时间</h2>
             <div className="card">
@@ -579,7 +585,7 @@ function General({
   );
 }
 
-function Notices() {
+function Notices({ schedules = true }: { schedules?: boolean }) {
   const { notify } = usePrefs();
   const set = (values: Partial<typeof notify>) =>
     setPrefs((prefs) => ({ ...prefs, notify: { ...prefs.notify, ...values } }));
@@ -588,7 +594,9 @@ function Notices() {
       <div className="page-body">
         <h1 className="page-title">通知</h1>
         <p className="muted">
-          窗口收在托盘或不在前台时，用系统通知提醒需要你知道的事；点通知回到对应的会话。正在看的会话不会重复提醒。
+          {window.desktop
+            ? '窗口收在托盘或不在前台时，用系统通知提醒需要你知道的事；点通知回到对应的会话。正在看的会话不会重复提醒。'
+            : '在侧栏通知列表中提醒任务进度和待处理事项。正在看的会话不会重复提醒。'}
         </p>
         <div className="card">
           <Row title="开启通知" detail="关闭后既不弹出系统通知，也不记入通知列表">
@@ -598,27 +606,31 @@ function Notices() {
               onChange={(enabled) => set({ enabled })}
             />
           </Row>
-          <Row title="提示音" detail="弹出系统通知时播放系统的通知声音">
-            <Switch
-              label="提示音"
-              checked={notify.sound}
-              disabled={!notify.enabled}
-              onChange={(sound) => set({ sound })}
-            />
-          </Row>
+          {window.desktop && (
+            <Row title="提示音" detail="弹出系统通知时播放系统的通知声音">
+              <Switch
+                label="提示音"
+                checked={notify.sound}
+                disabled={!notify.enabled}
+                onChange={(sound) => set({ sound })}
+              />
+            </Row>
+          )}
         </div>
         <h2 className="page-heading">提醒哪些事</h2>
         <div className="card">
-          {kinds.map(({ key, title, detail }) => (
-            <Row key={key} title={title} detail={detail}>
-              <Switch
-                label={title}
-                checked={notify[key]}
-                disabled={!notify.enabled}
-                onChange={(value) => set({ [key]: value })}
-              />
-            </Row>
-          ))}
+          {kinds
+            .filter(({ key }) => schedules || key !== 'schedule')
+            .map(({ key, title, detail }) => (
+              <Row key={key} title={title} detail={detail}>
+                <Switch
+                  label={title}
+                  checked={notify[key]}
+                  disabled={!notify.enabled}
+                  onChange={(value) => set({ [key]: value })}
+                />
+              </Row>
+            ))}
         </div>
         {window.desktop && (
           <button
@@ -648,7 +660,9 @@ function About({
   adapterName,
   updates,
   showNotes,
+  browser = false,
 }: {
+  browser?: boolean;
   version: string;
   service: string | null;
   adapterName: string;
@@ -662,7 +676,9 @@ function About({
         <div className="card">
           <Row title="客户端版本">
             <span className="setting-actions">
-              <span className="setting-value">{version || '浏览器开发入口'}</span>
+              <span className="setting-value">
+                {version || (browser ? 'Web 工作台（随服务端更新）' : '浏览器开发入口')}
+              </span>
               {version && (
                 <button type="button" className="button" onClick={() => showNotes(version)}>
                   这一版的更新内容
@@ -677,29 +693,35 @@ function About({
             <span className="setting-value">{adapterName}</span>
           </Row>
         </div>
-        <h2 className="page-heading">更新</h2>
-        <div className="card">
-          <Row
-            title="客户端与服务端需要同一版本"
-            detail="服务端跟随发布页；客户端的安装包由所连接的服务端提供，也可以在登录页改从 GitHub 发布页下载，校验后覆盖升级"
-          >
-            <span className="setting-actions">
-              {updates.map((item) => (
-                <button
-                  type="button"
-                  className="button"
-                  key={item.label}
-                  disabled={item.disabled}
-                  onClick={item.run}
-                >
-                  {item.icon}
-                  {item.label}
-                </button>
-              ))}
-              {updates.length === 0 && <span className="setting-value">没有可用的更新操作</span>}
-            </span>
-          </Row>
-        </div>
+        {!browser && (
+          <>
+            <h2 className="page-heading">更新</h2>
+            <div className="card">
+              <Row
+                title="客户端与服务端需要同一版本"
+                detail="服务端跟随发布页；客户端的安装包由所连接的服务端提供，也可以在登录页改从 GitHub 发布页下载，校验后覆盖升级"
+              >
+                <span className="setting-actions">
+                  {updates.map((item) => (
+                    <button
+                      type="button"
+                      className="button"
+                      key={item.label}
+                      disabled={item.disabled}
+                      onClick={item.run}
+                    >
+                      {item.icon}
+                      {item.label}
+                    </button>
+                  ))}
+                  {updates.length === 0 && (
+                    <span className="setting-value">没有可用的更新操作</span>
+                  )}
+                </span>
+              </Row>
+            </div>
+          </>
+        )}
         {window.desktop && (
           <>
             <h2 className="page-heading">排查</h2>
@@ -745,6 +767,7 @@ function About({
 // Settings in one place, sorted by whose they are: Claude Code's own (kept on the cloud host) and this
 // client's (kept on this computer).
 export default function SettingsPage({
+  host = hostCapabilities('desktop'),
   client,
   section,
   go,
@@ -761,6 +784,7 @@ export default function SettingsPage({
   showNotes,
   back,
 }: {
+  host?: HostCapabilities;
   // Given before a connection exists: only this computer's own settings are shown, and this leaves them.
   back?: () => void;
   client: ProxyClient;
@@ -784,6 +808,8 @@ export default function SettingsPage({
   const shown = sections.filter(
     (item) =>
       (!back || item.group === '客户端') &&
+      (host.accountManagement || item.id !== 'account') &&
+      (host.nativeSettings || item.id !== 'claude') &&
       `${item.name} ${item.words}`.toLowerCase().includes(term),
   );
   return (
@@ -827,9 +853,9 @@ export default function SettingsPage({
         </nav>
       </aside>
       <main className="workspace">
-        {section === 'account' ? (
+        {section === 'account' && host.accountManagement ? (
           account
-        ) : section === 'claude' ? (
+        ) : section === 'claude' && host.nativeSettings ? (
           native ? (
             <SettingsPanel client={client} />
           ) : (
@@ -842,19 +868,21 @@ export default function SettingsPage({
           )
         ) : section === 'general' ? (
           <General
+            client={client}
             form={form}
             changeForm={changeForm}
             workspaceRoot={workspaceRoot}
             chooseWorkspace={chooseWorkspace}
           />
         ) : section === 'notifications' ? (
-          <Notices />
+          <Notices schedules={host.schedules} />
         ) : section === 'shortcuts' ? (
-          <ShortcutSettings />
+          <ShortcutSettings localProjects={host.localProjects} />
         ) : section === 'help' ? (
           <Help />
         ) : (
           <About
+            browser={!host.localProjects}
             version={version}
             service={service}
             adapterName={adapterName}

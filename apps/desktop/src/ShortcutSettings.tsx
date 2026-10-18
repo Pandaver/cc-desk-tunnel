@@ -4,7 +4,7 @@ import { actions, comboOf, keyFor, show, usable } from './shortcuts.ts';
 import type { Action } from './shortcuts.ts';
 import { Switch } from './ui.tsx';
 
-export default function ShortcutSettings() {
+export default function ShortcutSettings({ localProjects = true }: { localProjects?: boolean }) {
   const prefs = usePrefs();
   const { enabled } = prefs.shortcuts;
   // The action whose next key press becomes its shortcut.
@@ -19,7 +19,10 @@ export default function ShortcutSettings() {
     setRecording(null);
     setFailure(null);
   };
-  const listed = actions.filter((action) => !action.desktop || window.desktop);
+  const listed = actions.filter(
+    (action) =>
+      (!action.desktop || window.desktop) && (localProjects || action.id !== 'newSession'),
+  );
   return (
     <section className="page" aria-label="快捷键">
       <div className="page-body">

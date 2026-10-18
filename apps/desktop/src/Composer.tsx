@@ -104,7 +104,7 @@ export default function Composer({
   capabilities: NativeCapabilities | null;
   nativeSession: NativeSession | null;
   metrics: NativeMetrics | null;
-  openAccount: () => void;
+  openAccount?: () => void;
   // Sends the draft, or the text given instead of it.
   send: (text?: string) => void;
   // Present when the session's last turn was stopped or cut off: takes it up again without a message.
@@ -291,16 +291,20 @@ export default function Composer({
           send();
         }}
         onDragOver={(event) => {
-          if (!window.desktop || inputDisabled || !event.dataTransfer.types.includes('Files'))
-            return;
+          if (!event.dataTransfer.types.includes('Files')) return;
           event.preventDefault();
+          if (!window.desktop || inputDisabled) {
+            event.dataTransfer.dropEffect = 'none';
+            return;
+          }
           setDropping(true);
         }}
         onDragLeave={() => setDropping(false)}
         onDrop={(event) => {
           setDropping(false);
-          if (!window.desktop || inputDisabled || !event.dataTransfer.files.length) return;
+          if (!event.dataTransfer.files.length) return;
           event.preventDefault();
+          if (!window.desktop || inputDisabled) return;
           void paste([...event.dataTransfer.files]);
         }}
       >

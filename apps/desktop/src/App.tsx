@@ -41,7 +41,11 @@ import type {
 } from '@cc-desk-tunnel/protocol';
 import AccountPanel from './AccountPanel.tsx';
 import { ProxyClient, RequestInterruptedError } from './client.ts';
+import type { WebSession } from './browser-api.ts';
+import { hostCapabilities } from './host-capabilities.ts';
 import Composer from './Composer.tsx';
+import ConnectionDiagnostics from './ConnectionDiagnostics.tsx';
+import { latencyStorageKey } from './latency.ts';
 import SessionBar from './SessionBar.tsx';
 import { isHere, thisDevice } from './device.ts';
 import { isMac, selfUpdating } from './platform.ts';
@@ -112,7 +116,16 @@ function savedProjects(value: unknown = shared('projects')): string[] {
 }
 
 // Owns the connection, the selection and every request; the components below render and report user intent.
-export function App() {
+export function App({
+  webSession,
+  onWebLogout,
+  onWebExpired,
+}: {
+  webSession?: WebSession;
+  onWebLogout?: () => Promise<void> | void;
+  onWebExpired?: () => void;
+} = {}) {
+  const host = hostCapabilities(webSession ? 'browser' : 'desktop');
   const [client] = useState(() => new ProxyClient());
   const [clock] = useState(() => ({ now: client.serviceNow, activityAt: client.activityAt }));
   // The version whose notes are shown, over whichever page is up.
@@ -123,6 +136,14 @@ export function App() {
     </Suspense>
   );
   const state = useSyncExternalStore(client.subscribe, client.getSnapshot);
+  useEffect(() => {
+    if (!webSession) return;
+    client.connectWeb(webSession.device);
+    return () => client.disconnect();
+  }, [client, webSession]);
+  useEffect(() => {
+    if (webSession && state.webSessionExpired) onWebExpired?.();
+  }, [webSession, state.webSessionExpired, onWebExpired]);
   const [form, setForm] = useState<ConnectionForm>(() => ({
     url: localStorage.getItem('proxy-url') ?? 'ws://127.0.0.1:8787/ws',
     token: '',
@@ -150,7 +171,7 @@ export function App() {
   const [projects, setProjects] = useState(savedProjects);
   // The folders that hold sessions without a project; new ones are made in the first.
   const [workspaceRoots, setWorkspaceRoots] = useState<string[]>([]);
-  const [drafts, setDraft] = useDrafts();
+  const [drafts, setDraft] = useDrafts(webSession?.device.id);
   const [scenario, setScenario] = useState<Scenario>('chat');
   const [slashOpen, setSlashOpen] = useState(false);
   // The side column is shown beside the page on a wide window and laid over it on a narrow one.
@@ -165,7 +186,11 @@ export function App() {
     query.addEventListener('change', follow);
     return () => query.removeEventListener('change', follow);
   }, []);
-  const [place, setPlace] = useState<Place>({ page: 'chat', section: 'account', sessionId: null });
+  const [place, setPlace] = useState<Place>({
+    page: 'chat',
+    section: host.accountManagement ? 'account' : 'general',
+    sessionId: null,
+  });
   // Places visited, for the title bar's way back and forward.
   const trail = useRef<{ places: Place[]; at: number }>({ places: [place], at: 0 });
   const [, setTrailAt] = useState(0);
@@ -214,7 +239,7 @@ export function App() {
       current = false;
     };
   }, [unplaced]);
-  const onThis = (session: Session) => isHere(session, state.device, absent);
+  const onThis = (session: Session) => host.localProjects && isHere(session, state.device, absent);
   const sessions = state.sessions.filter((session) => onThis(session));
   const elsewhere = state.sessions.filter((session) => !onThis(session));
   const away = !!selected && !onThis(selected);
@@ -358,53 +383,54 @@ export function App() {
   useEffect(() => {
     if (update?.state === 'failed' && update.detail) setError(update.detail);
   }, [update]);
-  const serviceUpdate = !nativeMode
-    ? null
-    : update?.state === 'available'
-      ? {
-          label: `升级服务端到 ${update.latest}`,
-          icon: <Download />,
-          disabled: busy || state.sessions.some((item) => !!item.activeRun),
-          run: () => {
-            if (
-              window.confirm(
-                `服务端将升级到 ${update.latest} 并重启，需要几分钟，期间不能发送消息；重启后需重新连接。继续？`,
-              )
-            )
-              void act(async () => {
-                await client.request({ type: 'service.update.install', version: update.latest! });
-              });
-          },
-        }
-      : update?.state === 'manual'
+  const serviceUpdate =
+    !nativeMode || !host.serviceManagement
+      ? null
+      : update?.state === 'available'
         ? {
-            label: `服务端 ${update.latest} 需在服务器上升级`,
+            label: `升级服务端到 ${update.latest}`,
             icon: <Download />,
-            disabled: true,
-            run: () => undefined,
+            disabled: busy || state.sessions.some((item) => !!item.activeRun),
+            run: () => {
+              if (
+                window.confirm(
+                  `服务端将升级到 ${update.latest} 并重启，需要几分钟，期间不能发送消息；重启后需重新连接。继续？`,
+                )
+              )
+                void act(async () => {
+                  await client.request({ type: 'service.update.install', version: update.latest! });
+                });
+            },
           }
-        : update?.state === 'installing' || update?.state === 'restarting'
+        : update?.state === 'manual'
           ? {
-              label: `服务端升级中：${update.detail ?? '重启'}`,
-              icon: <RefreshCw />,
+              label: `服务端 ${update.latest} 需在服务器上升级`,
+              icon: <Download />,
               disabled: true,
               run: () => undefined,
             }
-          : {
-              label:
-                update?.state === 'checking'
-                  ? '正在检查更新…'
-                  : update?.state === 'idle' && update.checkedAt
-                    ? `已是最新 ${state.service} · 再次检查`
-                    : '检查更新',
-              icon: <RefreshCw />,
-              disabled: busy || update?.state === 'checking',
-              run: () => {
-                void act(async () => {
-                  await client.request({ type: 'service.update.check' });
-                });
-              },
-            };
+          : update?.state === 'installing' || update?.state === 'restarting'
+            ? {
+                label: `服务端升级中：${update.detail ?? '重启'}`,
+                icon: <RefreshCw />,
+                disabled: true,
+                run: () => undefined,
+              }
+            : {
+                label:
+                  update?.state === 'checking'
+                    ? '正在检查更新…'
+                    : update?.state === 'idle' && update.checkedAt
+                      ? `已是最新 ${state.service} · 再次检查`
+                      : '检查更新',
+                icon: <RefreshCw />,
+                disabled: busy || update?.state === 'checking',
+                run: () => {
+                  void act(async () => {
+                    await client.request({ type: 'service.update.check' });
+                  });
+                },
+              };
 
   // A saved sign-in fills the form once per launch and, when asked, connects without a click.
   const loaded = useRef(false);
@@ -481,6 +507,7 @@ export function App() {
     if (
       !nativeMode ||
       !selected ||
+      (webSession && !remote) ||
       !connected ||
       history?.loading ||
       selected.activeRun ||
@@ -490,9 +517,18 @@ export function App() {
       return;
     refreshed.current.add(selected.id);
     void refreshStatus(selected.id);
-  }, [nativeMode, selected?.id, connected, history?.loading, selected?.activeRun, anyTerminal]);
+  }, [
+    nativeMode,
+    selected?.id,
+    connected,
+    history?.loading,
+    selected?.activeRun,
+    anyTerminal,
+    remote,
+  ]);
   useEffect(() => {
-    if (nativeMode && connected) void client.request({ type: 'account.status' }).catch(() => {});
+    if (host.accountManagement && nativeMode && connected)
+      void client.request({ type: 'account.status' }).catch(() => {});
   }, [nativeMode, connected, accountOpen]);
   useEffect(() => {
     if (
@@ -565,6 +601,13 @@ export function App() {
     });
   }
   function disconnect() {
+    if (webSession) {
+      void act(async () => {
+        await onWebLogout?.();
+        client.disconnect();
+      });
+      return;
+    }
     client.disconnect();
     setForm((current) => (current.remember ? current : { ...current, token: '' }));
     void window.desktop?.disconnectProxy();
@@ -608,8 +651,15 @@ export function App() {
     return false;
   };
   const show = (sessionId: string) => visit({ ...place, page: 'chat', sessionId });
-  const open = (page: Page, section: Section = place.section) =>
+  const open = (page: Page, section: Section = place.section) => {
+    if (page === 'schedules' && !host.schedules) return;
+    if (
+      (section === 'account' && !host.accountManagement) ||
+      (section === 'claude' && !host.nativeSettings)
+    )
+      section = 'general';
     visit({ page, section, sessionId: client.state.selectedId });
+  };
   async function refreshStatus(sessionId = selected?.id ?? sessions[0]?.id) {
     if (!sessionId || refreshing) return;
     setRefreshing(true);
@@ -628,6 +678,7 @@ export function App() {
     }
   }
   async function createSession(projectPath: string) {
+    if (!host.localProjects) return;
     const response = await client.request({ type: 'session.create', title: '新会话', projectPath });
     if (response.sessionId) show(response.sessionId);
   }
@@ -635,6 +686,7 @@ export function App() {
     await act(() => createSession(path));
   }
   async function addProject() {
+    if (!host.localProjects) return;
     if (!window.desktop?.chooseProject) {
       setCreateOpen(true);
       return;
@@ -646,6 +698,7 @@ export function App() {
   }
   // The desktop gives a session without a project its own directory; a browser has none to offer and reuses a project.
   async function newSession() {
+    if (!host.localProjects) return;
     if (window.desktop) {
       await act(async () => {
         const directory = await window.desktop!.createWorkspace();
@@ -721,6 +774,7 @@ export function App() {
         title: '定时任务未发出',
         body: `${task.name}：${outcome.text}`,
       }),
+    host.schedules,
   );
   // Where a session of another computer is to be on this one; null when the user gives none.
   async function placeHere(session: Session) {
@@ -821,14 +875,18 @@ export function App() {
           setRenameSession(session);
         },
       },
-      {
-        label: '分叉会话',
-        icon: <GitFork />,
-        disabled: !idle || !!session.activeRun,
-        run: () => {
-          void fork(session);
-        },
-      },
+      ...(host.localProjects
+        ? [
+            {
+              label: '分叉会话',
+              icon: <GitFork />,
+              disabled: !idle || !!session.activeRun,
+              run: () => {
+                void fork(session);
+              },
+            },
+          ]
+        : []),
       {
         label: '导出为 Markdown',
         icon: <FileDown />,
@@ -858,7 +916,7 @@ export function App() {
               label: '原生终端',
               icon: <SquareTerminal />,
               // A terminal takes only its own session; others may be running.
-              disabled: !idle || !!session.activeRun,
+              disabled: !idle || !!session.activeRun || (!onThis(session) && !reachable(session)),
               run: () => {
                 show(session.id);
                 setTerminalSessionId(session.id);
@@ -867,7 +925,12 @@ export function App() {
             {
               label: '刷新状态',
               icon: <RefreshCw />,
-              disabled: !idle || anyRun || refreshing || !!history?.loading,
+              disabled:
+                !idle ||
+                anyRun ||
+                refreshing ||
+                !!history?.loading ||
+                (!onThis(session) && !reachable(session)),
               run: () => {
                 void refreshStatus(session.id);
               },
@@ -1049,16 +1112,20 @@ export function App() {
   const hint = (action: Action) =>
     (prefs.shortcuts.enabled && comboText(keyFor(prefs, action))) || undefined;
   const settingsMenu: MenuItem[] = [
-    {
-      label: `账号 · ${accountName}`,
-      icon: <UserRound />,
-      detail: signedOut
-        ? '点击登录 Claude 账号'
-        : (state.account?.subscriptionType ??
-          capabilities?.account.subscriptionType ??
-          '账号与额度'),
-      run: () => open('settings', 'account'),
-    },
+    ...(host.accountManagement
+      ? [
+          {
+            label: `账号 · ${accountName}`,
+            icon: <UserRound />,
+            detail: signedOut
+              ? '点击登录 Claude 账号'
+              : (state.account?.subscriptionType ??
+                capabilities?.account.subscriptionType ??
+                '账号与额度'),
+            run: () => open('settings', 'account'),
+          },
+        ]
+      : []),
     {
       label: '设置',
       icon: <Settings />,
@@ -1067,29 +1134,39 @@ export function App() {
       run: () => open('settings', nativeMode ? 'claude' : 'general'),
     },
     { label: '帮助', icon: <CircleHelp />, run: () => open('settings', 'help') },
-    { label: '断开连接', icon: <LogOut />, separated: true, run: disconnect },
+    {
+      label: webSession ? '退出登录' : '断开连接',
+      icon: <LogOut />,
+      separated: true,
+      disabled: busy,
+      run: disconnect,
+    },
   ];
   const toggleSide = () => setSideOpen((value) => !value);
-  const canCreate = connected && !busy && !refreshing && !terminalSessionId;
+  const canCreate = host.localProjects && connected && !busy && !refreshing && !terminalSessionId;
   const barMenus: BarMenu[] = [
     {
       label: '文件',
       items: [
-        {
-          label: '新建会话',
-          hint: hint('newSession'),
-          disabled: !canCreate,
-          run: () => {
-            void newSession();
-          },
-        },
-        {
-          label: '添加项目…',
-          disabled: !connected || busy || !!terminalSessionId,
-          run: () => {
-            void addProject();
-          },
-        },
+        ...(host.localProjects
+          ? [
+              {
+                label: '新建会话',
+                hint: hint('newSession'),
+                disabled: !canCreate,
+                run: () => {
+                  void newSession();
+                },
+              },
+              {
+                label: '添加项目…',
+                disabled: !connected || busy || !!terminalSessionId,
+                run: () => {
+                  void addProject();
+                },
+              },
+            ]
+          : []),
         {
           label: '导出当前会话…',
           disabled: !selected || !connected || !!terminalSessionId,
@@ -1100,7 +1177,12 @@ export function App() {
             });
           },
         },
-        { label: '断开连接', separated: true, run: disconnect },
+        {
+          label: webSession ? '退出登录' : '断开连接',
+          separated: true,
+          disabled: busy,
+          run: disconnect,
+        },
         ...(window.desktop ? [{ label: '退出', run: () => void window.desktop!.quit() }] : []),
       ],
     },
@@ -1115,11 +1197,15 @@ export function App() {
         },
         { label: sideOpen ? '收起侧栏' : '展开侧栏', hint: hint('toggleSide'), run: toggleSide },
         { label: '会话', separated: true, checked: place.page === 'chat', run: () => open('chat') },
-        {
-          label: '定时任务',
-          checked: place.page === 'schedules',
-          run: () => open('schedules'),
-        },
+        ...(host.schedules
+          ? [
+              {
+                label: '定时任务',
+                checked: place.page === 'schedules',
+                run: () => open('schedules'),
+              },
+            ]
+          : []),
         {
           label: '设置',
           hint: hint('settings'),
@@ -1193,6 +1279,37 @@ export function App() {
     return () => window.removeEventListener('keydown', listener);
   }, []);
 
+  if (
+    webSession &&
+    (!state.hasConnected || state.status === 'disconnected' || state.status === 'connecting')
+  )
+    return (
+      <main className="login-page web-login">
+        <div className="login-content">
+          <span className="brand">CC Desk Tunnel</span>
+          <h1 className="login-title">
+            {state.status !== 'disconnected' || !currentError ? '正在连接工作台…' : '连接未建立'}
+          </h1>
+          {currentError && (
+            <p className="error-text" role="alert">
+              {currentError}
+            </p>
+          )}
+          {state.status === 'disconnected' && currentError && (
+            <button
+              type="button"
+              className="button primary"
+              onClick={() => client.connectWeb(webSession.device)}
+            >
+              重新连接
+            </button>
+          )}
+          <button type="button" className="button" disabled={busy} onClick={disconnect}>
+            退出登录
+          </button>
+        </div>
+      </main>
+    );
   if (state.status === 'disconnected' || state.status === 'connecting')
     return localSettings ? (
       <div className="settings-only">
@@ -1299,7 +1416,7 @@ export function App() {
     about: '关于与更新',
   };
   return (
-    <div className={`shell ${sideOpen ? '' : 'side-closed'}`}>
+    <div className={`shell ${webSession ? 'web-shell' : ''} ${sideOpen ? '' : 'side-closed'}`}>
       <TitleBar
         title={
           place.page === 'chat'
@@ -1316,9 +1433,31 @@ export function App() {
         openMenu={(item, position) => setMenu({ kind: 'bar', label: item.label, ...position })}
         connected={connected}
         adapterName={adapterName}
+        diagnostics={
+          state.diagnosticsEnabled && (
+            <ConnectionDiagnostics
+              key={`${webSession?.device.id ?? window.desktop?.boot.connection ?? 'development'}:${!!client.credentials?.bridge}`}
+              client={client}
+              connected={connected}
+              connectionId={state.connectionId}
+              route={
+                webSession || !window.desktop
+                  ? 'browser'
+                  : client.credentials?.bridge
+                    ? 'desktop-bridge'
+                    : 'desktop-direct'
+              }
+              storageKey={latencyStorageKey(
+                webSession ? 'browser' : 'desktop',
+                webSession?.device.id ?? window.desktop?.boot.connection ?? 'development',
+              )}
+            />
+          )
+        }
       />
       <Rail
         page={place.page}
+        schedules={host.schedules}
         go={(page) => open(page)}
         update={pendingUpdate}
         openUpdate={(position) => setMenu({ kind: 'update', ...position })}
@@ -1335,6 +1474,7 @@ export function App() {
         <SettingsPage
           client={client}
           section={place.section}
+          host={host}
           go={(section) => open('settings', section)}
           native={nativeMode}
           form={form}
@@ -1375,6 +1515,7 @@ export function App() {
       ) : (
         <>
           <Sidebar
+            localProjects={host.localProjects}
             sessions={sessions}
             elsewhere={elsewhere}
             devices={state.devices}
@@ -1448,12 +1589,16 @@ export function App() {
               clock={clock}
               progress={selected ? state.progress[selected.id] : undefined}
               busy={busy}
-              newSession={() => {
-                void newSession();
-              }}
+              newSession={
+                host.localProjects
+                  ? () => {
+                      void newSession();
+                    }
+                  : undefined
+              }
               loadEarlier={() => client.loadEarlier(selected!.id)}
               edit={
-                controlsDisabled || away
+                controlsDisabled || away || !host.localProjects
                   ? undefined
                   : (id, text) => {
                       void fork(selected!, { id, text });
@@ -1510,7 +1655,14 @@ export function App() {
             {selected && away && (
               <div className="elsewhere-bar" role="status">
                 <Laptop />
-                {remote ? (
+                {!host.localProjects ? (
+                  <p>
+                    {remote
+                      ? `正在操作设备“${selected.device?.name}”上的会话。`
+                      : `设备“${selected.device?.name ?? '未知设备'}”尚未就绪，当前只能查看。`}
+                    <code>{selected.projectPath}</code>
+                  </p>
+                ) : remote ? (
                   <p>
                     这个会话在设备“{selected.device?.name}”上，项目目录是{' '}
                     <code>{selected.projectPath}</code>
@@ -1524,40 +1676,44 @@ export function App() {
                     Claude 换了电脑。
                   </p>
                 )}
-                <button
-                  type="button"
-                  className="button primary"
-                  disabled={controlsDisabled}
-                  onClick={(event) => {
-                    // With projects here the session goes into one of them, or into a folder chosen there.
-                    if (!herePaths().length) return void takeOver(selected);
-                    const box = event.currentTarget.getBoundingClientRect();
-                    setMenu({
-                      kind: 'move',
-                      sessionId: selected.id,
-                      x: box.left,
-                      y: box.top - 6,
-                      above: true,
-                    });
-                  }}
-                >
-                  在本机继续…
-                </button>
-                <button
-                  type="button"
-                  className="button secondary"
-                  disabled={controlsDisabled}
-                  onClick={() => {
-                    void fork(selected);
-                  }}
-                >
-                  分叉到本机…
-                </button>
+                {host.localProjects && (
+                  <>
+                    <button
+                      type="button"
+                      className="button primary"
+                      disabled={controlsDisabled}
+                      onClick={(event) => {
+                        // With projects here the session goes into one of them, or into a folder chosen there.
+                        if (!herePaths().length) return void takeOver(selected);
+                        const box = event.currentTarget.getBoundingClientRect();
+                        setMenu({
+                          kind: 'move',
+                          sessionId: selected.id,
+                          x: box.left,
+                          y: box.top - 6,
+                          above: true,
+                        });
+                      }}
+                    >
+                      在本机继续…
+                    </button>
+                    <button
+                      type="button"
+                      className="button secondary"
+                      disabled={controlsDisabled}
+                      onClick={() => {
+                        void fork(selected);
+                      }}
+                    >
+                      分叉到本机…
+                    </button>
+                  </>
+                )}
               </div>
             )}
             {selected && (!away || remote) && !terminalSessionId && (
               <Composer
-                openAccount={() => open('settings', 'account')}
+                openAccount={host.accountManagement ? () => open('settings', 'account') : undefined}
                 session={selected}
                 projectName={
                   isInside(selected.projectPath, workspaceRoots)
@@ -1565,7 +1721,7 @@ export function App() {
                     : projectLabel(selected.projectPath)
                 }
                 chooseProject={
-                  controlsDisabled || away
+                  controlsDisabled || away || !host.localProjects
                     ? undefined
                     : (position) => setMenu({ kind: 'move', sessionId: selected.id, ...position })
                 }
@@ -1601,7 +1757,7 @@ export function App() {
                 stop={stopRun}
               />
             )}
-            {selected && !away && !terminalSessionId && (
+            {selected && (!away || remote) && !terminalSessionId && (
               <SessionBar
                 client={client}
                 sessionId={selected.id}

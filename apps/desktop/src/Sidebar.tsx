@@ -38,6 +38,7 @@ type Elsewhere = {
 };
 
 export default function Sidebar({
+  localProjects = true,
   sessions,
   elsewhere,
   devices,
@@ -56,6 +57,7 @@ export default function Sidebar({
   sessionMenu,
   projectMenu,
 }: {
+  localProjects?: boolean;
   sessions: Session[];
   // Sessions on the user's other computers: listed apart, by computer and under it by project folder, and not
   // part of any project here.
@@ -82,6 +84,7 @@ export default function Sidebar({
   const connectionName = useConnectionName();
   const [search, setSearch] = useState('');
   const [searching, setSearching] = useState(false);
+  const [devicesOpen, setDevicesOpen] = useState(true);
   const { pinned, plain, groups } = useMemo(() => {
     const grouped = new Map<string, Session[]>();
     const plain: Session[] = [];
@@ -159,7 +162,7 @@ export default function Sidebar({
     0,
   );
   // A search shows what it found, folded or not.
-  const othersOpen = prefs.elsewhereOpen || !!search.trim();
+  const othersOpen = (localProjects ? prefs.elsewhereOpen : devicesOpen) || !!search.trim();
 
   // A card beside the row tells what the short line cannot: the whole title, the project and the time.
   const [card, setCard] = useState<{ session: Session; top: number; left: number } | null>(null);
@@ -273,28 +276,32 @@ export default function Sidebar({
           />
         </label>
       )}
-      <button
-        type="button"
-        className="side-action new-session"
-        disabled={!connected || busy || refreshing || terminalOpen}
-        onClick={newSession}
-      >
-        <SquarePen />
-        新建会话
-      </button>
+      {localProjects && (
+        <button
+          type="button"
+          className="side-action new-session"
+          disabled={!connected || busy || refreshing || terminalOpen}
+          onClick={newSession}
+        >
+          <SquarePen />
+          新建会话
+        </button>
+      )}
       <nav className="session-list" aria-label="会话列表">
         {pinned.length > 0 && <div className="list-heading">置顶</div>}
         {pinned.map(renderSession)}
-        <div className="list-heading">
-          项目
-          <IconButton
-            title="添加项目"
-            disabled={!connected || busy || terminalOpen}
-            onClick={addProject}
-          >
-            <Plus />
-          </IconButton>
-        </div>
+        {localProjects && (
+          <div className="list-heading">
+            项目
+            <IconButton
+              title="添加项目"
+              disabled={!connected || busy || terminalOpen}
+              onClick={addProject}
+            >
+              <Plus />
+            </IconButton>
+          </div>
+        )}
         {groups.map(({ key, path, sessions: members }) => {
           // A search shows what it found, folded or not.
           const collapsed = !search.trim() && prefs.collapsedProjects.includes(key);
@@ -352,25 +359,33 @@ export default function Sidebar({
             </section>
           );
         })}
-        {groups.length === 0 && (
+        {localProjects && groups.length === 0 && (
           <p className="project-empty">{search ? '没有匹配的项目' : '还没有项目'}</p>
         )}
         {plain.length > 0 && <div className="list-heading">最近</div>}
         {plain.map(renderSession)}
         {othersCount > 0 && (
           <section className="project-group">
-            <h2 title="这些会话的项目目录在你的其他电脑上；那台电脑在线时可以直接在这里操作，也可以接到这台电脑上继续">
+            <h2
+              title={
+                localProjects
+                  ? '这些会话的项目目录在你的其他电脑上；那台电脑在线时可以直接在这里操作，也可以接到这台电脑上继续'
+                  : '设备在线且执行通道就绪后，可以在这里操作其会话'
+              }
+            >
               <button
                 type="button"
                 className="project-toggle"
                 aria-expanded={othersOpen}
                 aria-label={`${othersOpen ? '收起' : '展开'}其他设备的会话`}
                 onClick={() =>
-                  setPrefs((value) => ({ ...value, elsewhereOpen: !value.elsewhereOpen }))
+                  localProjects
+                    ? setPrefs((value) => ({ ...value, elsewhereOpen: !value.elsewhereOpen }))
+                    : setDevicesOpen((value) => !value)
                 }
               >
                 <Laptop />
-                <span>其他设备</span>
+                <span>{localProjects ? '其他设备' : '设备会话'}</span>
                 {!othersOpen && elsewhere.some((session) => session.activeRun) && (
                   <i className="running-dot" />
                 )}
@@ -404,6 +419,9 @@ export default function Sidebar({
                 </Fragment>
               ))}
           </section>
+        )}
+        {!localProjects && !search && othersCount === 0 && (
+          <p className="list-empty">暂无会话，请先在桌面客户端创建。</p>
         )}
         {search &&
           groups.length === 0 &&

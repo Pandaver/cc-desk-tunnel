@@ -426,6 +426,57 @@ button.chip.danger:hover:not(:disabled) {
 .login-submit {
   margin-top: 5px;
 }
+.web-login form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 28px;
+}
+.web-login .login-title {
+  margin-bottom: 12px;
+}
+.web-login input,
+.web-login .button {
+  min-height: 44px;
+}
+.web-login .field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.web-login .error-text {
+  margin: 0;
+}
+.web-loading {
+  animation: web-loading 1s linear infinite;
+}
+@keyframes web-loading {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .web-loading {
+    animation: none;
+  }
+}
+@media (pointer: coarse) {
+  .web-shell .icon-button,
+  .web-shell .rail > button,
+  .web-shell .button,
+  .web-shell .session-select {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .web-shell {
+    --bar: 48px;
+  }
+  .web-login input,
+  .web-shell input,
+  .web-shell textarea {
+    font-size: 16px;
+  }
+}
 /* The window: a title bar across the top, then the rail of pages, the side column and the page itself. */
 .shell {
   display: grid;

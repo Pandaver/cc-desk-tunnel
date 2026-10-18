@@ -14,20 +14,30 @@ function clean(value: unknown): Drafts {
     }),
   );
 }
-async function load(): Promise<Drafts> {
+async function load(browserId?: string): Promise<Drafts> {
   try {
     if (window.desktop) return clean(await window.desktop.loadDrafts());
-    return clean(JSON.parse(localStorage.getItem(storageKey) ?? '{}'));
+    return clean(
+      JSON.parse(
+        (browserId ? sessionStorage : localStorage).getItem(
+          browserId ? `${storageKey}:${browserId}` : storageKey,
+        ) ?? '{}',
+      ),
+    );
   } catch {
     return {};
   }
 }
-function store(drafts: Drafts) {
+function store(drafts: Drafts, browserId?: string) {
   if (window.desktop) void window.desktop.saveDrafts(drafts).catch(() => {});
-  else localStorage.setItem(storageKey, JSON.stringify(drafts));
+  else
+    (browserId ? sessionStorage : localStorage).setItem(
+      browserId ? `${storageKey}:${browserId}` : storageKey,
+      JSON.stringify(drafts),
+    );
 }
 
-export function useDrafts() {
+export function useDrafts(browserId?: string) {
   const [drafts, setDrafts] = useState<Drafts>({});
   const latest = useRef(drafts);
   const loaded = useRef(false);
@@ -36,8 +46,8 @@ export function useDrafts() {
     if (pending.current === undefined) return;
     clearTimeout(pending.current);
     pending.current = undefined;
-    store(latest.current);
-  }, []);
+    store(latest.current, browserId);
+  }, [browserId]);
   const change = useCallback(
     (update: (drafts: Drafts) => Drafts) => {
       setDrafts((current) => {
@@ -53,7 +63,7 @@ export function useDrafts() {
     [flush],
   );
   useEffect(() => {
-    void load().then((saved) => {
+    void load(browserId).then((saved) => {
       loaded.current = true;
       // Text typed while the saved drafts were being read wins over what was saved.
       change((current) => ({ ...saved, ...current }));
@@ -63,7 +73,7 @@ export function useDrafts() {
       window.removeEventListener('pagehide', flush);
       flush();
     };
-  }, [change, flush]);
+  }, [change, flush, browserId]);
   const setDraft = useCallback(
     (sessionId: string, text: string) => change((current) => ({ ...current, [sessionId]: text })),
     [change],

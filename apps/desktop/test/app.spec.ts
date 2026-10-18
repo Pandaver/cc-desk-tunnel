@@ -12,7 +12,15 @@ import {
   settled,
 } from './helpers.ts';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -175,8 +183,10 @@ test('Electron loads the built UI with sandbox and closes its execution connecti
   const env: Record<string, string> = {};
   for (const [name, value] of Object.entries(process.env))
     if (value !== undefined && name !== 'ELECTRON_RUN_AS_NODE') env[name] = value;
+  // Never let this smoke test read a real saved login or change the user's desktop profile.
+  const profile = mkdtempSync(resolve('.local/ui-test/smoke-profile-'));
   const application = await _electron.launch({
-    args: [resolve('apps/desktop'), '--smoke-test'],
+    args: [resolve('apps/desktop'), '--smoke-test', `--user-data-dir=${profile}`],
     env,
   });
   let sessionTitle = '';
@@ -240,6 +250,7 @@ test('Electron loads the built UI with sandbox and closes its execution connecti
     await page.screenshot({ path: resolve(screenshots, 'electron.png') });
   } finally {
     await application.close();
+    rmSync(profile, { recursive: true, force: true });
   }
   const directory = resolve('.local/ui-test/sessions');
   await expect
