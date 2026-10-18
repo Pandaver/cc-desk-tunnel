@@ -28,6 +28,9 @@ function activity(session: Session) {
   return session.activeRun.waiting === 'question' ? '等待回答' : '等待审批';
 }
 
+// A project lists its latest few sessions; each "更多" lists that many more.
+const PAGE = 5;
+
 // Another computer's sessions: by project folder, and those without a project.
 type Elsewhere = {
   name: string;
@@ -82,6 +85,8 @@ export default function Sidebar({
   const connectionName = useConnectionName();
   const [search, setSearch] = useState('');
   const [searching, setSearching] = useState(false);
+  // How many of each project's sessions are listed, by project key, when more than the first page.
+  const [shown, setShown] = useState<Record<string, number>>({});
   const { pinned, plain, groups } = useMemo(() => {
     const grouped = new Map<string, Session[]>();
     const plain: Session[] = [];
@@ -299,6 +304,14 @@ export default function Sidebar({
           // A search shows what it found, folded or not.
           const collapsed = !search.trim() && prefs.collapsedProjects.includes(key);
           const name = prefs.projectNames[key] || folderName(path);
+          // A search lists all it found; the open session is listed even when it is further down.
+          const limit = search.trim()
+            ? members.length
+            : Math.max(
+                shown[key] ?? PAGE,
+                members.findIndex((session) => session.id === selectedId) + 1,
+              );
+          const hidden = members.length - limit;
           return (
             <section className="project-group" key={key}>
               <h2
@@ -347,7 +360,25 @@ export default function Sidebar({
                   <Plus />
                 </IconButton>
               </h2>
-              {!collapsed && members.map(renderSession)}
+              {!collapsed && members.slice(0, limit).map(renderSession)}
+              {!collapsed && hidden > 0 && (
+                <button
+                  type="button"
+                  className="project-more"
+                  onClick={() => setShown((value) => ({ ...value, [key]: limit + PAGE }))}
+                >
+                  更多（还有 {hidden} 个）
+                </button>
+              )}
+              {!collapsed && hidden <= 0 && (shown[key] ?? PAGE) > PAGE && (
+                <button
+                  type="button"
+                  className="project-more"
+                  onClick={() => setShown(({ [key]: _, ...value }) => value)}
+                >
+                  收起
+                </button>
+              )}
               {!collapsed && !members.length && <p className="project-empty">暂无会话</p>}
             </section>
           );
