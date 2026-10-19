@@ -19,12 +19,12 @@ test('pairing consumes a fragment before any network access without changing the
   const history = { state, replaceState: (...args) => calls.push(args) };
   assert.equal(
     takePairingCode(
-      { pathname: '/web/', search: '?view=chat', hash: '#pair=a%2Bb&tab=1' },
+      { pathname: '/custom-entry/', search: '?view=chat', hash: '#pair=a%2Bb&tab=1' },
       history,
     ),
     'a+b',
   );
-  assert.deepEqual(calls, [[state, '', '/web/?view=chat#tab=1']]);
+  assert.deepEqual(calls, [[state, '', '/custom-entry/?view=chat#tab=1']]);
 });
 
 test('a normal navigation preserves its fragment and does not fabricate a code', () => {

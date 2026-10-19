@@ -5,6 +5,61 @@
   text-overflow: ellipsis;
   min-width: 0;
 }
+.server-web-address-setting > span:first-child {
+  flex-shrink: 0;
+}
+.server-web-address-input {
+  width: min(100%, 320px);
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.server-web-domain-setting {
+  flex-wrap: wrap;
+}
+.server-web-domain-setting > span:first-child {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.server-web-domain-setting > .server-web-address-input {
+  flex: 1 1 240px;
+  max-width: 320px;
+}
+.server-web-url-setting > span:first-child {
+  flex-shrink: 0;
+}
+.server-web-url-setting .server-web-address-actions {
+  flex: 1;
+  min-width: 0;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+}
+.server-web-address {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.server-web-address-actions .icon-button {
+  flex-shrink: 0;
+}
+.server-web-path-setting {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  width: min(100%, 360px);
+  min-width: 0;
+}
+.server-web-path-setting .server-web-address-input {
+  flex: 1;
+}
+.server-web-access [data-web-confirm] {
+  display: inline-flex;
+  flex-shrink: 0;
+}
 .server-web-access .server-web-pairing {
   flex-direction: row;
   align-items: center;

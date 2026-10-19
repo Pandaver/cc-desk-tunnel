@@ -26,13 +26,38 @@ import { WebAccess } from '../src/web-access.ts';
 
 const token = 'web-test-' + randomUUID();
 const origin = 'http://localhost';
+
+async function rejectedUpgrade(url: string, headers: Record<string, string> = {}) {
+  const socket = new WebSocket(url.replace('http', 'ws'), { headers });
+  const response = new Promise<{ status: number; body: string }>((resolve, reject) => {
+    socket.once('open', () => {
+      socket.terminate();
+      reject(new Error('Unexpected upgrade'));
+    });
+    socket.once('unexpected-response', (_request, response) => {
+      let body = '';
+      response.on('data', (chunk) => {
+        body += chunk;
+      });
+      response.once('end', () => resolve({ status: response.statusCode!, body }));
+    });
+    socket.on('error', () => {});
+  });
+  try {
+    return await response;
+  } finally {
+    socket.terminate();
+  }
+}
 class Client {
   socket: WebSocket;
   messages: ServerMessage[] = [];
-  constructor(url: string, browser?: string) {
+  constructor(url: string, browser?: string, prefix = '', browserOrigin = origin) {
     this.socket = new WebSocket(
-      url.replace('http', 'ws') + (browser ? '/web/ws' : '/ws'),
-      browser ? { origin, headers: { Host: 'localhost', Cookie: browser } } : {},
+      url.replace('http', 'ws') + (browser ? `${prefix}/web/ws` : '/ws'),
+      browser
+        ? { origin: browserOrigin, headers: { Host: new URL(browserOrigin).host, Cookie: browser } }
+        : {},
     );
     this.socket.on('message', (raw) =>
       this.messages.push(serverMessageSchema.parse(JSON.parse(raw.toString()))),
@@ -90,6 +115,7 @@ async function fixture(
   start = enabled,
   corrupt = false,
   configuredOrigin = origin,
+  reverseProxy = false,
 ) {
   const directory = mkdtempSync(join(tmpdir(), 'cc-web-access-'));
   const dist = join(directory, 'dist');
@@ -98,11 +124,13 @@ async function fixture(
   writeFileSync(join(dist, 'assets', 'main-test.js'), 'export const app = true;');
   writeFileSync(join(dist, 'assets', 'main-test.js.map'), 'private source');
   writeFileSync(join(dist, 'private.json'), 'private configuration');
+  writeFileSync(join(dist, 'favicon.ico'), 'icon');
   if (corrupt) writeFileSync(join(directory, 'web-grants.json'), '{');
   const server = createProxyServer({
     token,
     dataDir: directory,
     stepMs: 5,
+    reverseProxy,
     ...(enabled ? { web: { origin: configuredOrigin, directory: dist } } : {}),
   });
   const url = await server.listen(0);
@@ -112,8 +140,13 @@ async function fixture(
     await server.close();
     rmSync(directory, { recursive: true, force: true });
   });
+  function prefix() {
+    const file = join(directory, 'web-access', 'settings.json');
+    const path = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')).path : '';
+    return path ? `/${path}` : '';
+  }
   async function connect(cookie?: string, device?: string) {
-    const client = new Client(url, cookie);
+    const client = new Client(url, cookie, prefix());
     clients.push(client);
     const ready = await client.open(!!cookie, device);
     return { client, ready };
@@ -123,11 +156,12 @@ async function fixture(
     method = 'GET',
     body?: object | string,
     headers: Record<string, string> = {},
+    raw = false,
   ) {
     return new Promise<Response>((resolve, reject) => {
       const payload = typeof body === 'string' ? body : body ? JSON.stringify(body) : undefined;
       const request = httpRequest(
-        url + path,
+        url + (raw || path === '/health' ? '' : prefix()) + path,
         {
           method,
           headers: {
@@ -177,7 +211,19 @@ async function fixture(
     client.socket.close();
     await new Promise<void>((resolve) => client.socket.once('close', resolve));
   }
-  return { directory, dist, server, url, clients, connect, http, pair };
+  return {
+    directory,
+    dist,
+    server,
+    url,
+    clients,
+    connect,
+    http,
+    pair,
+    get path() {
+      return prefix();
+    },
+  };
 }
 
 test('disabled Web leaves health, desktop authentication and unknown HTTP routes unchanged', async (t) => {
@@ -393,7 +439,7 @@ test('strict HTTP origin and host, body validation, throttling and static allowl
     '/assets/%2e%2e/private.json',
   ])
     assert.equal((await f.http(path)).status, 404, path);
-  assert.equal((await f.http('/', 'GET', undefined, { Host: 'attacker.test' })).status, 403);
+  assert.equal((await f.http('/', 'GET', undefined, { Host: 'attacker.test' })).status, 404);
   assert.equal(
     (
       await f.http(
@@ -460,7 +506,7 @@ test('nonloopback plaintext and inconsistent transport are rejected when the Web
 async function webRequest(web: WebAccess, code: string, configuredOrigin = origin) {
   const request = Object.assign(Readable.from([Buffer.from(JSON.stringify({ code }))]), {
     method: 'POST',
-    url: '/web/pair',
+    url: `/${web.state().path}/web/pair`,
     headers: {
       host: new URL(configuredOrigin).host,
       origin: configuredOrigin,
@@ -617,11 +663,11 @@ test('WebSocket requires cookie and exact Origin/Host; wrong protocol does not l
     { Host: 'other.test', Origin: origin, Cookie: paired.cookie },
     { Host: 'localhost', Cookie: paired.cookie },
   ]) {
-    const ws = new WebSocket(f.url.replace('http', 'ws') + '/web/ws', { headers });
+    const ws = new WebSocket(f.url.replace('http', 'ws') + f.path + '/web/ws', { headers });
     const error = await new Promise<Error>((resolve) => ws.once('error', resolve));
-    assert.match(error.message, /403/);
+    assert.match(error.message, headers.Host === 'other.test' ? /404/ : /403/);
   }
-  const client = new Client(f.url, paired.cookie);
+  const client = new Client(f.url, paired.cookie, f.path);
   f.clients.push(client);
   await new Promise<void>((resolve) => client.socket.once('open', resolve));
   const closed = new Promise<number>((resolve) => client.socket.once('close', resolve));
@@ -677,7 +723,7 @@ test('browser connection limit requests a later retry without revoking its login
   const { client: desktop } = await f.connect();
   const paired = await f.pair(desktop);
   for (let i = 0; i < 8; i++) await f.connect(paired.cookie);
-  const extra = new Client(f.url, paired.cookie);
+  const extra = new Client(f.url, paired.cookie, f.path);
   f.clients.push(extra);
   const closed = await new Promise<number>((resolve) => extra.socket.once('close', resolve));
   assert.equal(closed, 1013);
@@ -886,7 +932,7 @@ test('public links from other sites load the entry page without loosening API or
   );
   assert.equal(
     (await f.http('/', 'GET', undefined, { ...external, Host: 'attacker.example' })).status,
-    403,
+    404,
   );
   assert.equal((await f.http('/web/session', 'GET', undefined, external)).status, 403);
   assert.equal((await f.http('/web/pair', 'POST', { code: 'a'.repeat(24) }, external)).status, 403);
@@ -934,7 +980,7 @@ test('an in-flight pairing cannot persist a grant after Web is disabled', async 
     const stream = new Readable({ read() {} });
     const request = Object.assign(stream, {
       method: 'POST',
-      url: '/web/pair',
+      url: `/${web.state().path}/web/pair`,
       headers: { host: 'localhost', origin, 'content-type': 'application/json' },
     }) as unknown as IncomingMessage;
     let status = 0;
@@ -1156,4 +1202,455 @@ test('idempotent pairing from simultaneous connections shares one device code an
     (await browser.request({ type: 'web.pair', ifAbsent: true })).code,
     'browser_unavailable',
   );
+});
+
+test('Web settings initialize only on enable and persist a single random root suffix across restarts', async (t) => {
+  const f = await fixture(t, true, false);
+  const file = join(f.directory, 'web-access', 'settings.json');
+  const { client: desktop, ready } = await f.connect();
+  assert.ok(ready.type === 'ready' && ready.webSettings);
+  assert.equal((await desktop.state()).path, undefined);
+  assert.equal(existsSync(file), false);
+  const initial = await desktop.state('web.configure', { enabled: true });
+  assert.match(initial.path!, /^[a-f0-9]{32}$/);
+  assert.equal(initial.domain, '');
+  assert.equal(initial.url, `${origin}/${initial.path}/`);
+  const saved = readFileSync(file, 'utf8');
+  assert.equal((await desktop.state('web.configure', { enabled: true })).path, initial.path);
+  await desktop.state('web.configure', { enabled: false });
+  assert.equal(readFileSync(file, 'utf8'), saved);
+  assert.equal((await desktop.state('web.configure', { enabled: true })).path, initial.path);
+  const restarted = new WebAccess({ origin, directory: f.dist }, f.directory);
+  assert.equal(restarted.state().path, initial.path);
+  assert.equal(readFileSync(file, 'utf8'), saved);
+  restarted.close();
+});
+
+test('an explicitly empty path enables the root entry and persists without being regenerated', async (t) => {
+  const f = await fixture(t, true, false);
+  const { client: desktop } = await f.connect();
+  const initial = await desktop.state('web.configure', { enabled: true, path: '' });
+  assert.equal(initial.path, '');
+  assert.equal(initial.url, `${origin}/`);
+  const file = join(f.directory, 'web-access', 'settings.json');
+  const saved = readFileSync(file, 'utf8');
+  assert.equal(JSON.parse(saved).path, '');
+  assert.equal((await desktop.state('web.configure', { enabled: true })).path, '');
+  await desktop.state('web.configure', { enabled: false });
+  assert.equal((await desktop.state('web.configure', { enabled: true })).path, '');
+  const restarted = new WebAccess({ origin, directory: f.dist }, f.directory);
+  try {
+    assert.equal(restarted.state().path, '');
+    assert.equal(restarted.state().url, `${origin}/`);
+    assert.equal(readFileSync(file, 'utf8'), saved);
+    restarted.configure({ regeneratePath: true });
+    assert.match(restarted.state().path!, /^[a-f0-9]{32}$/);
+  } finally {
+    restarted.close();
+  }
+});
+
+test('root entry serves assets, pairing and sockets while transitions hide all previous entry routes', async (t) => {
+  const f = await fixture(t);
+  const { client: desktop } = await f.connect();
+  const paired = await f.pair(desktop);
+  const { client: oldBrowser } = await f.connect(paired.cookie);
+  const pending = await desktop.state('web.pair');
+  const oldPath = f.path;
+  const closed = new Promise<number>((resolve) => oldBrowser.socket.once('close', resolve));
+  const state = await desktop.state('web.configure', { enabled: true, path: '' });
+  assert.equal(await closed, 1012);
+  assert.equal(state.path, '');
+  assert.equal(state.url, `${origin}/`);
+  assert.equal(state.pairing?.code, pending.pairing!.code);
+  for (const path of ['/', '/?q=1', '/assets/main-test.js', '/favicon.ico']) {
+    const response = await f.http(path, 'GET', undefined, {}, true);
+    assert.equal(response.status, 200, path);
+    assert.equal(response.headers.get('location'), null);
+  }
+  assert.equal((await f.http('/', 'HEAD', undefined, {}, true)).status, 200);
+  assert.equal((await f.http('//', 'GET', undefined, {}, true)).status, 404);
+  assert.equal((await f.http('/web/session')).status, 401);
+  const current = await f.http('/web/session', 'GET', undefined, { Cookie: paired.cookie });
+  assert.equal(current.status, 200);
+  assert.deepEqual(await current.json(), paired.session);
+  for (const suffix of ['/', '/assets/main-test.js', '/favicon.ico', '/web/session', '/web/pair']) {
+    const previous = await f.http(
+      oldPath + suffix,
+      suffix === '/web/pair' ? 'POST' : 'GET',
+      undefined,
+      { Origin: 'https://wrong.example', Cookie: paired.cookie },
+      true,
+    );
+    assert.equal(previous.status, 404, suffix);
+    assert.equal(await previous.text(), '', suffix);
+  }
+  assert.deepEqual(
+    await rejectedUpgrade(`${f.url}${oldPath}/web/ws`, {
+      Host: 'localhost',
+      Origin: origin,
+      Cookie: paired.cookie,
+    }),
+    { status: 404, body: '' },
+  );
+  const rootPair = await f.http('/web/pair', 'POST', { code: pending.pairing!.code });
+  assert.equal(rootPair.status, 200);
+  const rootCookie = rootPair.headers.get('set-cookie')!.split(';')[0];
+  const { client: rootBrowser } = await f.connect(rootCookie);
+  assert.equal(rootBrowser.socket.readyState, WebSocket.OPEN);
+  const loggedOut = new Promise<number>((resolve) => rootBrowser.socket.once('close', resolve));
+  assert.equal((await f.http('/web/logout', 'POST', {}, { Cookie: rootCookie })).status, 200);
+  assert.equal(await loggedOut, 4001);
+  const { client: retainedBrowser } = await f.connect(paired.cookie);
+  const rootClosed = new Promise<number>((resolve) =>
+    retainedBrowser.socket.once('close', resolve),
+  );
+  const prefixed = await desktop.state('web.configure', { enabled: true, path: 'workbench' });
+  assert.equal(await rootClosed, 1012);
+  assert.equal(prefixed.url, `${origin}/workbench/`);
+  for (const path of ['/', '/assets/main-test.js', '/favicon.ico', '/web/session', '/web/pair']) {
+    const previous = await f.http(path, 'GET', undefined, { Cookie: paired.cookie }, true);
+    assert.equal(previous.status, 404, path);
+    assert.equal(await previous.text(), '', path);
+  }
+  assert.deepEqual(
+    await rejectedUpgrade(`${f.url}/web/ws`, {
+      Host: 'localhost',
+      Origin: origin,
+      Cookie: paired.cookie,
+    }),
+    { status: 404, body: '' },
+  );
+  assert.equal((await f.http('/')).status, 200);
+  assert.equal(
+    (await f.http('/web/session', 'GET', undefined, { Cookie: paired.cookie })).status,
+    200,
+  );
+  assert.equal((await f.http('/health')).status, 200);
+  assert.equal(desktop.socket.readyState, WebSocket.OPEN);
+});
+
+test('a root entry preserves domain restrictions and the deployment protocol and port', async (t) => {
+  const base = 'https://127.0.0.1:8787';
+  const f = await fixture(t, true, true, false, base, true);
+  const { client: desktop } = await f.connect();
+  const configured = 'https://web.example.com:8787';
+  const state = await desktop.state('web.configure', {
+    enabled: true,
+    domain: 'web.example.com',
+    path: '',
+  });
+  assert.equal(state.path, '');
+  assert.equal(state.url, `${configured}/`);
+  const headers = { Host: 'web.example.com:8787', Origin: configured };
+  for (const path of ['/', '/assets/main-test.js', '/favicon.ico'])
+    assert.equal((await f.http(path, 'GET', undefined, headers)).status, 200);
+  const pairing = await desktop.state('web.pair');
+  const paired = await f.http('/web/pair', 'POST', { code: pairing.pairing!.code }, headers);
+  assert.equal(paired.status, 200);
+  const cookie = paired.headers.get('set-cookie')!.split(';')[0];
+  const browser = new Client(f.url, cookie, '', configured);
+  f.clients.push(browser);
+  await browser.open(true);
+  for (const host of ['127.0.0.1:8787', 'other.example:8787', 'web.example.com']) {
+    for (const path of ['/', '/assets/main-test.js', '/favicon.ico', '/web/session', '/web/pair']) {
+      const denied = await f.http(path, 'GET', undefined, { Host: host, Cookie: cookie });
+      assert.equal(denied.status, 404, `${host}${path}`);
+      assert.equal(await denied.text(), '');
+    }
+    assert.deepEqual(
+      await rejectedUpgrade(`${f.url}/web/ws`, { Host: host, Origin: configured, Cookie: cookie }),
+      { status: 404, body: '' },
+    );
+  }
+  const reset = await desktop.state('web.configure', { enabled: true, domain: '' });
+  assert.equal(reset.path, '');
+  assert.equal(reset.url, `${base}/`);
+  assert.equal((await f.http('/', 'GET', undefined, { Host: '127.0.0.1:8787' })).status, 200);
+  assert.equal((await f.http('/', 'GET', undefined, headers)).status, 404);
+});
+
+test('only the current suffix serves pages, assets, API and upgrades; hidden routes return empty 404', async (t) => {
+  const f = await fixture(t);
+  const { client: desktop } = await f.connect();
+  const paired = await f.pair(desktop);
+  for (const path of [
+    '/',
+    '/favicon.ico',
+    '/web/session',
+    '/web/pair',
+    '/assets/main-test.js',
+    '/wrong/',
+    '/wrong/web/ws',
+  ]) {
+    const response = await f.http(path, 'GET', undefined, { Cookie: paired.cookie }, true);
+    assert.equal(response.status, 404, path);
+    assert.equal(await response.text(), '', path);
+  }
+  for (const path of ['/', '/assets/main-test.js', '/favicon.ico', '/web/session']) {
+    const response = await f.http(path, 'GET', undefined, {
+      Host: '127.0.0.1',
+      Cookie: paired.cookie,
+    });
+    assert.equal(response.status, 404, path);
+    assert.equal(await response.text(), '');
+  }
+  assert.equal((await f.http('/favicon.ico')).status, 200);
+  assert.equal((await f.http('/assets/main-test.js')).status, 200);
+  const canonical = await f.http(`${f.path}?q=1`, 'GET', undefined, {}, true);
+  assert.equal(canonical.status, 308);
+  assert.equal(canonical.headers.get('location'), `${f.path}/?q=1`);
+  assert.equal(canonical.headers.get('cache-control'), 'no-store');
+  assert.equal((await f.http(f.path, 'HEAD', undefined, {}, true)).status, 308);
+  for (const path of ['/web/ws', '/wrong/web/ws', '/ws/'])
+    assert.deepEqual(
+      await rejectedUpgrade(f.url + path, {
+        Host: 'localhost',
+        Origin: origin,
+        Cookie: paired.cookie,
+      }),
+      { status: 404, body: '' },
+    );
+  assert.deepEqual(
+    await rejectedUpgrade(`${f.url}${f.path}/web/ws`, {
+      Host: 'wrong.example',
+      Origin: origin,
+      Cookie: paired.cookie,
+    }),
+    { status: 404, body: '' },
+  );
+  assert.equal((await f.http('/health')).status, 200);
+  assert.equal((await f.http('/client/installer', 'GET', undefined, {}, true)).status, 401);
+  assert.equal(
+    (await desktop.request({ type: 'session.create', title: '仍在线', projectPath: 'C:\\work' }))
+      .ok,
+    true,
+  );
+});
+
+test('path changes and regeneration preserve grants and pending pair codes while closing old browser sockets', async (t) => {
+  const f = await fixture(t);
+  const { client: desktop } = await f.connect();
+  const paired = await f.pair(desktop);
+  const pending = await desktop.state('web.pair');
+  const { client: browser } = await f.connect(paired.cookie);
+  const oldPath = f.path;
+  const grantFile = readFileSync(join(f.directory, 'web-grants.json'), 'utf8');
+  const closed = new Promise<number>((resolve) => browser.socket.once('close', resolve));
+  const state = await desktop.state('web.configure', { enabled: true, path: 'my-workbench' });
+  assert.equal(await closed, 1012);
+  assert.equal(state.path, 'my-workbench');
+  assert.equal(state.url, `${origin}/my-workbench/`);
+  assert.equal(state.pairing?.code, pending.pairing!.code);
+  assert.equal(readFileSync(join(f.directory, 'web-grants.json'), 'utf8'), grantFile);
+  for (const suffix of ['/', '/assets/main-test.js', '/favicon.ico', '/web/session', '/web/pair']) {
+    const old = await f.http(oldPath + suffix, 'GET', undefined, { Cookie: paired.cookie }, true);
+    assert.equal(old.status, 404);
+    assert.equal(await old.text(), '');
+  }
+  assert.deepEqual(
+    await rejectedUpgrade(`${f.url}${oldPath}/web/ws`, {
+      Host: 'localhost',
+      Origin: origin,
+      Cookie: paired.cookie,
+    }),
+    { status: 404, body: '' },
+  );
+  const current = await f.http('/web/session', 'GET', undefined, { Cookie: paired.cookie });
+  assert.equal(current.status, 200);
+  assert.deepEqual(await current.json(), paired.session);
+  assert.equal(current.headers.get('set-cookie')!.split(';')[0], paired.cookie);
+  const nextBrowser = (await f.connect(paired.cookie)).client;
+  const unchanged = await desktop.state('web.configure', { enabled: true, path: 'my-workbench' });
+  assert.equal(unchanged.path, 'my-workbench');
+  assert.equal(nextBrowser.socket.readyState, WebSocket.OPEN);
+  const regenerated = await desktop.state('web.configure', { enabled: true, regeneratePath: true });
+  assert.match(regenerated.path!, /^[a-f0-9]{32}$/);
+  assert.notEqual(regenerated.path, oldPath.slice(1));
+  assert.equal(regenerated.pairing?.code, pending.pairing!.code);
+  assert.equal((await f.http('/web/pair', 'POST', { code: pending.pairing!.code })).status, 200);
+  assert.equal(desktop.socket.readyState, WebSocket.OPEN);
+  const restored = new WebAccess({ origin, directory: f.dist }, f.directory);
+  assert.equal(restored.state().path, regenerated.path);
+  restored.close();
+});
+
+test('failed settings writes leave routes, sockets and pending pairing unchanged', async (t) => {
+  const f = await fixture(t);
+  const { client: desktop } = await f.connect();
+  const paired = await f.pair(desktop);
+  const { client: browser } = await f.connect(paired.cookie);
+  const pending = await desktop.state('web.pair');
+  const file = join(f.directory, 'web-access', 'settings.json');
+  const saved = readFileSync(file, 'utf8');
+  mkdirSync(`${file}.tmp`);
+  const result = await desktop.request({ type: 'web.configure', enabled: true, path: 'new-entry' });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'web_settings_failed');
+  assert.equal(readFileSync(file, 'utf8'), saved);
+  const state = await desktop.state();
+  assert.equal(state.path, pending.path);
+  assert.equal(state.pairing?.code, pending.pairing!.code);
+  assert.equal(browser.socket.readyState, WebSocket.OPEN);
+  assert.equal((await f.http('/')).status, 200);
+  assert.equal(
+    (await f.http('/web/session', 'GET', undefined, { Cookie: paired.cookie })).status,
+    200,
+  );
+});
+
+test('domain settings retain the deployment port, isolate cookie hosts and return empty 404 for IP access', async (t) => {
+  const base = 'https://127.0.0.1:8787';
+  const f = await fixture(t, true, true, false, base, true);
+  const { client: desktop } = await f.connect();
+  const state = await desktop.state('web.configure', {
+    enabled: true,
+    domain: ' WEB.Example.COM ',
+  });
+  const configured = 'https://web.example.com:8787';
+  assert.equal(state.domain, 'web.example.com');
+  assert.equal(state.origin, configured);
+  assert.equal(state.url, `${configured}${f.path}/`);
+  const headers = { Host: 'web.example.com:8787', Origin: configured };
+  assert.equal((await f.http('/', 'GET', undefined, headers)).status, 200);
+  for (const host of ['127.0.0.1:8787', 'another.example:8787', 'web.example.com']) {
+    const rejected = await f.http('/', 'GET', undefined, { Host: host });
+    assert.equal(rejected.status, 404);
+    assert.equal(await rejected.text(), '');
+  }
+  const pairing = await desktop.state('web.pair');
+  const paired = await f.http('/web/pair', 'POST', { code: pairing.pairing!.code }, headers);
+  assert.equal(paired.status, 200);
+  const cookie = paired.headers.get('set-cookie')!.split(';')[0];
+  assert.match(paired.headers.get('set-cookie')!, /; Secure/);
+  const browser = new Client(f.url, cookie, f.path, configured);
+  f.clients.push(browser);
+  await browser.open(true);
+  const closed = new Promise<number>((resolve) => browser.socket.once('close', resolve));
+  const reset = await desktop.state('web.configure', { enabled: true, domain: '' });
+  assert.equal(await closed, 1012);
+  assert.equal(reset.origin, base);
+  assert.equal(reset.domain, '');
+  assert.equal(reset.grants.length, 1);
+  assert.equal((await f.http('/', 'GET', undefined, headers)).status, 404);
+  assert.equal(
+    (
+      await f.http('/web/session', 'GET', undefined, {
+        Host: '127.0.0.1:8787',
+        Origin: base,
+        Cookie: cookie,
+      })
+    ).status,
+    401,
+  );
+  assert.equal((await f.http('/health')).status, 200);
+  assert.equal(desktop.socket.readyState, WebSocket.OPEN);
+});
+
+test('invalid and unreadable settings cannot create routes or alter a running configuration', async (t) => {
+  const f = await fixture(t, true, false);
+  const { client: desktop } = await f.connect();
+  const file = join(f.directory, 'web-access', 'settings.json');
+  mkdirSync(join(f.directory, 'web-access'));
+  writeFileSync(file, '{');
+  assert.equal((await desktop.state()).enabled, false);
+  assert.equal(
+    (await desktop.request({ type: 'web.configure', enabled: true })).code,
+    'web_start_failed',
+  );
+  assert.equal((await f.http('/health')).status, 200);
+  rmSync(file);
+  await desktop.state('web.configure', { enabled: true });
+  const saved = readFileSync(file, 'utf8');
+  const failed = await desktop.request({
+    type: 'web.configure',
+    enabled: true,
+    domain: 'web.example.com',
+  });
+  assert.equal(failed.code, 'web_invalid_settings');
+  assert.equal(readFileSync(file, 'utf8'), saved);
+  assert.equal((await f.http('/')).status, 200);
+  const direct = new WebAccess({ origin, directory: f.dist }, f.directory);
+  for (const configuration of [
+    { domain: 'https://web.example.com' },
+    { domain: 'web.example.com:443' },
+    { domain: '127.0.0.1' },
+    { domain: '[::1]' },
+    { domain: 'foo..example' },
+    { path: 'one/two' },
+    { path: 'web%2fapi' },
+    { path: 'health' },
+    { path: '-dash' },
+    { path: 'new-entry', regeneratePath: true },
+  ])
+    assert.throws(() => direct.configure(configuration));
+  assert.equal(readFileSync(file, 'utf8'), saved);
+  direct.close();
+});
+
+test('a path change invalidates an in-flight pairing body without consuming its code', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'cc-web-edit-pair-'));
+  const web = new WebAccess({ origin, directory }, directory);
+  try {
+    const code = web.pair('owner').code;
+    const stream = new Readable({ read() {} });
+    const request = Object.assign(stream, {
+      method: 'POST',
+      url: `/${web.state().path}/web/pair`,
+      headers: { host: 'localhost', origin, 'content-type': 'application/json' },
+    }) as unknown as IncomingMessage;
+    let status = 0;
+    let body = '';
+    const response = {
+      setHeader() {},
+      writeHead(value: number) {
+        status = value;
+        return this;
+      },
+      end(value = '') {
+        body = value;
+      },
+    } as unknown as ServerResponse;
+    const pending = web.handle(request, response, 'test');
+    stream.push('{"code":"');
+    await Promise.resolve();
+    web.configure({ path: 'new-entry' });
+    stream.push(`${code}"}`);
+    stream.push(null);
+    await pending;
+    assert.equal(status, 404);
+    assert.equal(body, '');
+    assert.equal(existsSync(join(directory, 'web-grants.json')), false);
+    assert.equal(web.state('owner').pairing?.code, code);
+    assert.equal((await webRequest(web, code)).status, 200);
+  } finally {
+    web.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('old sockets lose authorization immediately and their late close cannot remove a new socket', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'cc-web-edit-socket-'));
+  const web = new WebAccess({ origin, directory }, directory);
+  try {
+    const paired = await webRequest(web, web.pair('owner').code);
+    const cookie = paired.headers.get('Set-Cookie')!.split(';')[0];
+    const grant = web.authenticate({ headers: { cookie } } as IncomingMessage)!;
+    const previous = fakeSocket();
+    previous.close = (code) => {
+      previous.codes.push(code);
+    };
+    assert.equal(web.attach(grant, previous as unknown as WebSocket), true);
+    web.configure({ path: 'new-entry' });
+    assert.deepEqual(previous.codes, [1012]);
+    assert.equal(web.active(grant.id), true);
+    assert.equal(web.active(grant.id, previous as unknown as WebSocket), false);
+    const next = fakeSocket();
+    assert.equal(web.attach(grant, next as unknown as WebSocket), true);
+    previous.emit('close');
+    assert.equal(web.active(grant.id, next as unknown as WebSocket), true);
+  } finally {
+    web.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

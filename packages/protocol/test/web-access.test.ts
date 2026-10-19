@@ -6,6 +6,8 @@ import {
   PROTOCOL_VERSION,
   serverMessageSchema,
   webAuthSchema,
+  webDomainSchema,
+  webPathSchema,
   webStateSchema,
 } from '../src/index.ts';
 
@@ -32,6 +34,84 @@ test('optional browser capability preserves protocol 19 and rejects device crede
   };
   assert.ok(serverMessageSchema.safeParse(ready).success);
   assert.ok(serverMessageSchema.safeParse({ ...ready, web: true }).success);
+});
+
+test('browser address settings accept a hostname and an optional root path segment, not a URL', () => {
+  assert.equal(webDomainSchema.parse(' Web.Example.COM '), 'web.example.com');
+  for (const domain of ['', 'example.com', 'xn--fsqu00a.xn--0zwm56d'])
+    assert.ok(webDomainSchema.safeParse(domain).success, domain);
+  for (const domain of [
+    'https://example.com',
+    'example.com:8787',
+    'example.com/path',
+    'user@example.com',
+    '127.0.0.1',
+    '127.0.0x1',
+    '0x7f.0.0.0x1',
+    '[::1]',
+    '123.456',
+    'example.com.',
+    'a..com',
+    '-a.com',
+    'a-.com',
+    'a_b.com',
+    `${'a'.repeat(64)}.com`,
+    'example.com?x=1',
+  ])
+    assert.equal(webDomainSchema.safeParse(domain).success, false, domain);
+  for (const path of ['', 'a', 'a-b', '1', 'a'.repeat(64)])
+    assert.ok(webPathSchema.safeParse(path).success, path);
+  for (const path of [
+    '/',
+    'web/nested',
+    '..',
+    '%2f',
+    'CAPS',
+    'a-',
+    '-a',
+    'a'.repeat(65),
+    'ws',
+    'health',
+    'client',
+    'assets',
+  ])
+    assert.equal(webPathSchema.safeParse(path).success, false, path);
+  const base = { type: 'web.configure', requestId: randomUUID(), enabled: true };
+  for (const change of [
+    { domain: '' },
+    { domain: 'example.com' },
+    { path: '' },
+    { path: 'workbench' },
+    { regeneratePath: true },
+  ])
+    assert.ok(commandSchema.safeParse({ ...base, ...change }).success);
+  assert.equal(
+    commandSchema.safeParse({ ...base, path: 'workbench', regeneratePath: true }).success,
+    false,
+  );
+  const state = {
+    type: 'web.changed',
+    enabled: true,
+    origin: 'https://example.com:8787',
+    domain: 'example.com',
+    path: 'workbench',
+    url: 'https://example.com:8787/workbench/',
+    grants: [],
+  };
+  assert.deepEqual(serverMessageSchema.parse(state), state);
+  const rootState = { ...state, path: '', url: 'https://example.com:8787/' };
+  assert.deepEqual(serverMessageSchema.parse(rootState), rootState);
+  assert.equal(commandSchema.safeParse({ ...base, path: '', regeneratePath: true }).success, false);
+  const ready = serverMessageSchema.parse({
+    type: 'ready',
+    protocolVersion: PROTOCOL_VERSION,
+    connectionId: randomUUID(),
+    adapter: 'simulation',
+    version: '0.3.5',
+    sessions: [],
+    webSettings: true,
+  });
+  assert.ok(ready.type === 'ready' && ready.webSettings);
 });
 
 test('browser grant management is additive with permanent grants and temporary pair deadlines', () => {

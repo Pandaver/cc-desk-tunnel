@@ -86,6 +86,30 @@ test('browser public HTTP is rejected; loopback development uses the same-origin
   assert.equal(socket.url, 'ws://127.0.0.1:18787/web/ws');
 });
 
+test('browser HTTP and WebSocket endpoints retain the configured entry suffix without fragments', async (t) => {
+  const { connect, session } = fixture(
+    t,
+    'https://control.example.test:8787/private-workbench/?view=chat#pair=one-use-code',
+  );
+  const paths = [];
+  globalThis.fetch = async (path) => {
+    paths.push(path);
+    return new Response(JSON.stringify(session));
+  };
+  await getWebSession();
+  await pairWeb('code');
+  await logoutWeb();
+  assert.deepEqual(paths, [
+    '/private-workbench/web/session',
+    '/private-workbench/web/pair',
+    '/private-workbench/web/logout',
+  ]);
+  assert.equal(connect().socket.url, 'wss://control.example.test:8787/private-workbench/web/ws');
+  globalThis.window.location = new URL('https://control.example.test/private-workbench/index.html');
+  await getWebSession();
+  assert.equal(paths.at(-1), '/private-workbench/web/session');
+});
+
 test('revoking an established browser session stops retries and rejects pending operations without replay', async (t) => {
   const { connect, ready } = fixture(t);
   const { client, socket } = connect();
@@ -111,6 +135,54 @@ test('a handshake rejection after expiry checks the cookie and returns to login 
   client.retryNow();
   await turn();
   assert.equal(client.state.webSessionExpired, true);
+  assert.equal(Socket.all.length, 1);
+});
+
+test('an unavailable old entry stops browser retries without expiring its authorization', async (t) => {
+  const { connect, ready, Socket } = fixture(t, 'https://control.example.test/old-entry/');
+  const { client, socket } = connect();
+  ready(socket);
+  const requests = [];
+  globalThis.fetch = async (path, options) => {
+    requests.push({ path, options });
+    return new Response('', { status: 404 });
+  };
+  socket.close(1012);
+  client.retryNow();
+  await turn();
+  assert.equal(client.state.webSessionExpired, false);
+  assert.equal(client.state.status, 'disconnected');
+  assert.equal(client.credentials, null);
+  assert.equal(client.retryTimer, undefined);
+  assert.match(client.state.error, /访问地址不可用/);
+  assert.equal(Socket.all.length, 1);
+  assert.deepEqual(
+    requests.map(({ path }) => path),
+    ['/old-entry/web/session'],
+  );
+  assert.equal(requests[0].options.method, 'GET');
+  assert.equal(requests[0].options.body, undefined);
+});
+
+test('temporary server and network errors still retry rather than invalidating the browser entry', async (t) => {
+  const { connect, ready, Socket } = fixture(t, 'https://control.example.test/kept-entry/');
+  const { client, socket } = connect();
+  ready(socket);
+  globalThis.fetch = async () => new Response('', { status: 503 });
+  socket.close(1012);
+  client.retryNow();
+  await turn();
+  assert.equal(client.state.status, 'reconnecting');
+  assert.ok(client.retryTimer);
+  assert.equal(client.state.webSessionExpired, false);
+  globalThis.fetch = async () => {
+    throw new TypeError('network unavailable');
+  };
+  client.retryNow();
+  await turn();
+  assert.equal(client.state.status, 'reconnecting');
+  assert.ok(client.retryTimer);
+  assert.equal(client.state.webSessionExpired, false);
   assert.equal(Socket.all.length, 1);
 });
 
@@ -248,6 +320,7 @@ function management(t) {
     web: false,
     webControl: true,
     webPairing: true,
+    webSettings: true,
   });
   const reply = (state) => {
     const requestId = socket.sent.at(-1).requestId;
@@ -262,6 +335,7 @@ test('Web management is lazy, caches owner pairing and clears a consumed code on
   const { client, socket, reply, state } = management(t);
   assert.equal(client.state.webEnabled, false);
   assert.equal(client.state.webControl, true);
+  assert.equal(client.state.webSettings, true);
   assert.equal(client.state.webState, null);
   assert.equal(
     socket.sent.some((m) => m.type.startsWith('web.') && m.type !== 'web.auth'),
@@ -286,6 +360,50 @@ test('Web management is lazy, caches owner pairing and clears a consumed code on
   assert.equal(client.state.webState.pairing, undefined);
   socket.message({ type: 'web.changed', enabled: false, grants: [] });
   assert.equal(client.state.webEnabled, false);
+});
+
+test('address configuration preserves pairing and uses authoritative path and domain from the service', async (t) => {
+  const { client, socket, reply, state } = management(t);
+  const pairing = { code: 'kept', expiresAt: new Date().toISOString(), remainingMs: 300000 };
+  const before = client.fetch({ type: 'web.status', watch: true });
+  reply({ ...state, domain: '', path: 'first-path', url: `${state.origin}/first-path/`, pairing });
+  await before;
+  const request = client.fetch({ type: 'web.configure', enabled: true, path: 'new-path' });
+  assert.equal(socket.sent.at(-1).path, 'new-path');
+  assert.equal(socket.sent.at(-1).enabled, true);
+  const next = {
+    ...state,
+    domain: '',
+    path: 'new-path',
+    url: `${state.origin}/new-path/`,
+    pairing,
+  };
+  reply(next);
+  await request;
+  assert.equal(client.state.webState.path, 'new-path');
+  assert.equal(client.state.webState.url, next.url);
+  assert.equal(client.state.webState.pairing.code, 'kept');
+  socket.message({
+    type: 'web.changed',
+    ...next,
+    origin: 'https://new.example.test',
+    domain: 'new.example.test',
+    url: 'https://new.example.test/new-path/',
+  });
+  assert.equal(client.state.webState.domain, 'new.example.test');
+  assert.equal(client.state.webState.url, 'https://new.example.test/new-path/');
+  assert.equal(socket.sent.filter((message) => message.type === 'web.pair').length, 0);
+});
+
+test('address configuration capability clears on disconnect and does not leak into older services', (t) => {
+  const { client, socket, device, Socket, ready } = management(t);
+  assert.equal(client.state.webSettings, true);
+  socket.close(1006);
+  assert.equal(client.state.webSettings, false);
+  client.connectWeb(device);
+  ready(Socket.all.at(-1));
+  assert.equal(client.state.webSettings, false);
+  assert.equal(client.state.webState, null);
 });
 
 test('pair expiry follows the duration, not either computer wall clock', async (t) => {

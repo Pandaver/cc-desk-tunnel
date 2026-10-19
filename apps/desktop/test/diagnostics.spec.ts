@@ -14,14 +14,18 @@ async function fixture(page: Page, supported = true) {
     requests: [] as { socket: WebSocketRoute; requestId: string }[],
     sockets: [] as WebSocketRoute[],
   };
-  await page.route('**/web/**', async (route) => {
+  await page.route('**/browser-entry/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
-    if (path === '/web/session')
+    if (path === '/browser-entry/web/session')
       return route.fulfill({
         json: { device: { id: state.identity, name: '测试浏览器' }, expiresAt: null },
       });
     const file =
-      path === '/web/' ? 'index.html' : path.startsWith('/web/assets/') ? path.slice(5) : null;
+      path === '/browser-entry/'
+        ? 'index.html'
+        : path.startsWith('/browser-entry/assets/')
+          ? path.slice('/browser-entry/'.length)
+          : null;
     if (!file || file.includes('..')) return route.abort();
     const mime: Record<string, string> = {
       '.html': 'text/html',
@@ -35,7 +39,7 @@ async function fixture(page: Page, supported = true) {
       contentType: mime[extname(file)] ?? 'application/octet-stream',
     });
   });
-  await page.routeWebSocket('**/web/ws', (socket) => {
+  await page.routeWebSocket('**/browser-entry/web/ws', (socket) => {
     state.sockets.push(socket);
     socket.onMessage((raw) => {
       const command = JSON.parse(String(raw));
@@ -62,7 +66,7 @@ async function fixture(page: Page, supported = true) {
       }
     });
   });
-  await page.goto('/web/');
+  await page.goto('/browser-entry/');
   await expect(page.locator('.connection-status')).toContainText('已连接');
   return state;
 }

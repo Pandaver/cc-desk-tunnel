@@ -1,11 +1,12 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { createReadStream, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { createReadStream, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { realpath, stat } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { WebSocket } from 'ws';
 import type { WebAccessState } from '@cc-desk-tunnel/protocol';
+import { webDomainSchema, webPathSchema } from '@cc-desk-tunnel/protocol';
 import { z } from 'zod';
 import { DomainError } from './errors.ts';
 
@@ -26,6 +27,9 @@ const grantSchema = z
   .strict();
 export type WebGrant = z.infer<typeof grantSchema>;
 export type WebAccessOptions = { origin: string; directory: string };
+export type WebAccessConfiguration = { domain?: string; path?: string; regeneratePath?: boolean };
+const settingsSchema = z.object({ domain: webDomainSchema, path: webPathSchema }).strict();
+type Settings = z.infer<typeof settingsSchema>;
 const publicGrant = ({ secretHash: _, ...grant }: WebGrant) => grant;
 const loopback = (host: string) => ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(host);
 const types: Record<string, string> = {
@@ -68,9 +72,12 @@ function browserName(agent: string) {
 // only hashes; a browser keeps its own opaque secret in a host-only, HttpOnly cookie. A grant lasts until
 // explicitly revoked or logged out; it does not acquire a second lifetime from the browser cookie.
 export class WebAccess {
-  readonly origin: string;
-  private readonly cookieName: string;
   private url: URL;
+  private baseOrigin: string;
+  private transport: { tls?: boolean; reverseProxy?: boolean; host?: string };
+  private settings: Settings;
+  private settingsFile: string;
+  private generation = 0;
   private directory: string;
   private file: string;
   private grants = new Map<string, WebGrant>();
@@ -94,6 +101,7 @@ export class WebAccess {
     transport: { tls?: boolean; reverseProxy?: boolean; host?: string } = {},
     now?: () => number,
     changed = () => {},
+    configuration: WebAccessConfiguration = {},
   ) {
     this.now = now ?? (() => performance.now());
     this.wallNow = now ?? Date.now;
@@ -106,16 +114,9 @@ export class WebAccess {
       !['https:', 'http:'].includes(this.url.protocol)
     )
       throw new Error('Web origin must be an exact HTTP(S) origin without a path or credentials.');
-    if (
-      this.url.protocol === 'http:' &&
-      (!loopback(this.url.hostname) || !loopback(transport.host ?? '127.0.0.1'))
-    )
-      throw new Error('Web access requires HTTPS, except on a loopback development listener.');
-    if (this.url.protocol === 'https:' && !transport.tls && !transport.reverseProxy)
-      throw new Error('HTTPS Web access requires TLS or explicit reverse proxy mode.');
-    this.origin = this.url.origin;
-    // Cookies ignore ports. Isolate services on the same host, including HTTP development and HTTPS.
-    this.cookieName = `cc_web_session_${hash(this.origin).slice(0, 16)}`;
+    this.baseOrigin = options.origin;
+    this.transport = transport;
+    this.validateTransport(this.url);
     this.directory = resolve(options.directory);
     this.file = join(dataDir, 'web-grants.json');
     try {
@@ -128,6 +129,106 @@ export class WebAccess {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
         throw new Error('Web grant storage is unreadable or invalid.');
     }
+    this.settingsFile = join(dataDir, 'web-access', 'settings.json');
+    let saved: Settings | undefined;
+    try {
+      saved = settingsSchema.parse(JSON.parse(readFileSync(this.settingsFile, 'utf8')));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+        throw new Error('Web access settings are unreadable or invalid.');
+    }
+    const next = this.configureValue(
+      saved ?? { domain: '', path: randomBytes(16).toString('hex') },
+      configuration,
+    );
+    this.url = this.configuredUrl(next.domain);
+    if (!saved || saved.domain !== next.domain || saved.path !== next.path) this.saveSettings(next);
+    this.settings = next;
+  }
+
+  get origin() {
+    return this.url.origin;
+  }
+
+  private get prefix() {
+    return this.settings.path ? `/${this.settings.path}` : '';
+  }
+
+  private get cookieName() {
+    // Cookies ignore ports. Keep the identity stable across path edits, but isolate origins.
+    return `cc_web_session_${hash(this.origin).slice(0, 16)}`;
+  }
+
+  private validateTransport(url: URL) {
+    if (
+      url.protocol === 'http:' &&
+      (!loopback(url.hostname) || !loopback(this.transport.host ?? '127.0.0.1'))
+    )
+      throw new Error('Web access requires HTTPS, except on a loopback development listener.');
+    if (url.protocol === 'https:' && !this.transport.tls && !this.transport.reverseProxy)
+      throw new Error('HTTPS Web access requires TLS or explicit reverse proxy mode.');
+  }
+
+  private configuredUrl(domain: string) {
+    const url = new URL(this.baseOrigin);
+    if (domain) url.hostname = domain;
+    this.validateTransport(url);
+    return url;
+  }
+
+  private configureValue(current: Settings, configuration: WebAccessConfiguration): Settings {
+    if (configuration.path !== undefined && configuration.regeneratePath)
+      throw new DomainError('web_invalid_settings', '自定义路径与重新生成路径不能同时设置。');
+    const parsed = settingsSchema.safeParse({
+      domain: configuration.domain ?? current.domain,
+      path: configuration.regeneratePath
+        ? randomBytes(16).toString('hex')
+        : (configuration.path ?? current.path),
+    });
+    if (!parsed.success)
+      throw new DomainError('web_invalid_settings', parsed.error.issues[0].message);
+    const { domain, path } = parsed.data;
+    try {
+      this.configuredUrl(domain);
+    } catch {
+      throw new DomainError(
+        'web_invalid_settings',
+        '自定义域名需要 HTTPS 或已配置的 HTTPS 反向代理。',
+      );
+    }
+    return { domain, path };
+  }
+
+  private saveSettings(settings: Settings) {
+    mkdirSync(join(this.settingsFile, '..'), { recursive: true, mode: 0o700 });
+    const temporary = `${this.settingsFile}.tmp`;
+    writeFileSync(temporary, JSON.stringify(settings), { mode: 0o600 });
+    renameSync(temporary, this.settingsFile);
+  }
+
+  configure(configuration: WebAccessConfiguration) {
+    if (this.closed) throw new DomainError('web_disabled', '服务端尚未启用 Web 访问。');
+    const next = this.configureValue(this.settings, configuration);
+    if (next.path === this.settings.path && next.domain === this.settings.domain) return;
+    try {
+      this.saveSettings(next);
+    } catch {
+      throw new DomainError('web_settings_failed', 'Web 访问设置保存失败，原访问地址保持不变。');
+    }
+    // Persistence succeeds before invalidating requests and sockets; pairing codes and grants survive.
+    this.settings = next;
+    this.url = this.configuredUrl(next.domain);
+    this.generation++;
+    for (const id of this.sockets.keys()) this.disconnect(id, true);
+    this.changed();
+  }
+
+  matches(request: IncomingMessage, route: string) {
+    return (
+      !this.closed &&
+      request.headers.host === this.url.host &&
+      request.url === `${this.prefix}${route}`
+    );
   }
 
   private save(grants = this.grants) {
@@ -171,6 +272,9 @@ export class WebAccess {
     return {
       enabled: !this.closed,
       origin: this.origin,
+      domain: this.settings.domain,
+      path: this.settings.path,
+      url: `${this.origin}${this.prefix}/`,
       ...(pair
         ? {
             pairing: {
@@ -249,9 +353,9 @@ export class WebAccess {
     return [...this.grants.values()].find((grant) => grant.secretHash === digest);
   }
 
-  active(id: string) {
+  active(id: string, socket?: WebSocket) {
     this.expire();
-    return !this.closed && this.grants.has(id);
+    return !this.closed && this.grants.has(id) && (!socket || !!this.sockets.get(id)?.has(socket));
   }
 
   attach(grant: WebGrant, socket: WebSocket) {
@@ -263,7 +367,7 @@ export class WebAccess {
     this.sockets.set(grant.id, own);
     socket.once('close', () => {
       own.delete(socket);
-      if (!own.size) this.sockets.delete(grant.id);
+      if (!own.size && this.sockets.get(grant.id) === own) this.sockets.delete(grant.id);
     });
     return true;
   }
@@ -281,6 +385,7 @@ export class WebAccess {
   }
 
   private async pairRequest(request: IncomingMessage, response: ServerResponse, address: string) {
+    const generation = this.generation;
     const failure = this.failures.get(address);
     if (failure && failure.count >= 6 && failure.until > this.now()) {
       response.setHeader('Retry-After', Math.ceil((failure.until - this.now()) / 1000));
@@ -311,6 +416,10 @@ export class WebAccess {
       // grant after a new instance has started, even when the submitted code used to be valid.
       if (this.closed) {
         this.json(response, 503, { error: 'Web 访问已关闭，请稍后重试。' });
+        return;
+      }
+      if (generation !== this.generation) {
+        response.writeHead(404).end();
         return;
       }
       let input: { code: string };
@@ -373,10 +482,32 @@ export class WebAccess {
   }
 
   async handle(request: IncomingMessage, response: ServerResponse, address: string) {
-    if (this.closed) {
+    const prefix = this.prefix;
+    const requestedPath = request.url?.split('?')[0] ?? '';
+    if (
+      !this.closed &&
+      prefix !== '' &&
+      request.headers.host === this.url.host &&
+      requestedPath === prefix &&
+      (request.method === 'GET' || request.method === 'HEAD')
+    ) {
+      response
+        .writeHead(308, {
+          Location: `${prefix}/${request.url!.slice(prefix.length)}`,
+          'Cache-Control': 'no-store',
+        })
+        .end();
+      return;
+    }
+    if (
+      this.closed ||
+      request.headers.host !== this.url.host ||
+      !requestedPath.startsWith(`${prefix}/`)
+    ) {
       response.writeHead(404).end();
       return;
     }
+    const generation = this.generation;
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('Referrer-Policy', 'no-referrer');
     response.setHeader('X-Frame-Options', 'DENY');
@@ -386,33 +517,40 @@ export class WebAccess {
     );
     // Public assets carry no authority. A link followed from another site must load the entry page;
     // cookie-authenticated APIs and WebSockets still require the exact origin and fetch-site checks.
-    const pathname = request.url?.split('?')[0] ?? '';
+    const pathname = requestedPath.slice(prefix.length);
+    const route = request.url!.slice(prefix.length);
     const publicAsset =
       (request.method === 'GET' || request.method === 'HEAD') &&
       (pathname === '/' ||
         pathname === '/favicon.ico' ||
         /^\/assets\/[a-zA-Z0-9_-]+\.(?:js|css|png|svg|woff2?|ttf)$/.test(pathname));
-    if (
-      request.headers.host !== this.url.host ||
-      (!publicAsset && !this.trusted(request, request.method === 'POST'))
-    ) {
+    const apiRoute =
+      (request.method === 'POST' && (route === '/web/pair' || route === '/web/logout')) ||
+      (request.method === 'GET' && route === '/web/session');
+    // Unknown paths remain hidden even when the entry is at the root. In particular, old
+    // prefixed APIs must return an empty 404 instead of revealing an origin-validation error.
+    if (!publicAsset && !apiRoute) {
+      response.writeHead(404).end();
+      return;
+    }
+    if (!publicAsset && !this.trusted(request, request.method === 'POST')) {
       this.json(response, 403, { error: '请求来源不匹配。' });
       return;
     }
-    if (request.url === '/web/pair' && request.method === 'POST') {
+    if (route === '/web/pair' && request.method === 'POST') {
       await this.pairRequest(request, response, address);
       return;
     }
     if (
-      (request.url === '/web/session' && request.method === 'GET') ||
-      (request.url === '/web/logout' && request.method === 'POST')
+      (route === '/web/session' && request.method === 'GET') ||
+      (route === '/web/logout' && request.method === 'POST')
     ) {
       const grant = this.authenticate(request);
       if (!grant) {
         this.json(response, 401, { error: '请先配对登录。' });
         return;
       }
-      if (request.url === '/web/logout') {
+      if (route === '/web/logout') {
         this.revoke(grant.id);
         response.setHeader('Set-Cookie', this.cookie('', 0));
         this.json(response, 200, { ok: true });
@@ -422,20 +560,8 @@ export class WebAccess {
       }
       return;
     }
-    if (request.method !== 'GET' && request.method !== 'HEAD') {
-      response.writeHead(404).end();
-      return;
-    }
     // Only generated assets and the entry page are public. No source maps, configuration files, data files
     // or SPA fallbacks for unknown API paths. Resolve symlinks before checking containment.
-    if (
-      pathname !== '/' &&
-      pathname !== '/favicon.ico' &&
-      !/^\/assets\/[a-zA-Z0-9_-]+\.(?:js|css|png|svg|woff2?|ttf)$/.test(pathname)
-    ) {
-      response.writeHead(404).end();
-      return;
-    }
     if (this.serving >= 32) {
       response.writeHead(503, { 'Retry-After': '1' }).end();
       return;
@@ -456,7 +582,12 @@ export class WebAccess {
         return;
       }
       const info = await stat(file);
-      if (this.closed || !info.isFile() || info.size > 16 * 1024 * 1024) {
+      if (
+        this.closed ||
+        generation !== this.generation ||
+        !info.isFile() ||
+        info.size > 16 * 1024 * 1024
+      ) {
         response.writeHead(404).end();
         return;
       }

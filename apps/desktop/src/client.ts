@@ -5,7 +5,7 @@ import {
   serverMessageSchema,
 } from '@cc-desk-tunnel/protocol';
 import type { EventPayload } from '@cc-desk-tunnel/protocol';
-import { getWebSession, WebAccessError } from './browser-api.ts';
+import { getWebSession, WebAccessError, webEndpoint } from './browser-api.ts';
 import type {
   AccountState,
   Command,
@@ -104,6 +104,7 @@ export type ClientState = {
   webEnabled: boolean;
   webControl: boolean;
   webPairing: boolean;
+  webSettings: boolean;
   webState: WebAccessState | null;
   webPending: boolean;
   webPreparing: boolean;
@@ -157,6 +158,7 @@ export class ProxyClient {
     webEnabled: false,
     webControl: false,
     webPairing: false,
+    webSettings: false,
     webState: null,
     webPending: false,
     webPreparing: false,
@@ -246,6 +248,7 @@ export class ProxyClient {
       webError: null,
       webControl: false,
       webPairing: false,
+      webSettings: false,
       webEnabled: false,
     });
   }
@@ -322,7 +325,7 @@ export class ProxyClient {
     this.begin({ url: address.toString(), token: token.trim(), device, reconnect, bridge });
   }
   connectWeb(device: Device) {
-    const address = new URL('/web/ws', window.location.href);
+    const address = webEndpoint('ws');
     if (
       address.protocol !== 'https:' &&
       !(
@@ -381,7 +384,15 @@ export class ProxyClient {
           if (!current()) return;
           if (error instanceof WebAccessError && [401, 403].includes(error.status))
             this.expireWeb();
-          else this.retry(credentials);
+          else if (error instanceof WebAccessError && error.status === 404) {
+            // A changed domain/path (or disabled entry) is not a revoked browser grant. Stop asking
+            // the old address without clearing its cookie or sending it a new pairing code.
+            this.disconnect();
+            this.update({
+              devices: [],
+              error: '访问地址不可用，请从桌面设置获取当前地址。',
+            });
+          } else this.retry(credentials);
         },
       );
       return;
@@ -455,6 +466,7 @@ export class ProxyClient {
           hasConnected: true,
           webControl: message.webControl === true,
           webPairing: message.webPairing === true,
+          webSettings: message.webSettings === true,
           connectionId: message.connectionId,
           sessions: message.sessions,
           selectedId,

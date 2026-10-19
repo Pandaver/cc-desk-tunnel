@@ -22,14 +22,14 @@ async function fixture(context: BrowserContext, paired = false) {
     logout: null as ((route: Route) => Promise<void>) | null,
     authenticate: null as ((socket: WebSocketRoute) => void) | null,
   };
-  await context.route('**/web/**', async (route) => {
+  await context.route('**/browser-entry/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
-    if (path === '/web/session') {
+    if (path === '/browser-entry/web/session') {
       state.sessions++;
       if (state.get) return state.get(route);
       return route.fulfill({ status: state.paired ? 200 : 401, json: state.paired ? login : {} });
     }
-    if (path === '/web/pair') {
+    if (path === '/browser-entry/web/pair') {
       state.codes.push(route.request().postDataJSON().code);
       if (state.pair) return state.pair(route);
       state.paired = true;
@@ -38,13 +38,17 @@ async function fixture(context: BrowserContext, paired = false) {
         json: login,
       });
     }
-    if (path === '/web/logout') {
+    if (path === '/browser-entry/web/logout') {
       if (state.logout) return state.logout(route);
       state.paired = false;
       return route.fulfill({ json: { ok: true } });
     }
     const file =
-      path === '/web/' ? 'index.html' : path.startsWith('/web/assets/') ? path.slice(5) : null;
+      path === '/browser-entry/'
+        ? 'index.html'
+        : path.startsWith('/browser-entry/assets/')
+          ? path.slice('/browser-entry/'.length)
+          : null;
     if (!file || file.includes('..')) return route.abort();
     const mime: Record<string, string> = {
       '.html': 'text/html',
@@ -58,7 +62,7 @@ async function fixture(context: BrowserContext, paired = false) {
       contentType: mime[extname(file)] ?? 'application/octet-stream',
     });
   });
-  await context.routeWebSocket('**/web/ws', (socket) => {
+  await context.routeWebSocket('**/browser-entry/web/ws', (socket) => {
     state.sockets.push(socket);
     socket.onMessage((raw) => {
       const command = JSON.parse(String(raw));
@@ -100,7 +104,7 @@ test('an initial session failure keeps the fragment code for one explicit retry'
     state.get = null;
     await route.fulfill({ status: 503, json: { message: '读取登录状态暂时失败。' } });
   };
-  await page.goto(`/web/#pair=${code}`);
+  await page.goto(`/browser-entry/#pair=${code}`);
   await expect(page.getByRole('alert')).toHaveText('读取登录状态暂时失败。');
   expect(page.url()).not.toContain('pair=');
   expect(state.codes).toEqual([]);
@@ -118,7 +122,7 @@ test('an unsuccessful automatic pairing preserves the code without silently rese
     state.pair = null;
     await route.fulfill({ status: 503, json: { message: '配对暂时失败。' } });
   };
-  await page.goto(`/web/#pair=${code}`);
+  await page.goto(`/browser-entry/#pair=${code}`);
   await expect(page.getByRole('alert')).toHaveText('配对暂时失败。');
   await expect(page.getByLabel('配对码', { exact: true })).toHaveValue('');
   expect(state.codes).toEqual([code]);
@@ -138,7 +142,7 @@ test('a lost pairing response recovers the cookie without redeeming the code aga
     state.paired = true;
     await route.abort('connectionreset');
   };
-  await page.goto(`/web/#pair=${code}`);
+  await page.goto(`/browser-entry/#pair=${code}`);
   await connected(page);
   expect(state.codes).toEqual([code]);
   expect(state.sessions).toBe(2);
@@ -164,7 +168,10 @@ test('two tabs opening one code recover the shared login instead of leaving a fa
     return route.fulfill({ json: login });
   };
   const second = await context.newPage();
-  await Promise.all([page.goto(`/web/#pair=${code}`), second.goto(`/web/#pair=${code}`)]);
+  await Promise.all([
+    page.goto(`/browser-entry/#pair=${code}`),
+    second.goto(`/browser-entry/#pair=${code}`),
+  ]);
   await Promise.all([connected(page), connected(second)]);
   expect(state.codes).toEqual([code, code]);
   await expect(second.getByRole('alert')).toHaveCount(0);
@@ -201,7 +208,10 @@ for (const delayedFailure of [false, true]) {
         await route.fulfill({ status: 401, json: { error: '配对码已失效。' } });
     };
     const second = await context.newPage();
-    await Promise.all([page.goto(`/web/#pair=${code}`), second.goto(`/web/#pair=${code}`)]);
+    await Promise.all([
+      page.goto(`/browser-entry/#pair=${code}`),
+      second.goto(`/browser-entry/#pair=${code}`),
+    ]);
     await expect.poll(() => exchanges.length).toBe(2);
     await expect.poll(() => state.sessions).toBe(3);
     await exchanges[0].fulfill({
@@ -235,7 +245,7 @@ test('a cross-tab notice only reads the cookie and cannot override a newer expli
   context,
 }) => {
   const state = await fixture(context);
-  await page.goto('/web/');
+  await page.goto('/browser-entry/');
   await expect(page.getByLabel('配对码', { exact: true })).toBeEnabled();
   let held: Route | undefined;
   state.get = async (route) => {
@@ -261,7 +271,7 @@ test('a cross-tab notice neither logs an explicitly signed-out tab back in nor r
   context,
 }) => {
   const state = await fixture(context, true);
-  await page.goto('/web/');
+  await page.goto('/browser-entry/');
   await connected(page);
   await page.getByRole('button', { name: '设置与账号' }).click();
   await page.getByRole('menuitem', { name: '退出登录', exact: true }).click();
@@ -283,7 +293,7 @@ test('login still works when the browser does not provide cross-tab notification
     Object.defineProperty(window, 'BroadcastChannel', { value: undefined });
   });
   const state = await fixture(context);
-  await page.goto(`/web/#pair=${code}`);
+  await page.goto(`/browser-entry/#pair=${code}`);
   await connected(page);
   expect(state.codes).toEqual([code]);
 });
@@ -297,7 +307,7 @@ test('manual pairing locks synchronous duplicate submissions and keeps an invali
   state.pair = async (route) => {
     release = route;
   };
-  await page.goto('/web/');
+  await page.goto('/browser-entry/');
   await page.getByLabel('配对码', { exact: true }).fill(code);
   await page.locator('form').evaluate((form) => {
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
@@ -320,12 +330,12 @@ test('a late logout response cannot clear a new login after the old grant was re
   let release: Route | undefined;
   let cancelled = false;
   page.on('requestfailed', (request) => {
-    if (new URL(request.url()).pathname === '/web/logout') cancelled = true;
+    if (new URL(request.url()).pathname === '/browser-entry/web/logout') cancelled = true;
   });
   state.logout = async (route) => {
     release = route;
   };
-  await page.goto('/web/');
+  await page.goto('/browser-entry/');
   await connected(page);
   await page.getByRole('button', { name: '设置与账号' }).click();
   await page.getByRole('menuitem', { name: '退出登录', exact: true }).click();
@@ -356,7 +366,7 @@ test('first handshake failure never reveals an empty or Simulation workbench', a
   state.authenticate = (socket) => {
     if (state.sockets.length === 1) socket.close({ code: 1011, reason: 'temporary outage' });
   };
-  await page.goto('/web/');
+  await page.goto('/browser-entry/');
   await expect.poll(() => state.sockets.length).toBeGreaterThan(1);
   await expect(page.getByRole('heading', { name: '正在连接工作台…' })).toBeVisible();
   await expect(page.locator('.shell')).toHaveCount(0);
@@ -369,7 +379,7 @@ test('reconnecting an established browser keeps the existing workbench visible',
   context,
 }) => {
   const state = await fixture(context, true);
-  await page.goto('/web/');
+  await page.goto('/browser-entry/');
   await connected(page);
   state.authenticate = () => {};
   state.sockets.at(-1)!.close({ code: 1011, reason: 'temporary outage' });
@@ -383,12 +393,12 @@ test('a fresh pairing fragment reuses a revoked tab without requiring a page rel
   context,
 }) => {
   const state = await fixture(context, true);
-  await page.goto('/web/');
+  await page.goto('/browser-entry/');
   await connected(page);
   state.paired = false;
   state.sockets.at(-1)!.close({ code: 4001, reason: 'revoked' });
   await expect(page.getByRole('alert')).toContainText('登录已失效');
-  await page.goto(`/web/#pair=${code}`);
+  await page.goto(`/browser-entry/#pair=${code}`);
   await connected(page);
   expect(state.codes).toEqual([code]);
 });
@@ -398,9 +408,9 @@ test('a pairing fragment in an authenticated tab keeps its existing identity and
   context,
 }) => {
   const state = await fixture(context, true);
-  await page.goto('/web/');
+  await page.goto('/browser-entry/');
   await connected(page);
-  await page.goto(`/web/#pair=${code}`);
+  await page.goto(`/browser-entry/#pair=${code}`);
   await expect.poll(() => state.sessions).toBe(2);
   await connected(page);
   expect(state.codes).toEqual([]);
@@ -417,9 +427,9 @@ test('a new explicit pairing fragment supersedes a pending lookup and never subm
     state.get = null;
     held = route;
   };
-  await page.goto('/web/#pair=ffeeddccbbaa998877665544');
+  await page.goto('/browser-entry/#pair=ffeeddccbbaa998877665544');
   await expect.poll(() => !!held).toBe(true);
-  await page.goto(`/web/#pair=${code}`);
+  await page.goto(`/browser-entry/#pair=${code}`);
   await connected(page);
   await held!.fulfill({ status: 401, json: {} });
   await connected(page);

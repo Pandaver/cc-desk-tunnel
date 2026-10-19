@@ -198,9 +198,35 @@ test('desktop settings initialize pairing and the production browser controls an
     await categories.getByRole('button', { name: '常规', exact: true }).click();
     await panel.getByRole('button', { name: '显示配对码', exact: true }).click();
     await expect(panel.getByLabel('配对码', { exact: true })).toHaveText(code);
-    await page.goto(`${origin}/#pair=${code}`);
+    const enabledStatus = await request({ type: 'web.status' });
+    const enabledState = await wait(
+      (m) => m.type === 'web.state' && m.requestId === enabledStatus.requestId,
+    );
+    if (enabledState.type !== 'web.state' || !enabledState.url || !enabledState.path)
+      throw new Error('Missing enabled browser address');
+    let entry = enabledState.url;
+    expect(entry).toBe(`${origin}/${enabledState.path}/`);
+    expect(enabledState.path).toMatch(/^[a-f0-9]{32}$/);
+    await expect(panel.getByRole('textbox', { name: '服务端访问路径', exact: true })).toHaveValue(
+      enabledState.path,
+    );
+    await expect(panel.getByLabel('服务端访问地址', { exact: true })).toHaveText(
+      `${origin}/${enabledState.path.slice(0, 5)}...`,
+    );
+    const servedRequests: string[] = [];
+    const browserSockets: string[] = [];
+    page.on('request', (request) => servedRequests.push(request.url()));
+    page.on('websocket', (socket) => browserSockets.push(socket.url()));
+    await page.goto(`${entry}#pair=${code}`);
     await expect(page.locator('.connection-status')).toContainText('已连接');
     expect(new URL(page.url()).hash).toBe('');
+    expect(
+      servedRequests.filter((url) => url.startsWith(origin)).every((url) => url.startsWith(entry)),
+    ).toBe(true);
+    expect(servedRequests.some((url) => url.startsWith(`${entry}assets/`))).toBe(true);
+    expect(servedRequests).toContain(`${entry}web/session`);
+    expect(servedRequests).toContain(`${entry}web/pair`);
+    expect(browserSockets).toContain(`${entry.replace('http', 'ws')}web/ws`);
     await expect(panel.locator('summary')).toContainText('1');
     await expect(panel.getByLabel('配对码未生成')).toHaveText('—');
     await page.getByRole('button', { name: '连接诊断', exact: true }).click();
@@ -238,11 +264,90 @@ test('desktop settings initialize pairing and the production browser controls an
     expect((await context.cookies(origin))[0].value).toBe(cookies[0].value);
 
     const other = await context.newPage();
-    await other.goto(origin);
+    await other.goto(entry);
     await select(other, '另一个会话');
     await expect(page.locator('.session-row.selected strong')).toHaveText('浏览器验收会话');
     await expect(other.locator('.session-row.selected strong')).toHaveText('另一个会话');
     await other.close();
+
+    // A path update changes every browser endpoint, but not its cookie, grant, or desktop socket.
+    const oldEntry = entry;
+    const oldAsset = servedRequests.find((url) => url.startsWith(`${oldEntry}assets/`));
+    expect(oldAsset).toBeTruthy();
+    const beforePath = await (await context.request.get(`${entry}web/session`)).json();
+    const changing = panel.getByRole('textbox', { name: '服务端访问路径', exact: true });
+    await changing.fill('updated-workbench');
+    await changing.blur();
+    await expect(changing).toBeEnabled();
+    const update = await wait((m) => m.type === 'web.changed' && m.path === 'updated-workbench');
+    if (update.type !== 'web.changed' || !update.url)
+      throw new Error('Missing updated browser address');
+    entry = update.url;
+    expect(entry).toBe(`${origin}/updated-workbench/`);
+    await expect(page.locator('.connection-status')).not.toContainText('已连接');
+    await expect(
+      page.getByText('访问地址不可用，请从桌面设置获取当前地址。', { exact: true }),
+    ).toBeVisible();
+    for (const target of [
+      origin,
+      oldEntry,
+      `${oldEntry}web/session`,
+      oldAsset!,
+      `${origin}/web/session`,
+    ]) {
+      const response = await context.request.get(target);
+      expect(response.status()).toBe(404);
+      expect(await response.text()).toBe('');
+      expect(response.headers().location).toBeUndefined();
+    }
+    expect(desktop.readyState).toBe(WebSocket.OPEN);
+    expect((await context.cookies(origin))[0].value).toBe(cookies[0].value);
+    await page.goto(entry);
+    await expect(page.locator('.connection-status')).toContainText('已连接');
+    await expect(page.getByLabel('配对码', { exact: true })).toHaveCount(0);
+    const afterPath = await (await context.request.get(`${entry}web/session`)).json();
+    expect(afterPath.device.id).toBe(beforePath.device.id);
+
+    // Clearing a live custom suffix moves the complete browser surface to root without logging out.
+    const customEntry = entry;
+    const customAsset = servedRequests.find((url) => url.startsWith(`${customEntry}assets/`));
+    expect(customAsset).toBeTruthy();
+    await changing.fill('');
+    await changing.blur();
+    await expect(changing).toBeEnabled();
+    const rootUpdate = await wait((m) => m.type === 'web.changed' && m.path === '');
+    if (rootUpdate.type !== 'web.changed' || !rootUpdate.url)
+      throw new Error('Missing root browser address');
+    entry = rootUpdate.url;
+    expect(entry).toBe(`${origin}/`);
+    await expect(changing).toHaveValue('');
+    await expect(panel.getByLabel('服务端访问地址', { exact: true })).toHaveText(entry);
+    await expect(
+      page.getByText('访问地址不可用，请从桌面设置获取当前地址。', { exact: true }),
+    ).toBeVisible();
+    for (const target of [customEntry, `${customEntry}web/session`, customAsset!]) {
+      const response = await context.request.get(target);
+      expect(response.status()).toBe(404);
+      expect(await response.text()).toBe('');
+      expect(response.headers().location).toBeUndefined();
+    }
+    expect((await context.request.get(`${origin}/health`)).status()).toBe(200);
+    expect(desktop.readyState).toBe(WebSocket.OPEN);
+    expect((await context.cookies(origin))[0].value).toBe(cookies[0].value);
+    await page.goto(entry);
+    await expect(page.locator('.connection-status')).toContainText('已连接');
+    await expect(page.getByLabel('配对码', { exact: true })).toHaveCount(0);
+    expect(servedRequests.some((url) => url.startsWith(`${origin}/assets/`))).toBe(true);
+    expect(servedRequests).toContain(`${origin}/web/session`);
+    expect(browserSockets).toContain(`${origin.replace('http', 'ws')}/web/ws`);
+    const rootSession = await (await context.request.get(`${entry}web/session`)).json();
+    expect(rootSession.device.id).toBe(beforePath.device.id);
+    await select(page);
+    await request({
+      type: 'session.rename',
+      sessionId: created.sessionId,
+      title: '路径更新后桌面仍可操作',
+    });
 
     await page.setViewportSize({ width: 390, height: 844 });
     await send(page, '审批链路', 'tool');
@@ -258,7 +363,7 @@ test('desktop settings initialize pairing and the production browser controls an
     await page.getByRole('button', { name: '停止运行', exact: true }).click();
     await settled(page);
     expect(server.store.get(created.sessionId!).session.activeRun).toBeNull();
-    const session = await (await context.request.get(origin + '/web/session')).json();
+    const session = await (await context.request.get(`${entry}web/session`)).json();
     await request({ type: 'web.revoke', grantId: session.device.id });
     await expect(page.getByLabel('配对码', { exact: true })).toBeVisible();
     await expect(page.getByRole('alert')).toContainText('登录已失效');
@@ -272,12 +377,14 @@ test('desktop settings initialize pairing and the production browser controls an
     );
     if (nextPairing.type !== 'web.state' || !nextPairing.pairing)
       throw new Error('Missing new pairing code');
-    await page.goto(`${origin}/#pair=${nextPairing.pairing.code}`);
+    await page.goto(`${entry}#pair=${nextPairing.pairing.code}`);
     await expect(page.locator('.connection-status')).toContainText('已连接');
     await request({ type: 'web.configure', enabled: false });
-    await expect(page.locator('.connection-status')).toContainText('重连中');
+    await expect(
+      page.getByText('访问地址不可用，请从桌面设置获取当前地址。', { exact: true }),
+    ).toBeVisible();
     expect((await fetch(origin)).status).toBe(404);
-    expect((await fetch(origin + '/web/session')).status).toBe(404);
+    expect((await fetch(`${entry}web/session`)).status).toBe(404);
     expect(desktop.readyState).toBe(WebSocket.OPEN);
     await request({
       type: 'session.rename',
@@ -285,8 +392,10 @@ test('desktop settings initialize pairing and the production browser controls an
       title: '关闭 Web 后桌面仍可操作',
     });
     await request({ type: 'web.configure', enabled: true });
-    expect((await fetch(origin)).status).toBe(200);
+    expect((await fetch(entry)).status).toBe(200);
+    await page.reload();
     await expect(page.locator('.connection-status')).toContainText('已连接');
+    await expect(page.getByLabel('配对码', { exact: true })).toHaveCount(0);
     expect(errors).toEqual([]);
   } finally {
     await page.goto('about:blank');

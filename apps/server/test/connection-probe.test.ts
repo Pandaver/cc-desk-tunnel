@@ -19,9 +19,9 @@ const origin = 'http://localhost';
 class Client {
   socket: WebSocket;
   messages: ServerMessage[] = [];
-  constructor(url: string, cookie?: string) {
+  constructor(url: string, cookie?: string, prefix = '') {
     this.socket = new WebSocket(
-      url.replace('http', 'ws') + (cookie ? '/web/ws' : '/ws'),
+      url.replace('http', 'ws') + (cookie ? `${prefix}/web/ws` : '/ws'),
       cookie ? { origin, headers: { Host: 'localhost', Cookie: cookie } } : {},
     );
     this.socket.on('message', (raw) =>
@@ -69,13 +69,14 @@ async function fixture(t: TestContext, web = false) {
   });
   const url = await server.listen(0);
   const clients: Client[] = [];
+  let prefix = '';
   t.after(async () => {
     for (const client of clients) client.socket.terminate();
     await server.close();
     rmSync(directory, { recursive: true, force: true });
   });
   async function connect(cookie?: string, authenticate = true) {
-    const client = new Client(url, cookie);
+    const client = new Client(url, cookie, prefix);
     clients.push(client);
     await once(client.socket, 'open');
     if (!authenticate) return { client, ready: undefined };
@@ -99,9 +100,10 @@ async function fixture(t: TestContext, web = false) {
     );
     assert.ok(state.type === 'web.state' && state.pairing);
     const code = state.pairing.code;
+    prefix = `/${state.path}`;
     return new Promise<{ cookie: string; grantId: string }>((resolve, reject) => {
       const request = httpRequest(
-        url + '/web/pair',
+        url + prefix + '/web/pair',
         {
           method: 'POST',
           headers: { Host: 'localhost', Origin: origin, 'Content-Type': 'application/json' },

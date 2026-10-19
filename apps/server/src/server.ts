@@ -276,7 +276,7 @@ export function createProxyServer(options: ServerOptions) {
   const server = options.tls ? createHttpsServer(options.tls, handler) : createServer(handler);
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
   server.on('upgrade', (request, socket, head) => {
-    if (web && request.url === '/web/ws') {
+    if (web?.matches(request, '/web/ws')) {
       const current = web;
       const grant = current.trusted(request, true) ? current.authenticate(request) : undefined;
       if (closing || !grant) {
@@ -289,7 +289,7 @@ export function createProxyServer(options: ServerOptions) {
         return;
       }
       wss.handleUpgrade(request, socket, head, (ws) => {
-        if (web !== current || !current.attach(grant, ws)) {
+        if (web !== current || !current.matches(request, '/web/ws') || !current.attach(grant, ws)) {
           throttle.leave(address);
           const active = current.active(grant.id);
           ws.close(
@@ -306,11 +306,11 @@ export function createProxyServer(options: ServerOptions) {
       });
       return;
     }
-    if (
-      closing ||
-      request.url !== '/ws' ||
-      (request.headers.origin && !origins.includes(request.headers.origin))
-    ) {
+    if (request.url !== '/ws') {
+      socket.end('HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    if (closing || (request.headers.origin && !origins.includes(request.headers.origin))) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       return;
     }
@@ -1011,14 +1011,18 @@ export function createProxyServer(options: ServerOptions) {
                 { ...options, tls: !!options.tls },
                 undefined,
                 webChanged,
+                command,
               );
-            } catch {
+            } catch (error) {
+              if (error instanceof DomainError) throw error;
               throw new DomainError(
                 'web_start_failed',
                 'Web 访问启动失败，请检查服务端的入口配置和浏览器授权文件。',
               );
             }
             webChanged();
+          } else if (command.enabled && web) {
+            web.configure(command);
           } else if (!command.enabled && web) {
             const previous = web;
             web = undefined;
@@ -1220,7 +1224,7 @@ export function createProxyServer(options: ServerOptions) {
       return false;
     }
     const auth = webAuthSchema.safeParse(value);
-    const valid = web?.active(peer.browser!.id);
+    const valid = web?.active(peer.browser!.id, peer.socket);
     if (!auth.success || !valid || auth.data.protocolVersion !== PROTOCOL_VERSION) {
       const mismatch = auth.success && valid && auth.data.protocolVersion !== PROTOCOL_VERSION;
       send(peer, {
@@ -1295,7 +1299,7 @@ export function createProxyServer(options: ServerOptions) {
       protocolVersion: PROTOCOL_VERSION,
       connectionId: peer.id,
       ...(web ? { web: true } : {}),
-      ...(options.web ? { webControl: true, webPairing: true } : {}),
+      ...(options.web ? { webControl: true, webPairing: true, webSettings: true } : {}),
       diagnostics: true,
       adapter,
       model: options.claude?.model,
@@ -1616,7 +1620,7 @@ export function createProxyServer(options: ServerOptions) {
           socket.close(1012, 'Web access stopped');
           return;
         }
-        if (!web?.active(browser.id)) {
+        if (!web?.active(browser.id, socket)) {
           socket.close(4001, 'Browser session revoked');
           return;
         }

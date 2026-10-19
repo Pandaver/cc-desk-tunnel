@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { WebSocket, WebSocketServer } from 'ws';
 import { PROTOCOL_VERSION } from '@cc-desk-tunnel/protocol';
-import { externalLink, webOrigin } from '../electron/external-links.cjs';
+import { externalLink, webEntry, webOrigin } from '../electron/external-links.cjs';
 import { openProxyBridge } from '../electron/proxy-bridge.mjs';
 
 test('official links retain their existing hosts, subdomains, paths and queries', () => {
@@ -55,16 +55,79 @@ test('only exact HTTPS or loopback HTTP origins can authorize browser links', ()
     assert.equal(webOrigin(origin), null);
 });
 
-test('browser links stay at the authenticated origin root with only an optional pairing fragment', () => {
+test('service entries require matching canonical origin, path and URL, except for legacy origins', () => {
+  const origin = 'https://service.example:8787';
+  assert.equal(webEntry({ origin }), `${origin}/`);
+  assert.equal(webEntry({ origin }, false), null);
+  for (const path of ['', 'a', 'abcde', 'a-longer-path', 'a'.repeat(64)]) {
+    const url = `${origin}/${path ? `${path}/` : ''}`;
+    assert.equal(webEntry({ origin, path, url }), url);
+    assert.equal(webEntry({ origin, path, url }, false), url);
+  }
+  for (const state of [
+    null,
+    {},
+    { origin: `${origin}/` },
+    { origin, path: '' },
+    { origin, url: `${origin}/` },
+    { origin, path: undefined },
+    { origin, url: undefined },
+    { origin, path: '', url: `${origin}/other/` },
+    { origin, path: 'one', url: `${origin}/two/` },
+    { origin, path: 'one', url: 'https://other.example:8787/one/' },
+    ...[
+      'one',
+      'one/?',
+      'one/#',
+      'one/#pair=0123456789abcdef01234567',
+      './one/',
+      '%6fne/',
+      'one/../one/',
+      'one//',
+    ].map((path) => ({ origin, path: 'one', url: `${origin}/${path}` })),
+    ...[
+      '/one',
+      'one/',
+      '.',
+      '..',
+      '%2e',
+      '%252e',
+      'one/two',
+      'ONE',
+      '-one',
+      'one-',
+      'a'.repeat(65),
+      'ws',
+      'health',
+      'client',
+      'assets',
+    ].map((path) => ({ origin, path, url: `${origin}/${path}/` })),
+    ...[
+      'https://user:pass@service.example:8787/one/',
+      'https://SERVICE.example:8787/one/',
+      'https://service.example:8787/one/?next=other',
+    ].map((url) => ({ origin, path: 'one', url })),
+  ])
+    assert.equal(webEntry(state), null, JSON.stringify(state));
+});
+
+test('browser links match the complete authenticated entry with only an optional pairing fragment', () => {
   const origin = 'https://service.example:8787';
   const code = '0123456789abcdef01234567';
-  for (const url of [`${origin}/`, `${origin}/#pair=${code}`]) {
-    assert.equal(externalLink(url, origin), url);
-    assert.throws(() => externalLink(url, null), /Unexpected link/);
+  for (const entry of [`${origin}/`, `${origin}/a/`, `${origin}/abcde/`]) {
+    for (const url of [entry, `${entry}#pair=${code}`]) {
+      assert.equal(externalLink(url, entry), url);
+      assert.throws(() => externalLink(url, null), /Unexpected link/);
+      assert.throws(() => externalLink(url, `${origin}/different/`), /Unexpected link/);
+    }
   }
   assert.equal(
-    externalLink('http://127.0.0.1:8787/', 'http://127.0.0.1:8787'),
+    externalLink('http://127.0.0.1:8787/', 'http://127.0.0.1:8787/'),
     'http://127.0.0.1:8787/',
+  );
+  assert.equal(
+    externalLink('http://[::1]:8787/one/', 'http://[::1]:8787/one/'),
+    'http://[::1]:8787/one/',
   );
   for (const url of [
     'https://other.example:8787/',
@@ -79,12 +142,41 @@ test('browser links stay at the authenticated origin root with only an optional 
     `${origin}/#pair=short`,
     `${origin}/#pair=${code}&redirect=evil`,
     `${origin}/#pair=${code}00`,
+    `${origin}/#pair=${code.toUpperCase()}`,
+    `${origin}/./`,
+    `${origin}/one/../`,
+    `${origin}/%2e/`,
+    `${origin}/%252e/`,
+    `${origin}/%2f`,
+    `${origin}/\\`,
+    ` ${origin}/`,
+    `${origin}/\n`,
   ])
-    assert.throws(() => externalLink(url, origin), /Unexpected link/);
+    assert.throws(() => externalLink(url, `${origin}/`), /Unexpected link/);
+  for (const url of [
+    `${origin}/`,
+    `${origin}/one`,
+    `${origin}/one/child/`,
+    `${origin}/one/../one/`,
+    `${origin}/%6fne/`,
+    `${origin}/one/?`,
+    `${origin}/one/#`,
+  ])
+    assert.throws(() => externalLink(url, `${origin}/one/`), /Unexpected link/);
+  for (const entry of [
+    origin,
+    `${origin}/one`,
+    `${origin}/one/?`,
+    `${origin}/one/#`,
+    `${origin}/%6fne/`,
+    `${origin}/../one/`,
+    'http://service.example/one/',
+  ])
+    assert.throws(() => externalLink(entry, entry), /Unexpected link/);
 });
 
 test(
-  'a TLS bridge remembers only its ready service origin and clears it on disable, error and close',
+  'a TLS bridge authorizes the current authenticated entry and invalidates old links on state changes',
   { skip: process.platform !== 'win32', timeout: 15000 },
   async (t) => {
     // A disposable certificate in memory, never installed in the system trust store.
@@ -116,7 +208,7 @@ test(
     };
     const bridge = await openProxyBridge(config, {});
     bridges.push(bridge);
-    assert.equal(bridge.webOrigin(), null);
+    assert.equal(bridge.webUrl(), null);
     const connected = once(wss, 'connection');
     const local = new WebSocket(bridge.url);
     await once(local, 'open');
@@ -142,55 +234,111 @@ test(
       sessions: [],
       web,
     });
+    const pathState = (path = 'abcde', origin = 'https://service.example') => ({
+      ...state(origin),
+      path,
+      url: `${origin}/${path ? `${path}/` : ''}`,
+    });
+    const allowed = (url) => assert.equal(externalLink(url, bridge.webUrl()), url);
+    const denied = (url) =>
+      assert.throws(() => externalLink(url, bridge.webUrl()), /Unexpected link/);
     await exchange(state());
-    assert.equal(bridge.webOrigin(), null);
+    assert.equal(bridge.webUrl(), null);
+    denied('https://service.example/');
     const auth = once(remote, 'message');
     local.send(JSON.stringify({ type: 'auth', token: 'fixture-service-token' }));
     assert.equal(JSON.parse(String((await auth)[0])).type, 'auth');
     await exchange(ready(false));
     await exchange(state());
-    assert.equal(bridge.webOrigin(), null);
+    assert.equal(bridge.webUrl(), null);
     await exchange({ ...ready(false), webControl: true });
-    assert.equal(bridge.webOrigin(), null);
+    assert.equal(bridge.webUrl(), null);
     await exchange({
       type: 'web.changed',
       enabled: true,
       origin: 'https://service.example',
       grants: [],
     });
-    assert.equal(bridge.webOrigin(), 'https://service.example');
+    assert.equal(bridge.webUrl(), 'https://service.example/');
+    allowed('https://service.example/');
     await exchange({ type: 'web.changed', enabled: false, grants: [] });
-    assert.equal(bridge.webOrigin(), null);
-    await exchange(ready(true));
-    await exchange(state());
-    assert.equal(bridge.webOrigin(), 'https://service.example');
+    assert.equal(bridge.webUrl(), null);
+    denied('https://service.example/');
+    await exchange({ ...ready(true), webSettings: true });
+    await exchange(pathState());
+    assert.equal(bridge.webUrl(), 'https://service.example/abcde/');
+    allowed('https://service.example/abcde/');
+    allowed('https://service.example/abcde/#pair=0123456789abcdef01234567');
+    denied('https://service.example/');
+    denied('https://service.example/another/');
+    denied('https://service.example/abcde/child/');
     for (const code of ['terminal_inactive', 'invalid_command']) {
       await exchange({ type: 'connection.error', code, message: 'non-fatal fixture' });
-      assert.equal(bridge.webOrigin(), 'https://service.example');
+      allowed('https://service.example/abcde/');
     }
     const rendererMessage = once(remote, 'message');
-    local.send(JSON.stringify(state('https://renderer.example')));
+    local.send(JSON.stringify(pathState('injected', 'https://renderer.example')));
     await rendererMessage;
-    assert.equal(bridge.webOrigin(), 'https://service.example');
+    allowed('https://service.example/abcde/');
+    denied('https://renderer.example/injected/');
+    await exchange({ ...pathState('updated'), type: 'web.changed' });
+    allowed('https://service.example/updated/');
+    denied('https://service.example/abcde/');
+    await exchange(pathState('', 'https://web.example:8787'));
+    allowed('https://web.example:8787/');
+    denied('https://service.example/updated/');
+    for (const invalid of [
+      state(),
+      { ...pathState('one'), url: 'https://service.example/two/' },
+      { ...pathState('one'), url: 'https://other.example/one/' },
+      { ...state(), url: 'https://service.example/' },
+      { ...state(), path: '' },
+      { ...pathState('one'), url: 'https://service.example/one/../one/' },
+      { ...pathState('one'), url: 'https://service.example/one/?redirect=other' },
+      { ...pathState('one'), url: 'https://user:pass@service.example/one/' },
+      { ...pathState('one'), url: 'https://service.example/%6fne/' },
+    ]) {
+      await exchange(pathState());
+      await exchange(invalid);
+      assert.equal(bridge.webUrl(), null);
+      denied('https://service.example/');
+      denied('https://service.example/abcde/');
+    }
     await exchange(state('https://service.example/path'));
-    assert.equal(bridge.webOrigin(), null);
+    assert.equal(bridge.webUrl(), null);
     await exchange(state());
     await exchange(state(undefined, false));
-    assert.equal(bridge.webOrigin(), null);
-    await exchange(state());
-    await exchange({ type: 'connection.error', code: 'client_failed', message: 'fixture' });
-    assert.equal(bridge.webOrigin(), null);
-    await exchange(state());
-    assert.equal(bridge.webOrigin(), null);
+    assert.equal(bridge.webUrl(), null);
+    for (const code of [
+      'unauthorized',
+      'version_mismatch',
+      'tunnel_failed',
+      'ssh_failed',
+      'connection_lost',
+      'client_failed',
+    ]) {
+      await exchange(ready(true));
+      await exchange(pathState());
+      await exchange({ type: 'connection.error', code, message: 'fixture' });
+      assert.equal(bridge.webUrl(), null);
+      denied('https://service.example/abcde/');
+      await exchange(pathState());
+      assert.equal(bridge.webUrl(), null);
+    }
     await exchange(ready(true));
     await exchange(state('http://127.0.0.1:8787'));
-    assert.equal(bridge.webOrigin(), 'http://127.0.0.1:8787');
+    assert.equal(bridge.webUrl(), 'http://127.0.0.1:8787/');
+    allowed('http://127.0.0.1:8787/');
+    await exchange(ready(true));
+    denied('http://127.0.0.1:8787/');
+    await exchange(pathState());
     const closed = once(local, 'close');
     remote.close();
     await closed;
-    assert.equal(bridge.webOrigin(), null);
+    assert.equal(bridge.webUrl(), null);
+    denied('https://service.example/abcde/');
     const replacement = await openProxyBridge(config, {});
     bridges.push(replacement);
-    assert.equal(replacement.webOrigin(), null);
+    assert.equal(replacement.webUrl(), null);
   },
 );

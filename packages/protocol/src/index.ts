@@ -458,9 +458,35 @@ export const serviceUpdateSchema = z.object({
 export type ServiceUpdate = z.infer<typeof serviceUpdateSchema>;
 const request = { requestId: id };
 // Browser access is an opt-in extension of the existing control protocol, not an execution channel.
+export const webDomainSchema = z
+  .string()
+  .trim()
+  .max(253)
+  .toLowerCase()
+  .refine(
+    (value) =>
+      value === '' ||
+      (value.includes('.') &&
+        /^[a-z]/.test(value.split('.').at(-1)!) &&
+        value.split('.').every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))),
+    '请仅填写域名，不含协议、端口或路径。',
+  );
+export const webPathSchema = z
+  .string()
+  .regex(
+    /^(?:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)?$/,
+    '访问路径可留空；填写时须为 1–64 位小写字母、数字或中划线，首尾为字母或数字。',
+  )
+  .refine(
+    (value) => !['ws', 'health', 'client', 'assets'].includes(value),
+    '此路径由服务端保留，请换一个路径。',
+  );
 export const webAccessStateSchema = z.object({
   enabled: z.boolean(),
   origin: z.url().optional(),
+  domain: webDomainSchema.optional(),
+  path: webPathSchema.optional(),
+  url: z.url().optional(),
   pairing: z
     .object({
       code: z.string(),
@@ -479,7 +505,20 @@ export const webStateSchema = webAccessStateSchema.extend({
 export type WebState = z.infer<typeof webStateSchema>;
 export const commandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('web.status'), ...request, watch: z.boolean().optional() }).strict(),
-  z.object({ type: z.literal('web.configure'), ...request, enabled: z.boolean() }).strict(),
+  z
+    .object({
+      type: z.literal('web.configure'),
+      ...request,
+      enabled: z.boolean(),
+      domain: webDomainSchema.optional(),
+      path: webPathSchema.optional(),
+      regeneratePath: z.boolean().optional(),
+    })
+    .strict()
+    .refine(
+      (value) => !(value.regeneratePath && value.path !== undefined),
+      '请选择填写路径或重新生成路径。',
+    ),
   z.object({ type: z.literal('web.pair'), ...request, ifAbsent: z.boolean().optional() }).strict(),
   z.object({ type: z.literal('web.revoke'), ...request, grantId: id }).strict(),
   z
@@ -718,6 +757,7 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
     web: z.boolean().optional(),
     webControl: z.boolean().optional(),
     webPairing: z.boolean().optional(),
+    webSettings: z.literal(true).optional(),
     diagnostics: z.literal(true).optional(),
     adapter: z.enum(['simulation', 'claude-code']),
     model: z.string().optional(),

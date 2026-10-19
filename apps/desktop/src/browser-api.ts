@@ -1,5 +1,11 @@
 import { deviceSchema } from '@cc-desk-tunnel/protocol';
 
+// Relative to the served entry directory, including a configured suffix. Query parameters and the
+// one-use pairing fragment never enter API requests or the WebSocket URL.
+export function webEndpoint(endpoint: 'session' | 'pair' | 'logout' | 'ws'): URL {
+  return new URL(`web/${endpoint}`, window.location.href);
+}
+
 export type WebSession = {
   device: { id: string; name: string };
   expiresAt: null;
@@ -65,7 +71,7 @@ function session(value: unknown): WebSession {
 
 export async function getWebSession(signal?: AbortSignal): Promise<WebSession | null> {
   try {
-    return session(await access('/web/session', undefined, signal));
+    return session(await access(webEndpoint('session').pathname, undefined, signal));
   } catch (error) {
     if (error instanceof WebAccessError && error.status === 401) return null;
     throw error;
@@ -73,12 +79,12 @@ export async function getWebSession(signal?: AbortSignal): Promise<WebSession | 
 }
 
 export async function pairWeb(code: string, signal?: AbortSignal): Promise<WebSession> {
-  return session(await access('/web/pair', { code: code.trim() }, signal));
+  return session(await access(webEndpoint('pair').pathname, { code: code.trim() }, signal));
 }
 
 export async function logoutWeb(signal?: AbortSignal): Promise<void> {
   try {
-    await access('/web/logout', {}, signal);
+    await access(webEndpoint('logout').pathname, {}, signal);
   } catch (error) {
     if (!(error instanceof WebAccessError && error.status === 401)) throw error;
   }

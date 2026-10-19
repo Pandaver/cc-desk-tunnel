@@ -204,7 +204,7 @@ handle('clipboard:write', (_event, text) => {
 // Official pages and the current service's validated browser entry open in the user's browser. A closed
 // connection's remembered installer bridge does not authorize links.
 handle('external:open', async (event, target) => {
-  await shell.openExternal(externalLink(target, bridge?.webOrigin()));
+  await shell.openExternal(externalLink(target, bridge?.webUrl()));
 });
 // Sessions without a project still need a working directory on this computer; they get one under Documents, grouped by
 // day, unless the user chose another folder. Folders used before are remembered: their sessions are still

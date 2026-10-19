@@ -36,11 +36,11 @@ async function fixture(
   const codes: string[] = [];
   const sockets: WebSocketRoute[] = [];
   const login = { device, expiresAt: null };
-  await page.route('**/web/**', async (route) => {
+  await page.route('**/browser-entry/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
-    if (path === '/web/session')
+    if (path === '/browser-entry/web/session')
       return route.fulfill({ status: paired ? 200 : 401, json: paired ? login : {} });
-    if (path === '/web/pair') {
+    if (path === '/browser-entry/web/pair') {
       expect(page.url()).not.toContain('pair=');
       codes.push(route.request().postDataJSON().code);
       if (options.pairFails)
@@ -51,14 +51,18 @@ async function fixture(
       paired = true;
       return route.fulfill({ json: login });
     }
-    if (path === '/web/logout') {
+    if (path === '/browser-entry/web/logout') {
       if (logoutFails)
         return route.fulfill({ status: 503, json: { message: '退出失败，请重试。' } });
       paired = false;
       return route.fulfill({ status: 204 });
     }
     const file =
-      path === '/web/' ? 'index.html' : path.startsWith('/web/assets/') ? path.slice(5) : null;
+      path === '/browser-entry/'
+        ? 'index.html'
+        : path.startsWith('/browser-entry/assets/')
+          ? path.slice('/browser-entry/'.length)
+          : null;
     if (!file || file.includes('..')) return route.abort();
     const mime: Record<string, string> = {
       '.html': 'text/html',
@@ -72,7 +76,7 @@ async function fixture(
       contentType: mime[extname(file)] ?? 'application/octet-stream',
     });
   });
-  await page.routeWebSocket('**/web/ws', (socket) => {
+  await page.routeWebSocket('**/browser-entry/web/ws', (socket) => {
     sockets.push(socket);
     socket.onMessage((raw) => {
       const command = JSON.parse(String(raw));
@@ -126,7 +130,7 @@ test('production pairing consumes the code, reuses the shared workbench and offe
   page,
 }) => {
   const state = await fixture(page, { paired: false });
-  await page.goto('/web/#pair=112233445566778899aabbcc');
+  await page.goto('/browser-entry/#pair=112233445566778899aabbcc');
   await expect(page.locator('.connection-status')).toContainText('已连接');
   expect(state.codes).toEqual(['112233445566778899aabbcc']);
   expect(state.requests[0]).toEqual({ type: 'web.auth', protocolVersion: PROTOCOL_VERSION });
@@ -182,7 +186,7 @@ test('browser tabs keep independent drafts and never start locally saved schedul
       }),
     ),
   );
-  await page.goto('/web/');
+  await page.goto('/browser-entry/');
   await select(page);
   await page.getByRole('textbox', { name: '消息' }).fill('第一个标签页的草稿');
   await expect
@@ -194,7 +198,7 @@ test('browser tabs keep independent drafts and never start locally saved schedul
     .toContain('第一个标签页');
   const other = await context.newPage();
   const second = await fixture(other);
-  await other.goto('/web/');
+  await other.goto('/browser-entry/');
   await select(other);
   await expect(other.getByRole('textbox', { name: '消息' })).toHaveValue('');
   await other.getByRole('textbox', { name: '消息' }).fill('第二个标签页');
@@ -212,7 +216,7 @@ test('offline and legacy sessions stay read-only and do not trigger native statu
   page,
 }) => {
   const state = await fixture(page);
-  await page.goto('/web/');
+  await page.goto('/browser-entry/');
   for (const title of ['离线会话', '旧版未归属会话']) {
     await select(page, title);
     await expect(page.locator('.elsewhere-bar')).toContainText('当前只能查看');
@@ -228,7 +232,7 @@ test('revocation returns to pairing, while logout failure preserves the open wor
   page,
 }) => {
   const state = await fixture(page);
-  await page.goto('/web/');
+  await page.goto('/browser-entry/');
   await select(page);
   state.failLogout();
   await page.getByRole('button', { name: '设置与账号' }).click();
@@ -246,7 +250,7 @@ test('initial connection has no retry action and narrow login does not overflow'
 }) => {
   await fixture(page, { hold: true });
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto('/web/');
+  await page.goto('/browser-entry/');
   await expect(page.getByRole('heading', { name: '正在连接工作台…' })).toBeVisible();
   await expect(page.getByRole('button', { name: '重新连接' })).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -256,14 +260,14 @@ test('invalid pairing remains editable and a successful logout clears the worksp
   page,
 }) => {
   await fixture(page, { paired: false, pairFails: true });
-  await page.goto('/web/');
+  await page.goto('/browser-entry/');
   await page.getByLabel('配对码', { exact: true }).fill('expired');
   await page.getByRole('button', { name: '配对并进入' }).click();
   await expect(page.getByRole('alert')).toContainText('配对码已失效');
   await expect(page.getByLabel('配对码', { exact: true })).toBeEnabled();
   await page.unrouteAll();
   await fixture(page);
-  await page.goto('/web/');
+  await page.goto('/browser-entry/');
   await select(page);
   await page.getByRole('button', { name: '设置与账号' }).click();
   await page.getByRole('menuitem', { name: '退出登录' }).click();
@@ -279,6 +283,7 @@ async function desktopFixture(
     failStatus?: boolean;
     webControl?: boolean;
     webPairing?: boolean;
+    webSettings?: boolean;
     clockSkew?: boolean;
     holdPairing?: boolean;
     failPairing?: boolean;
@@ -342,6 +347,8 @@ async function desktopFixture(
   };
   let activePairing: typeof pairing | undefined = options.existingPairing ? pairing : undefined;
   let enabled = webEnabled;
+  let domain = '';
+  let path = 'fixture-entry';
   let grants = [
     {
       id: '00000000-0000-4000-8000-000000000030',
@@ -364,7 +371,14 @@ async function desktopFixture(
   let releaseConfigure = () => {};
   const current = () => ({
     enabled,
-    origin: 'https://web.example.test',
+    origin: `https://${domain || 'web.example.test'}:8787`,
+    ...(options.webSettings === false
+      ? {}
+      : {
+          domain,
+          path,
+          url: `https://${domain || 'web.example.test'}:8787/${path ? `${path}/` : ''}`,
+        }),
     grants,
     ...(activePairing ? { pairing: activePairing } : {}),
   });
@@ -388,6 +402,7 @@ async function desktopFixture(
           sessions: [],
           ...(enabled ? { web: true } : {}),
           ...(webControl ? { webControl: true } : {}),
+          ...((options.webSettings ?? webControl) ? { webSettings: true } : {}),
           ...((options.webPairing ?? webControl) ? { webPairing: true } : {}),
         });
         return;
@@ -421,6 +436,9 @@ async function desktopFixture(
           activePairing = pairing;
         if (message.type === 'web.configure') {
           enabled = message.enabled;
+          if (message.domain !== undefined) domain = message.domain;
+          if (message.path !== undefined) path = message.path;
+          if (message.regeneratePath) path = '00112233445566778899aabbccddeeff';
           if (!enabled) activePairing = undefined;
         }
         if (message.type.startsWith('web.'))
@@ -450,6 +468,11 @@ async function desktopFixture(
     },
     failNextConfiguration: () => {
       configureFailures = 1;
+    },
+    externalAddress: (settings: { domain?: string; path?: string }) => {
+      if (settings.domain !== undefined) domain = settings.domain;
+      if (settings.path !== undefined) path = settings.path;
+      publish();
     },
     consumePairing: () => {
       activePairing = undefined;
@@ -513,7 +536,7 @@ async function desktopFixture(
 }
 
 async function generalSettings(page: Page) {
-  await page.goto('/web/');
+  await page.goto('/browser-entry/');
   await expect(page.locator('.connection-status')).toContainText('已连接');
   await page.getByRole('button', { name: '设置与账号' }).click();
   await page.getByRole('menuitem', { name: '设置', exact: true }).click();
@@ -556,10 +579,10 @@ test('desktop browser management masks, copies, opens and confirms revocation wi
   await panel.getByRole('button', { name: '打开浏览器', exact: true }).click();
   expect(await page.evaluate(() => (window as unknown as { copied: string[] }).copied)).toEqual([
     state.pairing.code,
-    'https://web.example.test/',
+    'https://web.example.test:8787/fixture-entry/',
   ]);
   expect(await page.evaluate(() => (window as unknown as { opened: string[] }).opened)).toEqual([
-    `https://web.example.test/#pair=${state.pairing.code}`,
+    `https://web.example.test:8787/fixture-entry/#pair=${state.pairing.code}`,
   ]);
   await panel.locator('summary').click();
   await panel.getByRole('button', { name: '撤销 手机浏览器' }).click();
@@ -954,4 +977,354 @@ test('entering settings during a list refresh prepares a consumed code after the
   state.releaseStatus();
   await expect(panel.getByLabel('配对码已隐藏')).toBeVisible();
   expect(state.commands.filter((item) => item.type === 'web.pair')).toHaveLength(2);
+});
+
+test('desktop edits hostname and root suffix immediately and uses the effective URL for copy and open', async ({
+  page,
+}) => {
+  const state = await desktopFixture(page, true, { existingPairing: true });
+  await generalSettings(page);
+  const panel = page.locator('.server-web-access');
+  const domain = panel.getByRole('textbox', { name: '访问域名', exact: true });
+  const path = panel.getByRole('textbox', { name: '服务端访问路径', exact: true });
+  const address = panel.getByLabel('服务端访问地址', { exact: true });
+  await expect(panel.getByText('留空使用部署地址；填写后仅允许指定域名访问。')).toBeVisible();
+  await expect(panel.getByText('留空使用根路径。', { exact: true })).toBeVisible();
+  await expect(domain).toHaveValue('');
+  await expect(path).toHaveValue('fixture-entry');
+  await expect(address).toHaveText('https://web.example.test:8787/fixtu...');
+  await expect(address).not.toHaveAttribute('title');
+  await panel.scrollIntoViewIfNeeded();
+  expect(await panel.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: test.info().outputPath('web-address-settings-desktop.png') });
+  await page.setViewportSize({ width: 750, height: 900 });
+  await panel.scrollIntoViewIfNeeded();
+  expect(await domain.evaluate((element) => element.getBoundingClientRect().width)).toBeGreaterThan(
+    200,
+  );
+  expect(
+    await panel.locator('.server-web-address-actions').evaluate((element) => {
+      const centers = [...element.children].map((child) => {
+        const rect = child.getBoundingClientRect();
+        return rect.y + rect.height / 2;
+      });
+      return Math.max(...centers) - Math.min(...centers);
+    }),
+  ).toBeLessThan(1);
+  expect(await panel.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: test.info().outputPath('web-address-settings-narrow.png') });
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await domain.fill('work.example.test');
+  await domain.blur();
+  await expect
+    .poll(() => state.commands.filter((item) => item.type === 'web.configure'))
+    .toEqual([expect.objectContaining({ enabled: true, domain: 'work.example.test' })]);
+  await expect(domain).toBeEnabled();
+  await expect(address).toHaveText('https://work.example.test:8787/fixtu...');
+  await panel.getByRole('button', { name: '复制访问地址', exact: true }).click();
+  await panel.getByRole('button', { name: '打开浏览器', exact: true }).click();
+  expect(await page.evaluate(() => (window as unknown as { copied: string[] }).copied)).toEqual([
+    'https://work.example.test:8787/fixture-entry/',
+  ]);
+  expect(await page.evaluate(() => (window as unknown as { opened: string[] }).opened)).toEqual([
+    `https://work.example.test:8787/fixture-entry/#pair=${state.pairing.code}`,
+  ]);
+  await path.fill('my-workbench');
+  await path.blur();
+  await expect
+    .poll(() => state.commands.filter((item) => item.type === 'web.configure'))
+    .toHaveLength(2);
+  expect(state.commands.filter((item) => item.type === 'web.configure')[1]).toMatchObject({
+    enabled: true,
+    path: 'my-workbench',
+  });
+  await expect(address).toHaveText('https://work.example.test:8787/my-wo...');
+  await panel.getByRole('button', { name: '复制访问地址', exact: true }).click();
+  await panel.getByRole('button', { name: '打开浏览器', exact: true }).click();
+  expect(await page.evaluate(() => (window as unknown as { copied: string[] }).copied)).toEqual([
+    'https://work.example.test:8787/fixture-entry/',
+    'https://work.example.test:8787/my-workbench/',
+  ]);
+  expect(await page.evaluate(() => (window as unknown as { opened: string[] }).opened)).toEqual([
+    `https://work.example.test:8787/fixture-entry/#pair=${state.pairing.code}`,
+    `https://work.example.test:8787/my-workbench/#pair=${state.pairing.code}`,
+  ]);
+  await domain.fill('');
+  await domain.blur();
+  await expect
+    .poll(() => state.commands.filter((item) => item.type === 'web.configure'))
+    .toHaveLength(3);
+  expect(state.commands.filter((item) => item.type === 'web.configure')[2]).toMatchObject({
+    domain: '',
+  });
+  await expect(address).toHaveText('https://web.example.test:8787/my-wo...');
+  await panel.getByRole('button', { name: '复制访问地址', exact: true }).click();
+  await panel.getByRole('button', { name: '打开浏览器', exact: true }).click();
+  expect(await page.evaluate(() => (window as unknown as { copied: string[] }).copied.at(-1))).toBe(
+    'https://web.example.test:8787/my-workbench/',
+  );
+  expect(await page.evaluate(() => (window as unknown as { opened: string[] }).opened.at(-1))).toBe(
+    `https://web.example.test:8787/my-workbench/#pair=${state.pairing.code}`,
+  );
+});
+
+test('access address preserves up to five path characters and only shortens the display', async ({
+  page,
+}) => {
+  const state = await desktopFixture(page, true, { existingPairing: true });
+  await generalSettings(page);
+  const panel = page.locator('.server-web-access');
+  const path = panel.getByRole('textbox', { name: '服务端访问路径', exact: true });
+  const address = panel.getByLabel('服务端访问地址', { exact: true });
+  await expect(path).toHaveValue('fixture-entry');
+  const cases = [
+    { value: '', display: '/' },
+    { value: 'a', display: '/a/' },
+    { value: 'abcde', display: '/abcde/' },
+    { value: 'abcdef', display: '/abcde...' },
+    { value: `abcdef${'z'.repeat(58)}`, display: '/abcde...' },
+  ];
+  for (const { value, display } of cases) {
+    await test.step(`path length ${value.length}`, async () => {
+      await path.fill(value);
+      await path.blur();
+      await expect
+        .poll(() => state.commands.filter((item) => item.type === 'web.configure').at(-1))
+        .toMatchObject({ enabled: true, path: value });
+      await expect(path).toBeEnabled();
+      await expect(path).toHaveValue(value);
+      await expect(panel.getByRole('alert')).toHaveCount(0);
+      await expect(address).toHaveText(`https://web.example.test:8787${display}`);
+      await expect(address).not.toHaveAttribute('title');
+      await panel.getByRole('button', { name: '复制访问地址', exact: true }).click();
+      await panel.getByRole('button', { name: '打开浏览器', exact: true }).click();
+      const complete = `https://web.example.test:8787/${value ? `${value}/` : ''}`;
+      expect(
+        await page.evaluate(() => (window as unknown as { copied: string[] }).copied.at(-1)),
+      ).toBe(complete);
+      expect(
+        await page.evaluate(() => (window as unknown as { opened: string[] }).opened.at(-1)),
+      ).toBe(`${complete}#pair=${state.pairing.code}`);
+    });
+  }
+  const domain = panel.getByRole('textbox', { name: '访问域名', exact: true });
+  await domain.fill('changed.example.test');
+  await domain.blur();
+  await expect(address).toHaveText('https://changed.example.test:8787/abcde...');
+  await expect(path).toHaveValue(cases.at(-1)!.value);
+  await panel.getByRole('button', { name: '复制访问地址', exact: true }).click();
+  await panel.getByRole('button', { name: '打开浏览器', exact: true }).click();
+  const complete = `https://changed.example.test:8787/${cases.at(-1)!.value}/`;
+  expect(await page.evaluate(() => (window as unknown as { copied: string[] }).copied.at(-1))).toBe(
+    complete,
+  );
+  expect(await page.evaluate(() => (window as unknown as { opened: string[] }).opened.at(-1))).toBe(
+    `${complete}#pair=${state.pairing.code}`,
+  );
+});
+
+test('clearing the access path uses the root URL and regeneration restores a shortened address', async ({
+  page,
+}) => {
+  const state = await desktopFixture(page, true, { existingPairing: true });
+  await generalSettings(page);
+  const panel = page.locator('.server-web-access');
+  const domain = panel.getByRole('textbox', { name: '访问域名', exact: true });
+  const path = panel.getByRole('textbox', { name: '服务端访问路径', exact: true });
+  const address = panel.getByLabel('服务端访问地址', { exact: true });
+  await expect(path).toHaveValue('fixture-entry');
+  await path.fill('');
+  await path.blur();
+  await expect
+    .poll(() => state.commands.filter((item) => item.type === 'web.configure'))
+    .toEqual([expect.objectContaining({ enabled: true, path: '' })]);
+  await expect(path).toBeEnabled();
+  await expect(path).toHaveValue('');
+  await expect(panel.getByRole('alert')).toHaveCount(0);
+  await expect(address).toHaveText('https://web.example.test:8787/');
+  await panel.getByRole('button', { name: '复制访问地址', exact: true }).click();
+  await panel.getByRole('button', { name: '打开浏览器', exact: true }).click();
+  expect(await page.evaluate(() => (window as unknown as { copied: string[] }).copied)).toEqual([
+    'https://web.example.test:8787/',
+  ]);
+  expect(await page.evaluate(() => (window as unknown as { opened: string[] }).opened)).toEqual([
+    `https://web.example.test:8787/#pair=${state.pairing.code}`,
+  ]);
+
+  await domain.fill('root.example.test');
+  await domain.blur();
+  await expect(address).toHaveText('https://root.example.test:8787/');
+  await expect(path).toHaveValue('');
+  await panel.getByRole('button', { name: '复制访问地址', exact: true }).click();
+  await panel.getByRole('button', { name: '打开浏览器', exact: true }).click();
+  expect(await page.evaluate(() => (window as unknown as { copied: string[] }).copied.at(-1))).toBe(
+    'https://root.example.test:8787/',
+  );
+  expect(await page.evaluate(() => (window as unknown as { opened: string[] }).opened.at(-1))).toBe(
+    `https://root.example.test:8787/#pair=${state.pairing.code}`,
+  );
+
+  const categories = page.getByRole('navigation', { name: '设置分类' });
+  await categories.getByRole('button', { name: '通知', exact: true }).click();
+  await categories.getByRole('button', { name: '常规', exact: true }).click();
+  await expect(path).toHaveValue('');
+  await expect(address).toHaveText('https://root.example.test:8787/');
+  await panel.getByRole('button', { name: '重新生成访问路径', exact: true }).click();
+  const dialog = page.getByRole('dialog').filter({
+    has: page.getByRole('heading', { name: '重新生成访问路径', exact: true }),
+  });
+  await dialog.getByRole('button', { name: '重新生成访问路径', exact: true }).click();
+  await expect(path).toHaveValue('00112233445566778899aabbccddeeff');
+  await expect(address).toHaveText('https://root.example.test:8787/00112...');
+  await panel.getByRole('button', { name: '复制访问地址', exact: true }).click();
+  expect(await page.evaluate(() => (window as unknown as { copied: string[] }).copied.at(-1))).toBe(
+    'https://root.example.test:8787/00112233445566778899aabbccddeeff/',
+  );
+});
+
+test('address save locks every Web control and failed changes restore the effective value', async ({
+  page,
+}) => {
+  const state = await desktopFixture(page, true, { existingPairing: true });
+  await generalSettings(page);
+  const panel = page.locator('.server-web-access');
+  const path = panel.getByRole('textbox', { name: '服务端访问路径', exact: true });
+  await expect(path).toHaveValue('fixture-entry');
+  state.holdConfiguration();
+  state.failNextConfiguration();
+  await path.fill('not-saved');
+  await path.blur();
+  await expect
+    .poll(() => state.commands.filter((item) => item.type === 'web.configure'))
+    .toHaveLength(1);
+  for (const control of await panel.locator('input, button').all())
+    await expect(control).toBeDisabled();
+  state.releaseConfiguration();
+  await expect(panel.getByRole('alert')).toHaveText('开启失败，请重试。');
+  await expect(path).toHaveValue('fixture-entry');
+  await expect(path).toBeEnabled();
+  await panel.getByRole('button', { name: '复制访问地址', exact: true }).click();
+  expect(await page.evaluate(() => (window as unknown as { copied: string[] }).copied.at(-1))).toBe(
+    'https://web.example.test:8787/fixture-entry/',
+  );
+});
+
+test('path regeneration confirms once, cancels without saving, and retains pairing and grants', async ({
+  page,
+}) => {
+  const state = await desktopFixture(page, true, { existingPairing: true });
+  await generalSettings(page);
+  const panel = page.locator('.server-web-access');
+  const path = panel.getByRole('textbox', { name: '服务端访问路径', exact: true });
+  const regenerate = panel.getByRole('button', { name: '重新生成访问路径', exact: true });
+  await expect(path).toHaveValue('fixture-entry');
+  const domain = panel.getByRole('textbox', { name: '访问域名', exact: true });
+  await domain.fill('uncommitted.example.test');
+  await regenerate.click();
+  const dialog = page.getByRole('dialog').filter({
+    has: page.getByRole('heading', { name: '重新生成访问路径', exact: true }),
+  });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: '取消', exact: true }).click();
+  expect(state.commands.filter((item) => item.type === 'web.configure')).toHaveLength(0);
+  await expect(domain).toHaveValue('');
+  await path.fill('uncommitted-draft');
+  await regenerate.click();
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: '取消', exact: true }).click();
+  expect(state.commands.filter((item) => item.type === 'web.configure')).toHaveLength(0);
+  await expect(path).toHaveValue('fixture-entry');
+  await regenerate.click();
+  await dialog.getByRole('button', { name: '重新生成访问路径', exact: true }).click();
+  await expect(path).toHaveValue('00112233445566778899aabbccddeeff');
+  expect(state.commands.filter((item) => item.type === 'web.configure')).toEqual([
+    expect.objectContaining({ enabled: true, regeneratePath: true }),
+  ]);
+  await panel.getByRole('button', { name: '显示配对码', exact: true }).click();
+  await expect(panel.getByLabel('配对码', { exact: true })).toHaveText(state.pairing.code);
+  await expect(panel.locator('summary')).toContainText('1');
+});
+
+test('older services retain Web management without unsupported address controls', async ({
+  page,
+}) => {
+  const state = await desktopFixture(page, true, { webSettings: false, existingPairing: true });
+  await generalSettings(page);
+  const panel = page.locator('.server-web-access');
+  await expect(panel.getByRole('textbox', { name: '访问域名', exact: true })).toHaveCount(0);
+  await expect(panel.getByRole('textbox', { name: '服务端访问路径', exact: true })).toHaveCount(0);
+  await expect(panel.getByLabel('服务端访问地址', { exact: true })).toHaveText(
+    'https://web.example.test:8787/',
+  );
+  await panel.getByRole('button', { name: '复制访问地址', exact: true }).click();
+  expect(await page.evaluate(() => (window as unknown as { copied: string[] }).copied)).toEqual([
+    'https://web.example.test:8787/',
+  ]);
+  expect(state.commands.filter((item) => item.type === 'web.configure')).toHaveLength(0);
+});
+
+test('address inputs reject URL syntax and malformed or reserved paths without sending changes', async ({
+  page,
+}) => {
+  const state = await desktopFixture(page, true, { existingPairing: true });
+  await generalSettings(page);
+  const panel = page.locator('.server-web-access');
+  const domain = panel.getByRole('textbox', { name: '访问域名', exact: true });
+  const path = panel.getByRole('textbox', { name: '服务端访问路径', exact: true });
+  await expect(path).toHaveValue('fixture-entry');
+  for (const value of [
+    'https://web.example.test',
+    'web.example.test:8787',
+    'web.example.test/path',
+  ]) {
+    await domain.fill(value);
+    await domain.blur();
+    await expect(domain).toHaveValue('');
+    await expect(panel.getByRole('alert')).toBeVisible();
+  }
+  for (const value of ['nested/path', '..', 'ws', 'health', 'client']) {
+    await path.fill(value);
+    await path.blur();
+    await expect(path).toHaveValue('fixture-entry');
+    await expect(panel.getByRole('alert')).toBeVisible();
+  }
+  expect(state.commands.filter((item) => item.type === 'web.configure')).toHaveLength(0);
+});
+
+test('another desktop address change preserves the unrelated focused input draft', async ({
+  page,
+}) => {
+  const state = await desktopFixture(page, true, { existingPairing: true });
+  await generalSettings(page);
+  const panel = page.locator('.server-web-access');
+  const domain = panel.getByRole('textbox', { name: '访问域名', exact: true });
+  const path = panel.getByRole('textbox', { name: '服务端访问路径', exact: true });
+  await expect(path).toHaveValue('fixture-entry');
+  await path.fill('my-path-draft');
+  state.externalAddress({ domain: 'another.example.test' });
+  await expect(domain).toHaveValue('another.example.test');
+  await expect(path).toHaveValue('my-path-draft');
+  await expect(path).toBeFocused();
+  await path.blur();
+  await expect
+    .poll(() => state.commands.filter((item) => item.type === 'web.configure'))
+    .toEqual([expect.objectContaining({ enabled: true, path: 'my-path-draft' })]);
+  await expect(domain).toBeEnabled();
+  await domain.fill('my-domain.example.test');
+  state.externalAddress({ path: 'another-path' });
+  await expect(path).toHaveValue('another-path');
+  await expect(domain).toHaveValue('my-domain.example.test');
+  await expect(domain).toBeFocused();
+  await domain.blur();
+  await expect
+    .poll(() => state.commands.filter((item) => item.type === 'web.configure'))
+    .toEqual([
+      expect.objectContaining({ enabled: true, path: 'my-path-draft' }),
+      expect.objectContaining({ enabled: true, domain: 'my-domain.example.test' }),
+    ]);
+  await panel.getByRole('button', { name: '复制访问地址', exact: true }).click();
+  expect(await page.evaluate(() => (window as unknown as { copied: string[] }).copied)).toEqual([
+    'https://my-domain.example.test:8787/another-path/',
+  ]);
 });
