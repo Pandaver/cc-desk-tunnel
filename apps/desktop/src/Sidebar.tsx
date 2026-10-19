@@ -1,5 +1,8 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
+  ChevronDown,
+  ChevronRight,
   Ellipsis,
   Folder,
   FolderOpen,
@@ -28,7 +31,7 @@ function activity(session: Session) {
   return session.activeRun.waiting === 'question' ? '等待回答' : '等待审批';
 }
 
-// A project lists its latest few sessions; each "更多" lists that many more.
+// A list of sessions shows its latest few until it is listed in full.
 const PAGE = 5;
 
 // Another computer's sessions: by project folder, and those without a project.
@@ -85,8 +88,8 @@ export default function Sidebar({
   const connectionName = useConnectionName();
   const [search, setSearch] = useState('');
   const [searching, setSearching] = useState(false);
-  // How many of each project's sessions are listed, by project key, when more than the first page.
-  const [shown, setShown] = useState<Record<string, number>>({});
+  // The lists listed in full rather than their latest few, for this window only.
+  const [listed, setListed] = useState<string[]>([]);
   const { pinned, plain, groups } = useMemo(() => {
     const grouped = new Map<string, Session[]>();
     const plain: Session[] = [];
@@ -175,6 +178,62 @@ export default function Sidebar({
     setCard(null);
   };
   useEffect(() => leave, []);
+
+  // Folds a list away and opens it again; folded, it tells how many sessions the list holds and whether one runs.
+  function foldToggle({
+    open,
+    label,
+    icon,
+    name,
+    members,
+    toggle,
+  }: {
+    open: boolean;
+    label: string;
+    icon: ReactNode;
+    name: string;
+    members: Session[];
+    toggle: () => void;
+  }) {
+    return (
+      <button
+        type="button"
+        className="project-toggle"
+        aria-expanded={open}
+        aria-label={`${open ? '收起' : '展开'}${label}`}
+        onClick={toggle}
+      >
+        {icon}
+        <span>{name}</span>
+        {!open && members.some((session) => session.activeRun) && <i className="running-dot" />}
+        {!open && members.length > 0 && <small>{members.length}</small>}
+      </button>
+    );
+  }
+  const foldElsewhere = (key: string) => () =>
+    setPrefs((value) => ({ ...value, collapsedElsewhere: toggled(value.collapsedElsewhere, key) }));
+
+  // A list shows its latest few sessions, and also the open one and those at work wherever they are, until it is
+  // listed in full. A search lists all it found.
+  function renderSessions(key: string, members: Session[]) {
+    const kept = members.filter(
+      (session, index) => index < PAGE || session.id === selectedId || session.activeRun,
+    );
+    if (search.trim() || kept.length === members.length) return members.map(renderSession);
+    const full = listed.includes(key);
+    return (
+      <>
+        {(full ? members : kept).map(renderSession)}
+        <button
+          type="button"
+          className="project-more"
+          onClick={() => setListed((value) => toggled(value, key))}
+        >
+          {full ? '收起' : `展开显示（还有 ${members.length - kept.length} 个）`}
+        </button>
+      </>
+    );
+  }
 
   function renderSession(session: Session) {
     const isPinned = prefs.pinnedSessions.includes(session.id);
@@ -304,14 +363,6 @@ export default function Sidebar({
           // A search shows what it found, folded or not.
           const collapsed = !search.trim() && prefs.collapsedProjects.includes(key);
           const name = prefs.projectNames[key] || folderName(path);
-          // A search lists all it found; the open session is listed even when it is further down.
-          const limit = search.trim()
-            ? members.length
-            : Math.max(
-                shown[key] ?? PAGE,
-                members.findIndex((session) => session.id === selectedId) + 1,
-              );
-          const hidden = members.length - limit;
           return (
             <section className="project-group" key={key}>
               <h2
@@ -321,25 +372,18 @@ export default function Sidebar({
                   projectMenu(path, { x: event.clientX, y: event.clientY });
                 }}
               >
-                <button
-                  type="button"
-                  className="project-toggle"
-                  aria-expanded={!collapsed}
-                  aria-label={`${collapsed ? '展开' : '收起'}项目 · ${name}`}
-                  onClick={() =>
+                {foldToggle({
+                  open: !collapsed,
+                  label: `项目 · ${name}`,
+                  icon: collapsed ? <Folder /> : <FolderOpen />,
+                  name,
+                  members,
+                  toggle: () =>
                     setPrefs((value) => ({
                       ...value,
                       collapsedProjects: toggled(value.collapsedProjects, key),
-                    }))
-                  }
-                >
-                  {collapsed ? <Folder /> : <FolderOpen />}
-                  <span>{name}</span>
-                  {collapsed && members.some((session) => session.activeRun) && (
-                    <i className="running-dot" />
-                  )}
-                  {collapsed && members.length > 0 && <small>{members.length}</small>}
-                </button>
+                    })),
+                })}
                 {prefs.pinnedProjects.includes(key) && <Pin className="pin-mark" />}
                 <IconButton
                   title={`项目操作 · ${path}`}
@@ -360,25 +404,7 @@ export default function Sidebar({
                   <Plus />
                 </IconButton>
               </h2>
-              {!collapsed && members.slice(0, limit).map(renderSession)}
-              {!collapsed && hidden > 0 && (
-                <button
-                  type="button"
-                  className="project-more"
-                  onClick={() => setShown((value) => ({ ...value, [key]: limit + PAGE }))}
-                >
-                  更多（还有 {hidden} 个）
-                </button>
-              )}
-              {!collapsed && hidden <= 0 && (shown[key] ?? PAGE) > PAGE && (
-                <button
-                  type="button"
-                  className="project-more"
-                  onClick={() => setShown(({ [key]: _, ...value }) => value)}
-                >
-                  收起
-                </button>
-              )}
+              {!collapsed && renderSessions(key, members)}
               {!collapsed && !members.length && <p className="project-empty">暂无会话</p>}
             </section>
           );
@@ -391,49 +417,79 @@ export default function Sidebar({
         {othersCount > 0 && (
           <section className="project-group">
             <h2 title="这些会话的项目目录在你的其他电脑上；那台电脑在线时可以直接在这里操作，也可以接到这台电脑上继续">
-              <button
-                type="button"
-                className="project-toggle"
-                aria-expanded={othersOpen}
-                aria-label={`${othersOpen ? '收起' : '展开'}其他设备的会话`}
-                onClick={() =>
-                  setPrefs((value) => ({ ...value, elsewhereOpen: !value.elsewhereOpen }))
-                }
-              >
-                <Laptop />
-                <span>其他设备</span>
-                {!othersOpen && elsewhere.some((session) => session.activeRun) && (
-                  <i className="running-dot" />
-                )}
-                {!othersOpen && <small>{othersCount}</small>}
-              </button>
+              {foldToggle({
+                open: othersOpen,
+                label: '其他设备的会话',
+                icon: <Laptop />,
+                name: '其他设备',
+                members: elsewhere,
+                toggle: () =>
+                  setPrefs((value) => ({ ...value, elsewhereOpen: !value.elsewhereOpen })),
+              })}
             </h2>
             {othersOpen &&
-              others.map(([id, device]) => (
-                <Fragment key={id}>
-                  <div className="list-heading">
-                    <span>{device.name}</span>
-                    <span className={`device-state${device.online ? ' online' : ''}`}>
-                      {device.online ? '在线' : '离线'}
-                    </span>
-                  </div>
-                  {[...device.projects.entries()].map(([key, project]) => (
-                    <Fragment key={key}>
-                      <div className="elsewhere-project" title={project.path}>
-                        <Folder />
-                        <span>{folderName(project.path)}</span>
-                      </div>
-                      {project.sessions.map(renderSession)}
-                    </Fragment>
-                  ))}
-                  {device.plain.length > 0 && device.projects.size > 0 && (
-                    <div className="elsewhere-project">
-                      <span>普通会话</span>
+              others.map(([id, device]) => {
+                // Each computer, and each folder on it, folds the same way a project does; a search opens them.
+                const open = (key: string) =>
+                  !!search.trim() || !prefs.collapsedElsewhere.includes(key);
+                const projects = [...device.projects.entries()];
+                const plainKey = `${id}\n`;
+                return (
+                  <Fragment key={id}>
+                    <div className="list-heading">
+                      {foldToggle({
+                        open: open(id),
+                        label: `设备 · ${device.name}`,
+                        icon: open(id) ? <ChevronDown /> : <ChevronRight />,
+                        name: device.name,
+                        members: [
+                          ...projects.flatMap(([, project]) => project.sessions),
+                          ...device.plain,
+                        ],
+                        toggle: foldElsewhere(id),
+                      })}
+                      <span className={`device-state${device.online ? ' online' : ''}`}>
+                        {device.online ? '在线' : '离线'}
+                      </span>
                     </div>
-                  )}
-                  {device.plain.map(renderSession)}
-                </Fragment>
-              ))}
+                    {open(id) &&
+                      projects.map(([path, project]) => {
+                        const key = `${id}\n${path}`;
+                        const name = folderName(project.path);
+                        return (
+                          <Fragment key={path}>
+                            <div className="elsewhere-project" title={project.path}>
+                              {foldToggle({
+                                open: open(key),
+                                label: `项目 · ${device.name} · ${name}`,
+                                icon: open(key) ? <FolderOpen /> : <Folder />,
+                                name,
+                                members: project.sessions,
+                                toggle: foldElsewhere(key),
+                              })}
+                            </div>
+                            {open(key) && renderSessions(key, project.sessions)}
+                          </Fragment>
+                        );
+                      })}
+                    {open(id) && device.plain.length > 0 && projects.length > 0 && (
+                      <div className="elsewhere-project">
+                        {foldToggle({
+                          open: open(plainKey),
+                          label: `普通会话 · ${device.name}`,
+                          icon: open(plainKey) ? <FolderOpen /> : <Folder />,
+                          name: '普通会话',
+                          members: device.plain,
+                          toggle: foldElsewhere(plainKey),
+                        })}
+                      </div>
+                    )}
+                    {open(id) &&
+                      (open(plainKey) || !projects.length) &&
+                      renderSessions(plainKey, device.plain)}
+                  </Fragment>
+                );
+              })}
           </section>
         )}
         {search &&

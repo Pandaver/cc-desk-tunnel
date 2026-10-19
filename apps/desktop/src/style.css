@@ -747,15 +747,14 @@ dialog:has(.release-notes) {
   color: var(--muted);
   font-size: 12.5px;
 }
-.elsewhere-project > svg {
-  flex: none;
+.list-heading > .project-toggle,
+.elsewhere-project > .project-toggle {
+  gap: 6px;
+}
+.list-heading > .project-toggle > svg,
+.elsewhere-project > .project-toggle > svg {
   width: 14px;
   height: 14px;
-}
-.elsewhere-project > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .list-heading .icon-button {
   width: 24px;
