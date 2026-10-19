@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   continues,
   isFragment,
+  pathKey,
   platformOf,
   snapshotSchema,
   sessionSchema,
@@ -86,6 +87,10 @@ export class SessionStore {
       );
       CREATE INDEX IF NOT EXISTS events_run ON events(session_id, run_id, sequence);
       CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS native_roots (
+        device_id TEXT NOT NULL, path_key TEXT NOT NULL, root TEXT NOT NULL,
+        PRIMARY KEY (device_id, path_key)
+      );
     `);
     try {
       this.importJson();
@@ -387,6 +392,7 @@ export class SessionStore {
       autoTitle: title === '新会话',
       projectPath,
       device,
+      nativeRoot: this.rootFor(device, projectPath),
       permissionMode: 'auto',
       model: null,
       effort: null,
@@ -436,7 +442,10 @@ export class SessionStore {
       device: place.device,
       projectPath: place.projectPath ?? source.projectPath,
       autoTitle: false,
-      nativeRoot: native ? (source.nativeRoot ?? source.id) : undefined,
+      // Claude Code forks a session beside it, in the directory it works in.
+      nativeRoot: native
+        ? (source.nativeRoot ?? source.id)
+        : this.rootFor(place.device, place.projectPath ?? source.projectPath),
       createdAt: now,
       updatedAt: now,
       activeRun: null,
@@ -606,9 +615,41 @@ export class SessionStore {
     if (session.projectPath === projectPath && session.device?.id === device.id) return session;
     session.projectPath = projectPath;
     session.device = device;
+    // Claude Code finds a session's history only in the directory it works in, so one with history stays there.
+    if (!this.hasNativeContext(sessionId)) session.nativeRoot = this.rootFor(device, projectPath);
     session.updatedAt = new Date().toISOString();
     this.save(session);
     return session;
+  }
+  // Points a project of a computer at another directory there. Its sessions move with it, and so does the
+  // directory Claude Code works in for it, unless the other directory has one already.
+  moveProject(from: string, to: string, device: Device) {
+    const members = this.list().filter(
+      (session) =>
+        pathKey(session.projectPath) === pathKey(from) &&
+        // Before computers were told apart they were all Windows ones, and one of them takes those over.
+        (session.device ? session.device.id === device.id : platformOf(device) === 'win32'),
+    );
+    if (members.some((session) => session.activeRun))
+      throw new DomainError('run_active', '这个项目里有会话正在运行，结束后再更改文件夹。');
+    this.database
+      .prepare(
+        'UPDATE OR IGNORE native_roots SET path_key = ? WHERE device_id = ? AND path_key = ?',
+      )
+      .run(pathKey(to), device.id, pathKey(from));
+    return members.map((session) => this.move(session.id, to, device));
+  }
+  // The directory Claude Code works in for a directory of a computer: one for each project, shared by its
+  // sessions. A session without a project has a folder of its own there, and so a directory of its own here.
+  private rootFor(device: Device, path: string) {
+    const key = pathKey(path);
+    this.database
+      .prepare('INSERT OR IGNORE INTO native_roots VALUES (?, ?, ?)')
+      .run(device.id, key, randomUUID());
+    const row = this.database
+      .prepare('SELECT root FROM native_roots WHERE device_id = ? AND path_key = ?')
+      .get(device.id, key)!;
+    return String(row.root);
   }
   // A session from before computers were told apart becomes that of the first one to use it, where it is.
   claim(sessionId: string, device: Device) {

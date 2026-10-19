@@ -20,6 +20,7 @@ import {
   isFragment,
   leaveSchema,
   MAX_FRAME_BYTES,
+  pathKey,
   platformOf,
   PROTOCOL_VERSION,
   TUNNEL_CLOSE,
@@ -983,6 +984,18 @@ export function createProxyServer(options: ServerOptions) {
           requestId: command.requestId,
           ...usage.query(command, (sessionId) => titles.get(sessionId) ?? null),
         });
+        return undefined;
+      }
+      case 'project.move': {
+        const from = pathKey(command.from);
+        if (
+          store
+            .list()
+            .some((session) => mutations.has(session.id) && pathKey(session.projectPath) === from)
+        )
+          throw new DomainError('session_busy', '会话正在更新，请稍后重试。');
+        for (const session of store.moveProject(command.from, command.to, deviceOf(peer)))
+          broadcast({ type: 'session.updated', session });
         return undefined;
       }
       case 'session.create': {
