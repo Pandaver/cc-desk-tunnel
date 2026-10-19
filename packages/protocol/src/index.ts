@@ -26,8 +26,15 @@ export const isWindowsPath = (path: string) => /^[a-z]:[\\/]|^\\\\/i.test(path);
 // written, where a backslash is a character of a name like any other.
 export const pathKey = (path: string) =>
   isWindowsPath(path)
-    ? path.replaceAll('/', '\\').replace(/\\+$/, '').toLowerCase()
-    : path.replace(/\/+$/, '') || '/';
+    ? withoutTrailing(path.replaceAll('/', '\\'), '\\').toLowerCase()
+    : withoutTrailing(path, '/') || '/';
+// Counted off the end rather than matched: a pattern anchored at the end backtracks over every run of
+// separators in a long path.
+function withoutTrailing(path: string, separator: string) {
+  let end = path.length;
+  while (end && path[end - 1] === separator) end--;
+  return path.slice(0, end);
+}
 const timestamp = z.iso.datetime();
 // `bypassPermissions` asks about nothing at all; the client offers it only once the user allowed that.
 export const permissionModeSchema = z.enum([
