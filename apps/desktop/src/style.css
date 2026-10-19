@@ -747,15 +747,14 @@ dialog:has(.release-notes) {
   color: var(--muted);
   font-size: 12.5px;
 }
-.elsewhere-project > svg {
-  flex: none;
+.list-heading > .project-toggle,
+.elsewhere-project > .project-toggle {
+  gap: 6px;
+}
+.list-heading > .project-toggle > svg,
+.elsewhere-project > .project-toggle > svg {
   width: 14px;
   height: 14px;
-}
-.elsewhere-project > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .list-heading .icon-button {
   width: 24px;
@@ -825,6 +824,20 @@ dialog:has(.release-notes) {
   margin: 4px 0 8px 34px;
   font-size: 12.5px;
   color: var(--faint);
+}
+.project-more {
+  display: block;
+  margin: 2px 0 6px 34px;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.project-more:hover {
+  color: inherit;
 }
 .list-empty {
   margin: 20px 10px;

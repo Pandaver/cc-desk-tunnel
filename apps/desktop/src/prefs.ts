@@ -20,6 +20,10 @@ export type Prefs = {
   collapsedProjects: string[];
   // Whether the sessions on the user's other computers are listed in the sidebar.
   elsewhereOpen: boolean;
+  // Which of the other computers, and which folders on them, are folded away: a computer by its id, a folder by
+  // the computer's id, a line break and the folder's pathKey(), and the sessions with no project by the
+  // computer's id and a line break.
+  collapsedElsewhere: string[];
   projectNames: Record<string, string>;
   notify: { enabled: boolean; sound: boolean } & Record<NotifyKind, boolean>;
   // `keys` holds only what the user changed, by action; an empty combination means none.
@@ -44,6 +48,7 @@ const defaults: Prefs = {
   pinnedProjects: [],
   collapsedProjects: [],
   elsewhereOpen: false,
+  collapsedElsewhere: [],
   projectNames: {},
   notify: {
     enabled: true,
@@ -81,6 +86,7 @@ function read(saved: any = shared('prefs') ?? stored()): Prefs {
       pinnedProjects: strings(saved.pinnedProjects),
       collapsedProjects: strings(saved.collapsedProjects),
       elsewhereOpen: saved.elsewhereOpen === true,
+      collapsedElsewhere: strings(saved.collapsedElsewhere),
       projectNames:
         saved.projectNames && typeof saved.projectNames === 'object' ? saved.projectNames : {},
       notify: { ...defaults.notify, ...(typeof saved.notify === 'object' ? saved.notify : {}) },

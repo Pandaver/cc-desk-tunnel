@@ -187,6 +187,42 @@ test('pages, side column, menus, pins, export, settings and the notice list', as
   expect(errors).toEqual([]);
 });
 
+test('a project lists its latest five sessions until it is listed in full', async ({ page }) => {
+  await page.goto('/');
+  await login(page);
+  const folder = `D:\\工作\\多会话 ${Date.now()}`;
+  await page.getByRole('button', { name: '添加项目', exact: true }).click();
+  await page.getByLabel('本机项目目录').fill(folder);
+  await page.getByRole('button', { name: '添加', exact: true }).click();
+  const group = page.locator('.project-group').filter({
+    has: page.locator(`h2[title="${folder.replaceAll('\\', '\\\\')}"]`),
+  });
+  const rows = group.locator('.session-row');
+  for (let count = 1; count <= 12; count++) {
+    await page.getByRole('button', { name: `新建会话 · ${folder}`, exact: true }).click();
+    await expect(page.getByRole('textbox', { name: '消息' })).toBeEnabled();
+    await expect(group.locator('.session-row.selected')).toHaveCount(1);
+    await expect(rows).toHaveCount(Math.min(count, 5));
+  }
+  await group.getByRole('button', { name: '展开显示（还有 7 个）', exact: true }).click();
+  await expect(rows).toHaveCount(12);
+  // The open session stays listed, in its place, when the project shows its latest five again.
+  const oldest = await rows.last().locator('strong').textContent();
+  await rows.last().locator('.session-select').click();
+  await group.getByRole('button', { name: '收起', exact: true }).click();
+  await expect(rows).toHaveCount(6);
+  await expect(rows.last()).toContainText(oldest!);
+  await expect(
+    group.getByRole('button', { name: '展开显示（还有 6 个）', exact: true }),
+  ).toBeVisible();
+  await rows.first().locator('.session-select').click();
+  await expect(rows).toHaveCount(5);
+  // A search lists every session it finds.
+  await page.getByRole('button', { name: '搜索', exact: true }).click();
+  await page.getByLabel('搜索会话').fill(folder);
+  await expect(rows).toHaveCount(12);
+  await expect(group.locator('.project-more')).toHaveCount(0);
+});
 test('a question is answered with its choices, and a session or a whole project moves to another folder', async ({
   page,
 }) => {
