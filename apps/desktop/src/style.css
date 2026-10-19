@@ -1067,8 +1067,11 @@ dialog:has(.release-notes) {
   background: var(--raised);
   box-shadow: var(--shadow);
 }
+/* A long menu, such as the projects a session can move to, scrolls inside the window. */
 .menu {
   position: fixed;
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
 }
 .menu hr {
   margin: 5px 6px;
