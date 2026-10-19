@@ -107,6 +107,9 @@ test('narrow screen, safe Markdown, switching and cancellation while awaiting ap
   await send(page, '```html\n<script>window.untrusted = true</script>\n```');
   await settled(page);
   expect(await page.evaluate(() => 'untrusted' in window)).toBe(false);
+  // Session controls settle before the batched transcript event folds the completed turn.
+  // Wait for that rendered boundary before expanding, not just for the composer to unlock.
+  await expect(page.locator('.turn-process')).toHaveCount(1);
   await expandActivity(page);
   await expect(page.locator('.message.assistant pre')).toBeVisible();
   // Formulas in either notation are typeset, a dollar in code and the dollars of prices are left alone (they
@@ -117,6 +120,7 @@ test('narrow screen, safe Markdown, switching and cancellation while awaiting ap
     '行内 $a^2+b^2$ 与 \\(c^2\\)，价格 `$5 \\(x\\)`，这件 $5，苹果 $5，香蕉 $8：\n\n\\[\nE=mc^2\n\\]\n\n```svg\n<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><script>window.untrusted = true</script><circle cx="20" cy="20" r="18"/></svg>\n```',
   );
   await settled(page);
+  await expect(page.locator('.turn-process')).toHaveCount(2);
   await expandActivity(page);
   const typeset = page.locator('.transcript');
   await expect(typeset.locator('.katex')).toHaveCount(3);
