@@ -121,3 +121,99 @@
   padding: 15px 0;
   font-size: 12.5px;
 }
+.server-web-certificate-setting > span:first-child {
+  min-width: 0;
+}
+.server-web-certificate-setting .setting-actions {
+  flex-shrink: 0;
+}
+dialog:has(.server-web-certificate-dialog) {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+}
+.server-web-certificate-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.server-web-certificate-dialog p {
+  margin: 0;
+}
+.server-web-certificate-domain {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+.server-web-certificate-domain strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 500;
+}
+.server-web-certificate-details summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.server-web-certificate-details dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 16px;
+  margin: 12px 0 0;
+  font-size: 12.5px;
+}
+.server-web-certificate-details dt {
+  color: var(--muted);
+}
+.server-web-certificate-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}
+.server-web-certificate-fingerprint {
+  font-family: Consolas, 'Cascadia Code', monospace;
+}
+.server-web-certificate-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.server-web-certificate-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.server-web-certificate-form textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: Consolas, 'Cascadia Code', monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.server-web-certificate-form textarea:disabled {
+  color: var(--muted);
+  background: var(--surface-2);
+}
+.server-web-certificate-form small,
+.server-web-certificate-note {
+  font-size: 12.5px;
+}
+.server-web-certificate-actions {
+  flex-wrap: wrap;
+  margin-top: 0;
+}
+.server-web-certificate-reset {
+  margin-right: auto;
+}
+@media (max-width: 480px) {
+  .server-web-certificate-form textarea {
+    font-size: 16px;
+  }
+}

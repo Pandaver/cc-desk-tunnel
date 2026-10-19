@@ -1,7 +1,21 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { FocusEvent } from 'react';
-import { ChevronRight, Copy, ExternalLink, Eye, EyeOff, RefreshCw, X } from 'lucide-react';
-import { webDomainSchema, webPathSchema } from '@cc-desk-tunnel/protocol';
+import {
+  ChevronRight,
+  Copy,
+  ExternalLink,
+  Eye,
+  EyeOff,
+  RefreshCw,
+  Settings2,
+  X,
+} from 'lucide-react';
+import {
+  webDomainSchema,
+  webPathSchema,
+  WEB_CERTIFICATE_LIMIT,
+  WEB_PRIVATE_KEY_LIMIT,
+} from '@cc-desk-tunnel/protocol';
 import type { Command, WebState } from '@cc-desk-tunnel/protocol';
 import type { ProxyClient } from './client.ts';
 import { IconButton, Modal, Switch } from './ui.tsx';
@@ -9,13 +23,31 @@ import './server-web-access.css';
 
 type WebCommand = Extract<
   Command,
-  { type: 'web.status' | 'web.pair' | 'web.revoke' | 'web.configure' }
+  {
+    type:
+      | 'web.status'
+      | 'web.pair'
+      | 'web.revoke'
+      | 'web.configure'
+      | 'web.certificate.set'
+      | 'web.certificate.reset';
+  }
 >;
 type Action = WebCommand extends infer C
   ? C extends WebCommand
     ? Omit<C, 'requestId'>
     : never
   : never;
+type Certificate = NonNullable<WebState['certificate']>;
+type CertificateTarget = {
+  connectionId: string | null;
+  domain: string;
+  revision: string;
+  enabled: boolean;
+};
+function certificateDomain(state: Pick<WebState, 'enabled' | 'domain' | 'certificate'> | null) {
+  return state?.enabled ? (state.domain ?? '') : (state?.certificate?.details?.domain ?? '');
+}
 
 export default function ServerWebAccess({ client }: { client: ProxyClient }) {
   const connection = useSyncExternalStore(client.subscribe, client.getSnapshot);
@@ -24,6 +56,7 @@ export default function ServerWebAccess({ client }: { client: ProxyClient }) {
   const [path, setPath] = useState('');
   const [error, setError] = useState('');
   const [dismissedError, setDismissedError] = useState<string | null>(null);
+  const [certificateTarget, setCertificateTarget] = useState<CertificateTarget | null>(null);
   const [confirmation, setConfirmation] = useState<
     | { kind: 'pair' }
     | { kind: 'disable' }
@@ -38,6 +71,22 @@ export default function ServerWebAccess({ client }: { client: ProxyClient }) {
   const available =
     connection.status === 'connected' && (connection.webControl || connection.webEnabled);
   const status = connection.webState;
+  const certificate = status?.certificate;
+  const recoverableCertificate =
+    certificate?.mode === 'custom' ||
+    (certificate?.mode === 'unavailable' && !!certificate.revision);
+  const certificateDialog =
+    certificateTarget &&
+    available &&
+    connection.webCertificates &&
+    (status?.enabled || recoverableCertificate) &&
+    certificate &&
+    certificateTarget.connectionId === connection.connectionId &&
+    certificateTarget.enabled === (status?.enabled === true) &&
+    certificateTarget.domain === certificateDomain(status) &&
+    certificateTarget.revision === certificate.revision
+      ? certificateTarget
+      : null;
   const pairing = status?.pairing;
   const busy = connection.webPending;
   const address = status?.url ?? (status?.origin ? new URL('/', status.origin).href : '');
@@ -55,6 +104,7 @@ export default function ServerWebAccess({ client }: { client: ProxyClient }) {
     setVisible(false);
     setError('');
     setConfirmation(null);
+    setCertificateTarget(null);
     confirmationOpening.current = false;
     prepareIntent.current = available;
     previousEnabled.current = client.getSnapshot().webState?.enabled;
@@ -72,8 +122,12 @@ export default function ServerWebAccess({ client }: { client: ProxyClient }) {
   }, [status?.path, connection.connectionId]);
 
   useEffect(() => {
-    confirmationOpening.current = confirmation !== null;
-  }, [confirmation]);
+    confirmationOpening.current = confirmation !== null || certificateTarget !== null;
+  }, [confirmation, certificateTarget]);
+
+  useEffect(() => {
+    if (certificateTarget && !certificateDialog) setCertificateTarget(null);
+  }, [certificateTarget, certificateDialog]);
 
   useEffect(() => {
     if (previousEnabled.current === false && status?.enabled) prepareIntent.current = true;
@@ -201,6 +255,46 @@ export default function ServerWebAccess({ client }: { client: ProxyClient }) {
     setDismissedError(client.getSnapshot().webError);
   }
 
+  function showCertificate() {
+    const current = client.getSnapshot();
+    if (current.webPending || !current.webState?.certificate) return;
+    confirmationOpening.current = true;
+    setError('');
+    setDismissedError(current.webError);
+    setDomain(current.webState.domain ?? '');
+    setPath(current.webState.path ?? '');
+    setCertificateTarget({
+      connectionId: current.connectionId,
+      domain: certificateDomain(current.webState),
+      revision: current.webState.certificate.revision,
+      enabled: current.webState.enabled,
+    });
+  }
+
+  function closeCertificate() {
+    if (client.getSnapshot().webPending) return;
+    confirmationOpening.current = false;
+    setCertificateTarget(null);
+    setError('');
+    setDismissedError(client.getSnapshot().webError);
+  }
+
+  async function saveCertificate(command: Action) {
+    const target = certificateTarget;
+    const current = client.getSnapshot();
+    // A dialog never applies a private key to a different connection or a newer server setting.
+    if (
+      !target ||
+      current.connectionId !== target.connectionId ||
+      (current.webState?.enabled === true) !== target.enabled ||
+      certificateDomain(current.webState) !== target.domain ||
+      current.webState?.certificate?.revision !== target.revision ||
+      (command.type === 'web.certificate.set' && !target.enabled)
+    )
+      return;
+    if (await act(command)) setCertificateTarget(null);
+  }
+
   async function confirm() {
     if (!confirmation) return;
     const succeeded = await act(
@@ -276,6 +370,19 @@ export default function ServerWebAccess({ client }: { client: ProxyClient }) {
             )}
           </div>
         )}
+        {!status?.enabled && connection.webCertificates && recoverableCertificate && (
+          <div className="setting-row server-web-certificate-setting">
+            <span>
+              <strong>HTTPS 证书</strong>
+              <small>{certificate?.error || '自定义证书仍用于已绑定域名。'}</small>
+            </span>
+            <span data-web-confirm>
+              <IconButton title="恢复默认证书" disabled={busy} onClick={showCertificate}>
+                <RefreshCw />
+              </IconButton>
+            </span>
+          </div>
+        )}
         {status?.enabled && (
           <>
             {connection.webSettings && (
@@ -283,14 +390,18 @@ export default function ServerWebAccess({ client }: { client: ProxyClient }) {
                 <div className="setting-row server-web-address-setting server-web-domain-setting">
                   <span>
                     <strong>访问域名</strong>
-                    <small>留空使用部署地址；填写后仅允许指定域名访问。</small>
+                    <small>
+                      {certificate?.mode === 'custom'
+                        ? '更改域名前，请先将 HTTPS 证书恢复默认。'
+                        : '留空使用部署地址；填写后仅允许指定域名访问。'}
+                    </small>
                   </span>
                   <input
                     className="server-web-address-input"
                     aria-label="访问域名"
                     placeholder="web.example.com"
                     value={domain}
-                    disabled={busy}
+                    disabled={busy || certificate?.mode === 'custom'}
                     autoCapitalize="none"
                     autoComplete="off"
                     spellCheck={false}
@@ -340,6 +451,38 @@ export default function ServerWebAccess({ client }: { client: ProxyClient }) {
                   </span>
                 </div>
               </>
+            )}
+            {connection.webCertificates && certificate && (
+              <div className="setting-row server-web-certificate-setting">
+                <span>
+                  <strong>HTTPS 证书</strong>
+                  {certificate.mode === 'external' && <small>证书由外部反向代理管理。</small>}
+                  {certificate.error && <small>{certificate.error}</small>}
+                </span>
+                <span className="setting-actions">
+                  <span className="setting-value">
+                    {certificate.mode === 'custom'
+                      ? '自定义证书'
+                      : certificate.mode === 'external'
+                        ? '反向代理管理'
+                        : certificate.mode === 'unavailable'
+                          ? '暂不可用'
+                          : '默认证书'}
+                  </span>
+                  {certificate.mode !== 'external' &&
+                    (certificate.mode !== 'unavailable' || certificate.revision) && (
+                      <span data-web-confirm>
+                        <IconButton
+                          title="管理 HTTPS 证书"
+                          disabled={busy}
+                          onClick={showCertificate}
+                        >
+                          <Settings2 />
+                        </IconButton>
+                      </span>
+                    )}
+                </span>
+              </div>
             )}
             <div className="setting-row server-web-url-setting">
               <span>
@@ -474,12 +617,33 @@ export default function ServerWebAccess({ client }: { client: ProxyClient }) {
             </details>
           </>
         )}
-        {failure && !confirmation && (
+        {failure && !confirmation && !certificateDialog && (
           <p className="error-text" role="alert">
             {failure}
           </p>
         )}
       </div>
+      {certificateDialog && certificate && (
+        <CertificateDialog
+          target={certificateDialog}
+          certificate={certificate}
+          busy={busy}
+          failure={failure || ''}
+          onClose={closeCertificate}
+          onSubmit={saveCertificate}
+          onDomain={() => {
+            const connectionId = client.getSnapshot().connectionId;
+            closeCertificate();
+            // Wait until the modal has unmounted; its native focus trap keeps the settings inert.
+            requestAnimationFrame(() => {
+              if (client.getSnapshot().connectionId === connectionId)
+                document
+                  .querySelector<HTMLInputElement>('.server-web-domain-setting input')
+                  ?.focus();
+            });
+          }}
+        />
+      )}
       {confirmation && (
         <Modal
           title={
@@ -541,5 +705,180 @@ export default function ServerWebAccess({ client }: { client: ProxyClient }) {
         </Modal>
       )}
     </>
+  );
+}
+
+function CertificateDialog({
+  target,
+  certificate,
+  busy,
+  failure,
+  onClose,
+  onDomain,
+  onSubmit,
+}: {
+  target: CertificateTarget;
+  certificate: Certificate;
+  busy: boolean;
+  failure: string;
+  onClose: () => void;
+  onDomain: () => void;
+  onSubmit: (command: Action) => Promise<void>;
+}) {
+  // PEM contents exist only in this mounted dialog. Closing it, changing its target or a successful
+  // update unmounts the form; no key is read back from the server or copied to a persistent store.
+  const [cert, setCert] = useState('');
+  const [key, setKey] = useState('');
+  const [reset, setReset] = useState(!target.enabled || certificate.mode === 'unavailable');
+  const details = certificate.details;
+  const resetting = reset && certificate.mode !== 'default';
+  const date = (value: string) => new Date(value).toLocaleDateString();
+  return (
+    <Modal title={resetting ? '恢复默认证书' : 'HTTPS 证书'} onClose={onClose} closeDisabled={busy}>
+      <div className="server-web-certificate-dialog" aria-busy={busy}>
+        {resetting ? (
+          <>
+            {target.domain && (
+              <p className="server-web-certificate-domain">
+                <span className="muted">绑定域名</span>
+                <strong>{target.domain}</strong>
+              </p>
+            )}
+            <p className="delete-question">移除自定义证书，恢复服务端的默认证书？</p>
+            <p className="muted">
+              通过此域名连接的桌面客户端需重新确认指纹；通过 IP 连接的桌面不受影响。
+            </p>
+          </>
+        ) : !target.domain ? (
+          <p className="delete-question">请先填写访问域名，再为该域名设置自定义证书。</p>
+        ) : (
+          <>
+            <p className="server-web-certificate-domain">
+              <span className="muted">绑定域名</span>
+              <strong>{target.domain}</strong>
+            </p>
+            {details && (
+              <details className="server-web-certificate-details">
+                <summary>当前证书信息</summary>
+                <dl>
+                  <dt>域名</dt>
+                  <dd>{details.domain}</dd>
+                  <dt>主题</dt>
+                  <dd>{details.subject}</dd>
+                  <dt>签发者</dt>
+                  <dd>{details.issuer}</dd>
+                  <dt>有效期</dt>
+                  <dd>
+                    {date(details.validFrom)} – {date(details.validTo)}
+                  </dd>
+                  <dt>指纹</dt>
+                  <dd className="server-web-certificate-fingerprint">{details.fingerprint}</dd>
+                </dl>
+              </details>
+            )}
+            <form
+              className="server-web-certificate-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (!busy && cert.trim() && key.trim())
+                  void onSubmit({
+                    type: 'web.certificate.set',
+                    revision: target.revision,
+                    domain: target.domain,
+                    cert,
+                    key,
+                  });
+              }}
+              id="web-certificate-form"
+            >
+              <label>
+                <span>证书链 PEM</span>
+                <textarea
+                  aria-label="证书链 PEM"
+                  value={cert}
+                  onChange={(event) => setCert(event.target.value)}
+                  disabled={busy}
+                  rows={4}
+                  maxLength={WEB_CERTIFICATE_LIMIT}
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  placeholder="-----BEGIN CERTIFICATE-----"
+                  aria-describedby="web-certificate-chain-hint"
+                />
+                <small className="muted" id="web-certificate-chain-hint">
+                  粘贴域名证书及中间证书，域名证书放在最前。
+                </small>
+              </label>
+              <label>
+                <span>私钥 PEM</span>
+                <textarea
+                  aria-label="私钥 PEM"
+                  value={key}
+                  onChange={(event) => setKey(event.target.value)}
+                  disabled={busy}
+                  rows={3}
+                  maxLength={WEB_PRIVATE_KEY_LIMIT}
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  placeholder="-----BEGIN PRIVATE KEY-----"
+                />
+              </label>
+            </form>
+            <p className="muted server-web-certificate-note">
+              保存后立即用于该域名。通过此域名连接的桌面需重新确认指纹，通过 IP 连接不受影响。
+            </p>
+          </>
+        )}
+        {failure && (
+          <p className="error-text" role="alert">
+            {failure}
+          </p>
+        )}
+        <div className="dialog-actions server-web-certificate-actions">
+          {!resetting && certificate.mode === 'custom' && (
+            <button
+              className="button secondary server-web-certificate-reset"
+              disabled={busy}
+              onClick={() => {
+                setCert('');
+                setKey('');
+                setReset(true);
+              }}
+            >
+              恢复默认
+            </button>
+          )}
+          <button className="button secondary" disabled={busy} onClick={onClose}>
+            取消
+          </button>
+          {resetting ? (
+            <button
+              className="button danger"
+              disabled={busy}
+              onClick={() =>
+                void onSubmit({ type: 'web.certificate.reset', revision: target.revision })
+              }
+            >
+              {busy ? '正在恢复…' : '恢复默认证书'}
+            </button>
+          ) : !target.domain ? (
+            <button className="button" disabled={busy} onClick={onDomain}>
+              设置访问域名
+            </button>
+          ) : (
+            <button
+              className="button"
+              type="submit"
+              form="web-certificate-form"
+              disabled={busy || !cert.trim() || !key.trim()}
+            >
+              {busy ? '正在保存…' : '保存证书'}
+            </button>
+          )}
+        </div>
+      </div>
+    </Modal>
   );
 }

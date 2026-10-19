@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
-import { rootCertificates } from 'node:tls';
+import { checkServerIdentity, rootCertificates } from 'node:tls';
 
 const direct = process.env.PROXY_TLS_MODE !== 'reverse-proxy';
 const request = (direct ? https : http).get(
@@ -14,7 +14,10 @@ const request = (direct ? https : http).get(
       ? {
           ca: [...rootCertificates, readFileSync(process.env.PROXY_TLS_CERT)],
           allowPartialTrustChain: true,
-          servername: process.env.PROXY_CERT_NAME,
+          // Probe the original proxy identity, not a Web domain's optional SNI certificate.
+          servername: '',
+          checkServerIdentity: (_hostname, certificate) =>
+            checkServerIdentity(process.env.PROXY_CERT_NAME || '127.0.0.1', certificate),
         }
       : {}),
   },

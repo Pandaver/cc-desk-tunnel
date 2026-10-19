@@ -5,6 +5,7 @@ import { totalmem } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage, RequestListener } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
+import { createSecureContext } from 'node:tls';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   deleteSession,
@@ -61,6 +62,7 @@ import { ServiceUpdates, serviceVersion } from './updates.ts';
 import type { UpdateOptions } from './updates.ts';
 import { UsageLog, createUsageReceiver, telemetryEnvironment } from './usage.ts';
 import { WebAccess } from './web-access.ts';
+import { WebCertificates } from './web-certificate.ts';
 import type { WebAccessOptions, WebGrant } from './web-access.ts';
 
 type Peer = {
@@ -181,9 +183,15 @@ export function createProxyServer(options: ServerOptions) {
       'Native mode requires TLS or explicit reverse proxy mode, and the execution channel.',
     );
   const store = new SessionStore(options.dataDir);
-  // Configuration advertises a capability, not a running HTTP surface. No Web storage, socket or
-  // timer is touched until an authenticated desktop explicitly enables it for this service lifetime.
+  // Configuration advertises a capability, not a running HTTP surface. Grants and Web settings
+  // remain dormant until an authenticated desktop enables it. A saved TLS identity is independent.
   let web: WebAccess | undefined;
+  const certificates = options.web
+    ? new WebCertificates(options.dataDir, {
+        tls: !!options.tls,
+        reverseProxy: options.reverseProxy,
+      })
+    : undefined;
   const usage = new UsageLog(store.database);
   const usageReceiver = options.claude ? createUsageReceiver(usage) : undefined;
   const peers = new Set<Peer>();
@@ -273,7 +281,26 @@ export function createProxyServer(options: ServerOptions) {
       response.end();
     }
   };
-  const server = options.tls ? createHttpsServer(options.tls, handler) : createServer(handler);
+  const defaultContext = options.tls && certificates ? createSecureContext(options.tls) : undefined;
+  const server = options.tls
+    ? createHttpsServer(
+        {
+          ...options.tls,
+          ...(certificates
+            ? {
+                SNICallback: (
+                  servername: string,
+                  callback: (
+                    error: Error | null,
+                    context?: ReturnType<typeof createSecureContext>,
+                  ) => void,
+                ) => callback(null, certificates.context(servername) ?? defaultContext),
+              }
+            : {}),
+        },
+        handler,
+      )
+    : createServer(handler);
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
   server.on('upgrade', (request, socket, head) => {
     if (web?.matches(request, '/web/ws')) {
@@ -328,7 +355,10 @@ export function createProxyServer(options: ServerOptions) {
     if (peer.socket.readyState === WebSocket.OPEN) peer.socket.send(JSON.stringify(message));
   }
   function webState(peer: Peer): WebAccessState {
-    return web?.state(peer.device?.id) ?? { enabled: false, grants: [] };
+    return {
+      ...(web?.state(peer.device?.id) ?? { enabled: false, grants: [] }),
+      ...(certificates ? { certificate: certificates.state() } : {}),
+    };
   }
   function webChanged() {
     for (const peer of peers)
@@ -994,6 +1024,36 @@ export function createProxyServer(options: ServerOptions) {
     if (peer.browser && !browserCommands.has(command.type))
       throw new DomainError('browser_unavailable', '此操作需要在桌面客户端完成。');
     switch (command.type) {
+      case 'web.certificate.set':
+      case 'web.certificate.reset': {
+        if (!certificates)
+          throw new DomainError('web_unconfigured', '请先在服务端配置 Web 访问地址。');
+        if (command.type === 'web.certificate.set') {
+          if (!web) throw new DomainError('web_disabled', '请先启用 Web 访问并设置访问域名。');
+          const target = web;
+          if (target.state().domain !== command.domain)
+            throw new DomainError('web_certificate_domain', '访问域名已发生变化，请刷新后重试。');
+          await certificates.set(
+            command.revision,
+            { domain: command.domain, cert: command.cert, key: command.key },
+            () => {
+              // Validation is asynchronous. A stopped or replaced Web surface must not install
+              // the old dialog's identity, even when the replacement uses the same domain.
+              if (closing) throw new DomainError('service_stopping', '服务正在停止，证书未更新。');
+              if (web !== target)
+                throw new DomainError('web_disabled', 'Web 访问状态已发生变化，请重新启用后重试。');
+              if (target.state().domain !== command.domain)
+                throw new DomainError(
+                  'web_certificate_domain',
+                  '访问域名已发生变化，请刷新后重试。',
+                );
+            },
+          );
+        } else certificates.reset(command.revision);
+        send(peer, { type: 'web.state', requestId: command.requestId, ...webState(peer) });
+        webChanged();
+        return undefined;
+      }
       case 'web.status':
       case 'web.configure':
       case 'web.pair':
@@ -1012,6 +1072,7 @@ export function createProxyServer(options: ServerOptions) {
                 undefined,
                 webChanged,
                 command,
+                (domain) => certificates?.validateDomain(domain),
               );
             } catch (error) {
               if (error instanceof DomainError) throw error;
@@ -1299,7 +1360,9 @@ export function createProxyServer(options: ServerOptions) {
       protocolVersion: PROTOCOL_VERSION,
       connectionId: peer.id,
       ...(web ? { web: true } : {}),
-      ...(options.web ? { webControl: true, webPairing: true, webSettings: true } : {}),
+      ...(options.web
+        ? { webControl: true, webPairing: true, webSettings: true, webCertificates: true }
+        : {}),
       diagnostics: true,
       adapter,
       model: options.claude?.model,
@@ -1431,7 +1494,11 @@ export function createProxyServer(options: ServerOptions) {
         return;
       }
     }
-    const serialized = JSON.stringify(command);
+    // The replay cache needs equality, not another retained copy of a private key.
+    const serialized =
+      command.type === 'web.certificate.set'
+        ? createHash('sha256').update(JSON.stringify(command)).digest('hex')
+        : JSON.stringify(command);
     const previous = peer.responses.get(command.requestId);
     if (previous) {
       if (previous.command === serialized)
@@ -1715,6 +1782,7 @@ export function createProxyServer(options: ServerOptions) {
   return {
     store,
     async listen(port = 8787): Promise<string> {
+      await certificates?.initialize();
       await releases.refresh();
       updates?.start();
       if (usageReceiver)

@@ -94,6 +94,7 @@ export class WebAccess {
   private changed: () => void;
   private closed = false;
   private serving = 0;
+  private validateConfiguration: (domain: string) => void;
 
   constructor(
     options: WebAccessOptions,
@@ -102,7 +103,9 @@ export class WebAccess {
     now?: () => number,
     changed = () => {},
     configuration: WebAccessConfiguration = {},
+    validateConfiguration: (domain: string) => void = () => {},
   ) {
+    this.validateConfiguration = validateConfiguration;
     this.now = now ?? (() => performance.now());
     this.wallNow = now ?? Date.now;
     this.changed = changed;
@@ -141,6 +144,7 @@ export class WebAccess {
       saved ?? { domain: '', path: randomBytes(16).toString('hex') },
       configuration,
     );
+    this.validateConfiguration(next.domain);
     this.url = this.configuredUrl(next.domain);
     if (!saved || saved.domain !== next.domain || saved.path !== next.path) this.saveSettings(next);
     this.settings = next;
@@ -209,6 +213,7 @@ export class WebAccess {
   configure(configuration: WebAccessConfiguration) {
     if (this.closed) throw new DomainError('web_disabled', '服务端尚未启用 Web 访问。');
     const next = this.configureValue(this.settings, configuration);
+    this.validateConfiguration(next.domain);
     if (next.path === this.settings.path && next.domain === this.settings.domain) return;
     try {
       this.saveSettings(next);

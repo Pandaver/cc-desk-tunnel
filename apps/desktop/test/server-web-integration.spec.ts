@@ -1,15 +1,23 @@
 import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, X509Certificate } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
+import { connect as connectTls } from 'node:tls';
+import type { ConnectionOptions } from 'node:tls';
 import { tmpdir } from 'node:os';
 import { extname, join, resolve } from 'node:path';
 import { WebSocket } from 'ws';
 import { PROTOCOL_VERSION, serverMessageSchema } from '@cc-desk-tunnel/protocol';
 import type { ServerMessage } from '@cc-desk-tunnel/protocol';
 import { createProxyServer } from '../../server/src/server.ts';
+import {
+  ca,
+  custom,
+  defaultCertificate,
+  wrongDomain,
+} from '../../server/test/fixtures/web-certificates.ts';
 import { send, settled } from './helpers.ts';
 
 // Only OS calls and local renderer assets are substituted. The desktop's real ProxyClient talks to
@@ -19,6 +27,7 @@ async function desktopSettings(
   origin: string,
   token: string,
   device: { id: string; name: string },
+  tls?: ConnectionOptions,
 ) {
   await page.route('**/desktop-settings/**', async (route) => {
     const path = new URL(route.request().url()).pathname.slice('/desktop-settings/'.length);
@@ -38,8 +47,9 @@ async function desktopSettings(
   });
   // Installed desktop uses a Node WebSocket bridge, not a renderer-origin connection. Forward raw
   // frames through the same kind of transport so the server's browser-origin rejection stays intact.
-  await page.routeWebSocket(origin.replace('http', 'ws') + '/ws', (socket) => {
-    const proxy = new WebSocket(origin.replace('http', 'ws') + '/ws');
+  const rendererUrl = origin.replace(/^https?:/, 'ws:') + '/ws';
+  await page.routeWebSocket(rendererUrl, (socket) => {
+    const proxy = new WebSocket(origin.replace('http', 'ws') + '/ws', tls);
     const pending: (string | Buffer)[] = [];
     socket.onMessage((raw) => {
       if (proxy.readyState === WebSocket.OPEN) proxy.send(raw);
@@ -57,7 +67,7 @@ async function desktopSettings(
     socket.onClose(() => proxy.close());
   });
   await page.addInitScript(
-    ({ origin, token, device }) => {
+    ({ rendererUrl, token, device }) => {
       const nothing = async () => undefined;
       const listen = () => () => {};
       window.desktop = {
@@ -67,7 +77,7 @@ async function desktopSettings(
         version: async () => '0.3.4',
         device: async () => device,
         loadLogin: async () => ({
-          url: origin.replace('http', 'ws') + '/ws',
+          url: rendererUrl,
           token,
           fingerprint: '',
           mode: 'local',
@@ -94,7 +104,7 @@ async function desktopSettings(
         openExternal: nothing,
       } as unknown as NonNullable<typeof window.desktop>;
     },
-    { origin, token, device },
+    { rendererUrl, token, device },
   );
   await page.goto('/desktop-settings/');
   await expect(page.locator('.connection-status')).toContainText('已连接');
@@ -401,6 +411,107 @@ test('desktop settings initialize pairing and the production browser controls an
     await page.goto('about:blank');
     await controlPage.close();
     desktop?.terminate();
+    await server.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('desktop certificate form configures real SNI while preserving the IP certificate', async ({
+  page,
+}) => {
+  test.setTimeout(60000);
+  const reservation = createServer();
+  await new Promise<void>((done) => reservation.listen(0, '127.0.0.1', done));
+  const address = reservation.address();
+  if (!address || typeof address === 'string') throw new Error('Missing test port');
+  await new Promise<void>((done, fail) =>
+    reservation.close((error) => (error ? fail(error) : done())),
+  );
+  const port = address.port;
+  const origin = `https://127.0.0.1:${port}`;
+  const directory = mkdtempSync(join(tmpdir(), 'cc-web-certificate-ui-'));
+  const token = randomUUID();
+  const defaultPin = new X509Certificate(defaultCertificate.cert).fingerprint256;
+  const customPin = new X509Certificate(custom.cert).fingerprint256;
+  const defaultTls: ConnectionOptions = {
+    ca: defaultCertificate.cert,
+    rejectUnauthorized: true,
+    checkServerIdentity: (_host, certificate) =>
+      certificate.fingerprint256 === defaultPin
+        ? undefined
+        : new Error('Test default certificate changed'),
+  };
+  const server = createProxyServer({
+    token,
+    dataDir: directory,
+    tls: { cert: Buffer.from(defaultCertificate.cert), key: Buffer.from(defaultCertificate.key) },
+    web: { origin, directory: resolve('apps/desktop/dist') },
+  });
+  async function fingerprint(domain?: string) {
+    return new Promise<string>((resolve, reject) => {
+      const socket = connectTls({
+        host: '127.0.0.1',
+        port,
+        ...(domain ? { servername: domain, ca, rejectUnauthorized: true } : defaultTls),
+      });
+      socket.setTimeout(5000, () => socket.destroy(new Error('Test TLS timeout')));
+      socket.on('error', reject);
+      socket.once('secureConnect', () => {
+        resolve(socket.getPeerCertificate().fingerprint256);
+        socket.destroy();
+      });
+    });
+  }
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  try {
+    await server.listen(port);
+    const panel = await desktopSettings(
+      page,
+      origin,
+      token,
+      { id: randomUUID(), name: '证书管理测试设备' },
+      defaultTls,
+    );
+    await panel.getByRole('switch', { name: '启用 Web 访问' }).click();
+    const domain = panel.getByRole('textbox', { name: '访问域名', exact: true });
+    await domain.fill('web.example.test');
+    await domain.blur();
+    await expect(panel.getByLabel('服务端访问地址', { exact: true })).toContainText(
+      'web.example.test',
+    );
+    await panel.getByRole('button', { name: '管理 HTTPS 证书' }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('textbox', { name: '证书链 PEM', exact: true }).fill(wrongDomain.cert);
+    await dialog.getByRole('textbox', { name: '私钥 PEM', exact: true }).fill(wrongDomain.key);
+    await dialog.getByRole('button', { name: '保存证书', exact: true }).click();
+    await expect(dialog.getByRole('alert')).toContainText('未覆盖');
+    expect(await fingerprint()).toBe(defaultPin);
+    await dialog.getByRole('textbox', { name: '证书链 PEM', exact: true }).fill(custom.cert);
+    await dialog.getByRole('textbox', { name: '私钥 PEM', exact: true }).fill(custom.key);
+    await dialog.getByRole('button', { name: '保存证书', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(panel.getByText('自定义证书', { exact: true })).toBeVisible();
+    expect(await fingerprint('web.example.test')).toBe(customPin);
+    expect(await fingerprint()).toBe(defaultPin);
+    await expect(page.locator('.connection-status')).toContainText('已连接');
+    await expect(domain).toBeDisabled();
+    await panel.getByRole('button', { name: '管理 HTTPS 证书' }).click();
+    await expect(dialog.getByRole('textbox', { name: '私钥 PEM', exact: true })).toHaveValue('');
+    await expect(dialog.getByRole('textbox', { name: '证书链 PEM', exact: true })).toHaveValue('');
+    await dialog.getByRole('button', { name: '恢复默认', exact: true }).click();
+    await dialog.getByRole('button', { name: '恢复默认证书', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(domain).toBeEnabled();
+    expect(await fingerprint()).toBe(defaultPin);
+    await expect(page.locator('.connection-status')).toContainText('已连接');
+    const storage = await page.evaluate(() =>
+      JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }),
+    );
+    expect(storage).not.toContain('PRIVATE KEY');
+    expect(errors).toEqual([]);
+  } finally {
+    await page.close();
     await server.close();
     rmSync(directory, { recursive: true, force: true });
   }

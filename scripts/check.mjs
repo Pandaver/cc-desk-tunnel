@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,8 +17,30 @@ const git = (...args) =>
 const files = git('ls-files', '-z').split('\0').filter(Boolean);
 const privatePath =
   /(^|\/)(?:\.local|node_modules|dist|coverage)(?:\/|$)|(^|\/)\.env(?:\.|$)|\.local\.json$|\.(?:pem|key|p12|pfx)$/i;
-const secretValue =
-  /\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}|-----BEGIN (?:OPENSSH |RSA |EC )?PRIVATE KEY-----/;
+const secretToken = /\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}/;
+const privateKey = /-----BEGIN (?:OPENSSH |RSA |EC )?PRIVATE KEY-----/;
+// Reviewed public, test-only private keys, never deployment credentials. Both the exact path and
+// complete indexed content must match. Any fixture edit requires reviewing and updating its hash;
+// this exception never applies to API tokens, other files or the surrounding fixtures directory.
+const publicTestKeys = new Map([
+  [
+    'apps/server/test/fixtures/web-certificates.ts',
+    '30fc164e084db9599a545e7bf0cdba93fbdd98a16c5c88b2a84c04b91a16c7c6',
+  ],
+  [
+    'apps/server/test/fixtures/web-certificate-chains.ts',
+    '017df24722d441bc9d4a070b2de7ac6415c5d89d5cf393301bbfa1ef74dbe02d',
+  ],
+]);
+// These exact literals contain no key: one is an input hint, the other an invalid UI mock. Remove
+// only that one literal in its known file; another private-key marker in either file still fails.
+const keyPlaceholders = new Map([
+  ['apps/desktop/src/ServerWebAccess.tsx', /placeholder="-----BEGIN (PRIVATE KEY)-----"/],
+  [
+    'apps/desktop/test/web-certificates.spec.ts',
+    /'-----BEGIN (PRIVATE KEY)-----\\nfixture-private-material\\n-----END \1-----'/,
+  ],
+]);
 
 for (const file of files) {
   if (privatePath.test(file) && !file.endsWith('.env.example')) {
@@ -25,7 +48,14 @@ for (const file of files) {
   }
   if (!/\.(?:md|mjs|cjs|ts|tsx|html|css|json|txt|sh|ps1)$/.test(file)) continue;
   const content = git('show', ':' + file);
-  if (secretValue.test(content)) errors.push('疑似秘密：' + file + '（内容不显示）');
+  const placeholder = keyPlaceholders.get(file);
+  const keyContent = placeholder ? content.replace(placeholder, '') : content;
+  if (
+    secretToken.test(content) ||
+    (privateKey.test(keyContent) &&
+      publicTestKeys.get(file) !== createHash('sha256').update(content).digest('hex'))
+  )
+    errors.push('疑似秘密：' + file + '（内容不显示）');
   if (file.endsWith('.json')) {
     try {
       JSON.parse(content);

@@ -206,3 +206,59 @@ test('idempotent pairing initialization is an optional advertised capability', (
   });
   assert.ok(ready.type === 'ready' && ready.webPairing === true);
 });
+
+test('certificate management is additive, bounded and keeps public state separate from upload material', () => {
+  const requestId = randomUUID();
+  const command = {
+    type: 'web.certificate.set',
+    requestId,
+    revision: randomUUID(),
+    domain: 'web.example.test',
+    cert: 'PEM',
+    key: 'KEY',
+  };
+  assert.ok(commandSchema.safeParse(command).success);
+  assert.equal(commandSchema.safeParse({ ...command, domain: '' }).success, false);
+  assert.equal(commandSchema.safeParse({ ...command, cert: 'x'.repeat(65537) }).success, false);
+  assert.equal(commandSchema.safeParse({ ...command, key: 'x'.repeat(16385) }).success, false);
+  assert.equal(commandSchema.safeParse({ ...command, revision: '' }).success, false);
+  assert.equal(commandSchema.safeParse({ ...command, arbitrary: true }).success, false);
+  assert.ok(
+    commandSchema.safeParse({
+      type: 'web.certificate.reset',
+      requestId,
+      revision: command.revision,
+    }).success,
+  );
+  const ready = serverMessageSchema.parse({
+    type: 'ready',
+    protocolVersion: 19,
+    connectionId: randomUUID(),
+    adapter: 'simulation',
+    version: '0.3.5',
+    sessions: [],
+    webCertificates: true,
+  });
+  assert.ok(ready.type === 'ready' && ready.webCertificates);
+  const state = webStateSchema.parse({
+    type: 'web.state',
+    requestId,
+    enabled: false,
+    grants: [],
+    certificate: {
+      mode: 'custom',
+      revision: command.revision,
+      details: {
+        domain: command.domain,
+        subject: 'CN=Test',
+        issuer: 'CN=Test CA',
+        validFrom: new Date().toISOString(),
+        validTo: new Date().toISOString(),
+        fingerprint: 'AA:BB',
+      },
+      cert: 'PRIVATE UPLOAD',
+      key: 'PRIVATE KEY',
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(state), /PRIVATE/);
+});

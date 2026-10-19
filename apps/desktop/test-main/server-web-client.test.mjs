@@ -321,6 +321,7 @@ function management(t) {
     webControl: true,
     webPairing: true,
     webSettings: true,
+    webCertificates: true,
   });
   const reply = (state) => {
     const requestId = socket.sent.at(-1).requestId;
@@ -403,6 +404,29 @@ test('address configuration capability clears on disconnect and does not leak in
   client.connectWeb(device);
   ready(Socket.all.at(-1));
   assert.equal(client.state.webSettings, false);
+  assert.equal(client.state.webState, null);
+});
+
+test('certificate capabilities and public metadata clear across disconnects and legacy reconnects', async (t) => {
+  const { client, socket, reply, state, device, Socket, ready } = management(t);
+  assert.equal(client.state.webCertificates, true);
+  const certificate = { mode: 'default', revision: randomUUID() };
+  const reading = client.fetch({ type: 'web.status' });
+  reply({ ...state, certificate });
+  await reading;
+  assert.deepEqual(client.state.webState.certificate, certificate);
+  const reset = client.fetch({ type: 'web.certificate.reset', revision: certificate.revision });
+  assert.equal(client.state.webPending, true);
+  assert.equal(socket.sent.at(-1).type, 'web.certificate.reset');
+  reply({ ...state, certificate: { ...certificate, revision: randomUUID() } });
+  await reset;
+  assert.equal(client.state.webPending, false);
+  socket.close(1006);
+  assert.equal(client.state.webCertificates, false);
+  assert.equal(client.state.webState, null);
+  client.connectWeb(device);
+  ready(Socket.all.at(-1));
+  assert.equal(client.state.webCertificates, false);
   assert.equal(client.state.webState, null);
 });
 

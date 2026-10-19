@@ -56,10 +56,12 @@ export function Switch({
 export function Modal({
   title,
   onClose,
+  closeDisabled = false,
   children,
 }: {
   title: string;
   onClose: () => void;
+  closeDisabled?: boolean;
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
@@ -72,12 +74,12 @@ export function Modal({
       ref={ref}
       onCancel={(event) => {
         event.preventDefault();
-        onClose();
+        if (!closeDisabled) onClose();
       }}
     >
       <div className="dialog-heading">
         <h2>{title}</h2>
-        <IconButton title="关闭" onClick={onClose}>
+        <IconButton title="关闭" onClick={onClose} disabled={closeDisabled}>
           <X />
         </IconButton>
       </div>

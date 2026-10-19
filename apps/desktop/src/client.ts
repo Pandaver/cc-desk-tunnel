@@ -44,6 +44,8 @@ type Replies = {
   'instructions.get': 'instructions.state';
   'instructions.update': 'instructions.state';
   'web.configure': 'web.state';
+  'web.certificate.set': 'web.state';
+  'web.certificate.reset': 'web.state';
   'web.status': 'web.state';
   'web.pair': 'web.state';
   'web.revoke': 'web.state';
@@ -105,6 +107,7 @@ export type ClientState = {
   webControl: boolean;
   webPairing: boolean;
   webSettings: boolean;
+  webCertificates: boolean;
   webState: WebAccessState | null;
   webPending: boolean;
   webPreparing: boolean;
@@ -159,6 +162,7 @@ export class ProxyClient {
     webControl: false,
     webPairing: false,
     webSettings: false,
+    webCertificates: false,
     webState: null,
     webPending: false,
     webPreparing: false,
@@ -249,6 +253,7 @@ export class ProxyClient {
       webControl: false,
       webPairing: false,
       webSettings: false,
+      webCertificates: false,
       webEnabled: false,
     });
   }
@@ -467,6 +472,7 @@ export class ProxyClient {
           webControl: message.webControl === true,
           webPairing: message.webPairing === true,
           webSettings: message.webSettings === true,
+          webCertificates: message.webCertificates === true,
           connectionId: message.connectionId,
           sessions: message.sessions,
           selectedId,

@@ -481,7 +481,27 @@ export const webPathSchema = z
     (value) => !['ws', 'health', 'client', 'assets'].includes(value),
     '此路径由服务端保留，请换一个路径。',
   );
+// Keep uploads well below the control frame limit; public state never contains PEM material.
+export const WEB_CERTIFICATE_LIMIT = 64 * 1024;
+export const WEB_PRIVATE_KEY_LIMIT = 16 * 1024;
+export const webCertificateStateSchema = z.object({
+  mode: z.enum(['default', 'custom', 'external', 'unavailable']),
+  revision: z.string().max(80),
+  details: z
+    .object({
+      domain: webDomainSchema,
+      subject: z.string(),
+      issuer: z.string(),
+      validFrom: timestamp,
+      validTo: timestamp,
+      fingerprint: z.string(),
+    })
+    .optional(),
+  error: z.string().optional(),
+});
+export type WebCertificateState = z.infer<typeof webCertificateStateSchema>;
 export const webAccessStateSchema = z.object({
+  certificate: webCertificateStateSchema.optional(),
   enabled: z.boolean(),
   origin: z.url().optional(),
   domain: webDomainSchema.optional(),
@@ -505,6 +525,23 @@ export const webStateSchema = webAccessStateSchema.extend({
 export type WebState = z.infer<typeof webStateSchema>;
 export const commandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('web.status'), ...request, watch: z.boolean().optional() }).strict(),
+  z
+    .object({
+      type: z.literal('web.certificate.set'),
+      ...request,
+      revision: z.string().min(1).max(80),
+      domain: webDomainSchema.refine((value) => value !== '', '请先设置访问域名。'),
+      cert: z.string().min(1).max(WEB_CERTIFICATE_LIMIT),
+      key: z.string().min(1).max(WEB_PRIVATE_KEY_LIMIT),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('web.certificate.reset'),
+      ...request,
+      revision: z.string().min(1).max(80),
+    })
+    .strict(),
   z
     .object({
       type: z.literal('web.configure'),
@@ -758,6 +795,7 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
     webControl: z.boolean().optional(),
     webPairing: z.boolean().optional(),
     webSettings: z.literal(true).optional(),
+    webCertificates: z.literal(true).optional(),
     diagnostics: z.literal(true).optional(),
     adapter: z.enum(['simulation', 'claude-code']),
     model: z.string().optional(),
