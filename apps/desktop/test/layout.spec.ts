@@ -20,6 +20,27 @@ const shot = (page: Page, name: string) =>
   page.screenshot({ path: resolve(screenshots, 'redesign', `${name}.png`) });
 const project = 'D:\\工作\\中文项目';
 
+test('a menu longer than the window scrolls inside it', async ({ page }) => {
+  await page.goto('/');
+  await login(page);
+  await createSession(page, '很多项目');
+  for (let index = 1; index <= 8; index++) {
+    await page.getByRole('button', { name: '添加项目', exact: true }).click();
+    await page.getByLabel('本机项目目录').fill(`D:\\工作\\项目${index}`);
+    await page.getByRole('button', { name: '添加', exact: true }).click();
+  }
+  await page.setViewportSize({ width: 1000, height: 420 });
+  await page.getByRole('button', { name: '会话所在的项目', exact: true }).click();
+  const menu = page.getByRole('menu', { name: '会话所在的项目', exact: true });
+  const box = (await menu.boundingBox())!;
+  expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(box.y + box.height).toBeLessThanOrEqual(420);
+  expect(await menu.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
+  const last = page.getByRole('menuitem', { name: '选择其他文件夹…', exact: true });
+  await last.scrollIntoViewIfNeeded();
+  await expect(last).toBeInViewport();
+});
+
 test('pages, side column, menus, pins, export, settings and the notice list', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
