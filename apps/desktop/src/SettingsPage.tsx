@@ -12,6 +12,7 @@ import {
   UserRound,
 } from 'lucide-react';
 import type { ProxyClient } from './client.ts';
+import WebAccessSettings from './WebAccessSettings.tsx';
 import Help from './Help.tsx';
 import type { ConnectionForm } from './LoginPage.tsx';
 import { connectionWaits, setPrefs, themes, usePrefs, waitRange } from './prefs.ts';
@@ -465,11 +466,17 @@ function Connections() {
 }
 
 function General({
+  client,
+  browser,
+  web,
   form,
   changeForm,
   workspaceRoot,
   chooseWorkspace,
 }: {
+  client: ProxyClient;
+  browser: boolean;
+  web: boolean;
   form: ConnectionForm;
   changeForm: (values: Partial<ConnectionForm>) => void;
   workspaceRoot: string;
@@ -485,7 +492,10 @@ function General({
       <div className="page-body">
         <h1 className="page-title">常规</h1>
         <ThemeSettings />
-        {!window.desktop && <p className="muted">窗口、会话和连接的设置只在桌面客户端里有。</p>}
+        {web && <WebAccessSettings client={client} browser={browser} connectionUrl={form.url} />}
+        {!window.desktop && !browser && (
+          <p className="muted">窗口、会话和连接的设置只在桌面客户端里有。</p>
+        )}
         {window.desktop && (
           <>
             <h2 className="page-heading">窗口</h2>
@@ -792,9 +802,11 @@ export default function SettingsPage({
   updates,
   showNotes,
   back,
+  browser = false,
 }: {
   // Given before a connection exists: only this computer's own settings are shown, and this leaves them.
   back?: () => void;
+  browser?: boolean;
   client: ProxyClient;
   section: Section;
   go: (section: Section) => void;
@@ -816,6 +828,7 @@ export default function SettingsPage({
   const shown = sections.filter(
     (item) =>
       (!back || item.group === '客户端') &&
+      (!browser || !['account', 'claude'].includes(item.id)) &&
       `${item.name} ${item.words}`.toLowerCase().includes(term),
   );
   return (
@@ -874,6 +887,9 @@ export default function SettingsPage({
           )
         ) : section === 'general' ? (
           <General
+            client={client}
+            browser={browser}
+            web={!back && (native || browser)}
             form={form}
             changeForm={changeForm}
             workspaceRoot={workspaceRoot}
