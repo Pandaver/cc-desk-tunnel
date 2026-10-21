@@ -104,6 +104,8 @@ export class WebAccess {
   private timer?: NodeJS.Timeout;
   private closed = false;
   private index?: Buffer;
+  // The last address that sent X-Real-IP without being trusted to.
+  private forwardedBy?: string;
   readonly serverDeviceId: string;
   // Browser sign-ins are counted apart from desktops: mistakes typed in a browser never lock out a desktop
   // that shares its address.
@@ -244,14 +246,21 @@ export class WebAccess {
     return true;
   }
 
+  // Whether the request came through the deployment's proxy or one the user named.
+  proxied(request: IncomingMessage) {
+    const remote = ip(request.socket.remoteAddress ?? '');
+    return (
+      !!this.options.reverseProxy ||
+      (this.settings.proxyEnabled && this.settings.trustedProxies.includes(remote))
+    );
+  }
   // Only a proxy the user named may tell the client's address.
   address(request: IncomingMessage) {
     const remote = ip(request.socket.remoteAddress ?? '');
-    const trusted =
-      this.options.reverseProxy ||
-      (this.settings.proxyEnabled && this.settings.trustedProxies.includes(remote));
     const forwarded = request.headers['x-real-ip'];
-    return trusted && typeof forwarded === 'string' && isIP(forwarded) ? ip(forwarded) : remote;
+    return this.proxied(request) && typeof forwarded === 'string' && isIP(forwarded)
+      ? ip(forwarded)
+      : remote;
   }
   // The origin a page of this entry has, or undefined for a host it does not serve. Plain HTTP is only for
   // a service on loopback reached on loopback.
@@ -332,9 +341,12 @@ export class WebAccess {
       return undefined;
     }
   }
-  // Whether the certificate a browser at this origin gets is self-signed.
-  selfSigned(origin?: string) {
-    return this.certificates.selfSigned(origin ? new URL(origin).hostname : this.settings.domain);
+  // Whether the certificate a browser at this origin gets is self-signed. Behind a proxy it gets the proxy's.
+  selfSigned(origin?: string, proxied = false) {
+    return (
+      !proxied &&
+      this.certificates.selfSigned(origin ? new URL(origin).hostname : this.settings.domain)
+    );
   }
   state(origin?: string): WebSettingsState {
     this.sweep();
@@ -348,6 +360,7 @@ export class WebAccess {
       ).map((row) => this.publicSession(row)),
       url: this.url(origin),
       selfSigned: this.selfSigned(this.url(origin)),
+      ...(this.forwardedBy ? { forwardedBy: this.forwardedBy } : {}),
     };
   }
   private loginState(request: IncomingMessage, row?: StoredSession): WebLoginState {
@@ -356,7 +369,7 @@ export class WebAccess {
       authenticated: !!row,
       ...(row ? { session: this.publicSession(row) } : {}),
       totpEnabled: !!this.record().totp_secret,
-      selfSigned: this.selfSigned(origin),
+      selfSigned: this.selfSigned(origin, this.proxied(request)),
       url: this.url(origin),
     };
   }
@@ -506,7 +519,8 @@ export class WebAccess {
   private headers(response: ServerResponse) {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
-    response.setHeader('Referrer-Policy', 'no-referrer');
+    // Not no-referrer: under it Safari sends Origin: null with the page's own POSTs, and sign-in is refused.
+    response.setHeader('Referrer-Policy', 'same-origin');
     response.setHeader(
       'Content-Security-Policy',
       "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
@@ -546,6 +560,9 @@ export class WebAccess {
   // Answers the requests of the Web entry; false leaves the request to the caller.
   async handle(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
     if (!this.enabled) return false;
+    // Where a proxy connects from is not always what one expects; the desktop settings show it.
+    if (request.headers['x-real-ip'] !== undefined && !this.proxied(request))
+      this.forwardedBy = ip(request.socket.remoteAddress ?? '');
     this.headers(response);
     if (!this.requestOrigin(request)) return this.empty(response, 404);
     const pathname = (request.url ?? '').split('?')[0];

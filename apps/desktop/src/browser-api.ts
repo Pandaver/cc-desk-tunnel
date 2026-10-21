@@ -24,8 +24,9 @@ async function request(name: string, body?: unknown) {
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
     });
-    const value: unknown = await response.json();
-    if (!response.ok) {
+    // A refusal from a proxy or the entry itself may have no JSON body at all.
+    const value: unknown = await response.json().catch(() => undefined);
+    if (!response.ok || value === undefined) {
       const message =
         value && typeof value === 'object' && 'error' in value
           ? String(value.error)

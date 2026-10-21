@@ -66,6 +66,8 @@ export const webSettingsStateSchema = z.object({
   sessions: z.array(webSessionSchema),
   url: z.url().optional(),
   selfSigned: z.boolean(),
+  // The last address that sent a client address without being a trusted proxy, to help name the right one.
+  forwardedBy: z.string().optional(),
 });
 export type WebSettingsState = z.infer<typeof webSettingsStateSchema>;
 export const webTotpSetupSchema = z.object({

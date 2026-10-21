@@ -71,6 +71,8 @@ type Peer = {
   authenticated: boolean;
   browser?: string;
   origin?: string;
+  // A browser that came through a trusted proxy, which serves it the proxy's certificate.
+  proxied?: boolean;
   // The computer it is from: the name it signed in with, and the identity that follows in a frame of its own.
   name: string;
   device?: Device;
@@ -285,7 +287,11 @@ export function createProxyServer(options: ServerOptions) {
         return;
       }
       wss.handleUpgrade(request, socket, head, (ws) =>
-        wss.emit('connection', ws, address, { browser: session.id, origin: originOf(request) }),
+        wss.emit('connection', ws, address, {
+          browser: session.id,
+          origin: originOf(request),
+          proxied: web.proxied(request),
+        }),
       );
       return;
     }
@@ -1211,7 +1217,7 @@ export function createProxyServer(options: ServerOptions) {
         browser: {
           sessionId: peer.browser,
           serverDeviceId: serverDevice.id,
-          selfSigned: web.selfSigned(peer.origin),
+          selfSigned: web.selfSigned(peer.origin, peer.proxied),
         },
       });
       send(peer, devices());
@@ -1485,7 +1491,11 @@ export function createProxyServer(options: ServerOptions) {
 
   wss.on(
     'connection',
-    (socket: WebSocket, address: string, context?: { browser?: string; origin: string }) => {
+    (
+      socket: WebSocket,
+      address: string,
+      context?: { browser?: string; origin: string; proxied?: boolean },
+    ) => {
       void releases.refresh();
       const peer: Peer = {
         socket,
@@ -1494,6 +1504,7 @@ export function createProxyServer(options: ServerOptions) {
         authenticated: false,
         browser: context?.browser,
         origin: context?.origin,
+        proxied: context?.proxied,
         name: '',
         registering: false,
         left: false,

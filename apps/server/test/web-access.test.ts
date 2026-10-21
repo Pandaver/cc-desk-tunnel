@@ -225,6 +225,8 @@ test('Web index uses its HTTP CSP without changing the desktop build or static a
       "frame-ancestors 'none'",
     ])
       assert.ok(policy.includes(directive), directive);
+    // Under no-referrer Safari sends Origin: null with the page's own sign-in, which is refused.
+    assert.equal(response.headers['referrer-policy'], 'same-origin');
   }
   assert.equal(readFileSync(index, 'utf8'), html);
   assert.equal((await f.http('/assets/app.js')).text, JSON.stringify(meta));
@@ -428,6 +430,22 @@ test('browser path changes require proof, desktop settings revoke old sessions, 
   assert.equal(f.web.address(requestAt('127.0.0.1', '198.51.100.1')), '127.0.0.1');
   assert.equal(f.web.address(requestAt('192.0.2.10', '198.51.100.1')), '198.51.100.1');
   assert.equal(f.web.address(requestAt('192.0.2.10', '198.51.100.1, 127.0.0.1')), '192.0.2.10');
+});
+
+test('a browser behind a trusted proxy is not warned about this certificate, and an untrusted forwarder is shown', async (t) => {
+  const f = await fixture(t, true);
+  f.enable();
+  const forwarded = { 'X-Real-IP': '198.51.100.1' };
+  assert.equal((await f.http('/api/session', undefined, forwarded)).data.selfSigned, true);
+  assert.equal(
+    (f.command({ type: 'web.settings.get' }) as WebSettingsState).forwardedBy,
+    '127.0.0.1',
+  );
+  f.command({
+    type: 'web.settings.update',
+    values: { proxyEnabled: true, trustedProxies: ['127.0.0.1'] },
+  });
+  assert.equal((await f.http('/api/session', undefined, forwarded)).data.selfSigned, false);
 });
 
 test('authenticated desktop saves access settings without proof or consuming a TOTP code', async (t) => {

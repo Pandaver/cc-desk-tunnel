@@ -624,6 +624,16 @@ function AccessDialog({
                   placeholder="每行一个 IP 地址"
                 />
                 <small className="muted">只信任这些地址转发的客户端 IP 信息。</small>
+                {values.forwardedBy &&
+                  !draft.trustedProxies
+                    .split(/[\n,]/)
+                    .map((value) => value.trim())
+                    .includes(values.forwardedBy) && (
+                    <small className="muted">
+                      最近一次带客户端 IP 的请求来自 {values.forwardedBy}
+                      ，它不在上面的列表中。确认这是你的反向代理后再填写，不认识的地址不要加入。
+                    </small>
+                  )}
               </label>
               <ReverseProxyHelp
                 connectionUrl={connectionUrl}
