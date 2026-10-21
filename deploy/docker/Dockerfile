@@ -29,13 +29,14 @@ RUN install() { npm ci --omit=dev --workspace=@cc-desk-tunnel/server --workspace
 COPY --chown=ccdesktunnel:ccdesktunnel apps/server/src apps/server/src
 COPY --chown=ccdesktunnel:ccdesktunnel packages/protocol/src packages/protocol/src
 
-# A source checkout builds the shared UI; a release archive already contains it.
+# A source checkout builds the shared UI; a release archive already contains it, and its build is used even with
+# older sources beside it (manage.sh drops it when the checkout has moved on).
 # Build-time frontend dependencies never enter the runtime stage.
 FROM build AS web-build
 COPY --chown=ccdesktunnel:ccdesktunnel CHANGELOG.md ./
 COPY --chown=ccdesktunnel:ccdesktunnel apps/desktop apps/desktop
 COPY --chown=ccdesktunnel:ccdesktunnel apps/server apps/server
-RUN if [ -f apps/desktop/src/main.tsx ]; then \
+RUN if [ ! -s apps/server/web/index.html ] && [ -f apps/desktop/src/main.tsx ]; then \
       ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm ci --include=dev --workspace=@cc-desk-tunnel/desktop --workspace=@cc-desk-tunnel/protocol \
       && node node_modules/vite/bin/vite.js build --config apps/desktop/vite.config.ts --outDir ../server/web --emptyOutDir; \
     fi && test -s apps/server/web/index.html
