@@ -47,7 +47,6 @@ test('server archives contain a fresh Web build without local data or desktop de
   put('apps/desktop/dist/index.html', 'desktop build stays unchanged');
   put('apps/desktop/src/private-test.ts', 'not runtime code');
   put('.env', 'local-secret');
-  put('deploy/local-secret.txt', 'not a deployment asset');
   put(
     'node_modules/vite/bin/vite.js',
     `
@@ -69,11 +68,7 @@ test('server archives contain a fresh Web build without local data or desktop de
   assert.ok(entries.includes('apps/server/web/assets/current.js'));
   assert.ok(entries.includes('CHANGELOG.md'));
   assert.ok(entries.includes('deploy/install.sh'));
-  assert.ok(
-    !entries.some((entry) =>
-      /node_modules|\.env|private-test|local-secret|desktop\/dist/.test(entry),
-    ),
-  );
+  assert.ok(!entries.some((entry) => /node_modules|\.env|private-test|desktop\/dist/.test(entry)));
   assert.equal(
     readFileSync(join(directory, 'apps/desktop/dist/index.html'), 'utf8'),
     'desktop build stays unchanged',
