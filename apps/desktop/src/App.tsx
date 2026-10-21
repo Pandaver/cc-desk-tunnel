@@ -39,6 +39,9 @@ import type {
   Session,
   SessionEvent,
 } from '@cc-desk-tunnel/protocol';
+import { browserSession, browserSocket, watchActivity } from './browser-api.ts';
+import { CertificateWarning } from './WebGate.tsx';
+import { hostCapabilities } from './host-capabilities.ts';
 import AccountPanel from './AccountPanel.tsx';
 import { ProxyClient, RequestInterruptedError } from './client.ts';
 import Composer from './Composer.tsx';
@@ -112,8 +115,25 @@ function savedProjects(value: unknown = shared('projects')): string[] {
 }
 
 // Owns the connection, the selection and every request; the components below render and report user intent.
-export function App() {
+export function App({
+  browser,
+}: { browser?: { selfSigned: boolean; expired: () => void; logout: () => Promise<void> } } = {}) {
+  const host = hostCapabilities(!!browser);
   const [client] = useState(() => new ProxyClient());
+  useEffect(() => {
+    if (!browser) return;
+    client.connectBrowser(
+      browserSocket(),
+      browser.expired,
+      async () => (await browserSession()).authenticated,
+    );
+    return () => client.disconnect();
+  }, [client, browser?.expired]);
+  const inBrowser = !!browser;
+  useEffect(
+    () => (inBrowser ? watchActivity(() => client.markActive()) : undefined),
+    [client, inBrowser],
+  );
   const [clock] = useState(() => ({ now: client.serviceNow, activityAt: client.activityAt }));
   // The version whose notes are shown, over whichever page is up.
   const [notes, setNotes] = useState<string | null>(null);
@@ -165,7 +185,11 @@ export function App() {
     query.addEventListener('change', follow);
     return () => query.removeEventListener('change', follow);
   }, []);
-  const [place, setPlace] = useState<Place>({ page: 'chat', section: 'account', sessionId: null });
+  const [place, setPlace] = useState<Place>({
+    page: 'chat',
+    section: browser ? 'general' : 'account',
+    sessionId: null,
+  });
   // Places visited, for the title bar's way back and forward.
   const trail = useRef<{ places: Place[]; at: number }>({ places: [place], at: 0 });
   const [, setTrailAt] = useState(0);
@@ -187,6 +211,7 @@ export function App() {
 
   const nativeMode = state.adapter === 'claude-code';
   const connected = state.status === 'connected';
+  const selfSigned = !!browser && (state.browser?.selfSigned ?? browser.selfSigned);
   const othersBusy = useShared('busy');
   const selected = state.sessions.find((session) => session.id === state.selectedId);
   // What is listed and managed here is what is on this computer. Sessions on the user's other computers are
@@ -214,7 +239,7 @@ export function App() {
       current = false;
     };
   }, [unplaced]);
-  const onThis = (session: Session) => isHere(session, state.device, absent);
+  const onThis = (session: Session) => !browser && isHere(session, state.device, absent);
   const sessions = state.sessions.filter((session) => onThis(session));
   const elsewhere = state.sessions.filter((session) => !onThis(session));
   const away = !!selected && !onThis(selected);
@@ -565,6 +590,10 @@ export function App() {
     });
   }
   function disconnect() {
+    if (browser) {
+      void act(browser.logout);
+      return;
+    }
     client.disconnect();
     setForm((current) => (current.remember ? current : { ...current, token: '' }));
     void window.desktop?.disconnectProxy();
@@ -608,8 +637,12 @@ export function App() {
     return false;
   };
   const show = (sessionId: string) => visit({ ...place, page: 'chat', sessionId });
-  const open = (page: Page, section: Section = place.section) =>
+  const open = (page: Page, section: Section = place.section) => {
+    if (!host.schedules && page === 'schedules') return;
+    if (!host.nativeSettings && (section === 'claude' || section === 'account'))
+      section = 'general';
     visit({ page, section, sessionId: client.state.selectedId });
+  };
   async function refreshStatus(sessionId = selected?.id ?? sessions[0]?.id) {
     if (!sessionId || refreshing) return;
     setRefreshing(true);
@@ -644,8 +677,15 @@ export function App() {
       if (path) setProjects((value) => withProject(value, path));
     });
   }
-  // The desktop gives a session without a project its own directory; a browser has none to offer and reuses a project.
+  // The desktop gives an ordinary session a local directory; the browser creates one on the server.
   async function newSession() {
+    if (browser) {
+      await act(async () => {
+        const response = await client.request({ type: 'server.session.create', title: '新会话' });
+        if (response.sessionId) show(response.sessionId);
+      });
+      return;
+    }
     if (window.desktop) {
       await act(async () => {
         const directory = await window.desktop!.createWorkspace();
@@ -721,6 +761,7 @@ export function App() {
         title: '定时任务未发出',
         body: `${task.name}：${outcome.text}`,
       }),
+    host.schedules,
   );
   // Where a session of another computer is to be on this one; null when the user gives none.
   async function placeHere(session: Session) {
@@ -821,14 +862,18 @@ export function App() {
           setRenameSession(session);
         },
       },
-      {
-        label: '分叉会话',
-        icon: <GitFork />,
-        disabled: !idle || !!session.activeRun,
-        run: () => {
-          void fork(session);
-        },
-      },
+      ...(host.localProjects
+        ? [
+            {
+              label: '分叉会话',
+              icon: <GitFork />,
+              disabled: !idle || !!session.activeRun,
+              run: () => {
+                void fork(session);
+              },
+            },
+          ]
+        : []),
       {
         label: '导出为 Markdown',
         icon: <FileDown />,
@@ -1045,25 +1090,34 @@ export function App() {
   const hint = (action: Action) =>
     (prefs.shortcuts.enabled && comboText(keyFor(prefs, action))) || undefined;
   const settingsMenu: MenuItem[] = [
-    {
-      label: `账号 · ${accountName}`,
-      icon: <UserRound />,
-      detail: signedOut
-        ? '点击登录 Claude 账号'
-        : (state.account?.subscriptionType ??
-          capabilities?.account.subscriptionType ??
-          '账号与额度'),
-      run: () => open('settings', 'account'),
-    },
+    ...(host.accountManagement
+      ? [
+          {
+            label: `账号 · ${accountName}`,
+            icon: <UserRound />,
+            detail: signedOut
+              ? '点击登录 Claude 账号'
+              : (state.account?.subscriptionType ??
+                capabilities?.account.subscriptionType ??
+                '账号与额度'),
+            run: () => open('settings', 'account'),
+          },
+        ]
+      : []),
     {
       label: '设置',
       icon: <Settings />,
       hint: hint('settings'),
       separated: true,
-      run: () => open('settings', nativeMode ? 'claude' : 'general'),
+      run: () => open('settings', nativeMode && host.nativeSettings ? 'claude' : 'general'),
     },
     { label: '帮助', icon: <CircleHelp />, run: () => open('settings', 'help') },
-    { label: '断开连接', icon: <LogOut />, separated: true, run: disconnect },
+    {
+      label: browser ? '退出登录' : '断开连接',
+      icon: <LogOut />,
+      separated: true,
+      run: disconnect,
+    },
   ];
   const toggleSide = () => setSideOpen((value) => !value);
   const canCreate = connected && !busy && !refreshing && !terminalSessionId;
@@ -1079,13 +1133,17 @@ export function App() {
             void newSession();
           },
         },
-        {
-          label: '添加项目…',
-          disabled: !connected || busy || !!terminalSessionId,
-          run: () => {
-            void addProject();
-          },
-        },
+        ...(host.localProjects
+          ? [
+              {
+                label: '添加项目…',
+                disabled: !connected || busy || !!terminalSessionId,
+                run: () => {
+                  void addProject();
+                },
+              },
+            ]
+          : []),
         {
           label: '导出当前会话…',
           disabled: !selected || !connected || !!terminalSessionId,
@@ -1096,7 +1154,7 @@ export function App() {
             });
           },
         },
-        { label: '断开连接', separated: true, run: disconnect },
+        { label: browser ? '退出登录' : '断开连接', separated: true, run: disconnect },
         ...(window.desktop ? [{ label: '退出', run: () => void window.desktop!.quit() }] : []),
       ],
     },
@@ -1111,11 +1169,15 @@ export function App() {
         },
         { label: sideOpen ? '收起侧栏' : '展开侧栏', hint: hint('toggleSide'), run: toggleSide },
         { label: '会话', separated: true, checked: place.page === 'chat', run: () => open('chat') },
-        {
-          label: '定时任务',
-          checked: place.page === 'schedules',
-          run: () => open('schedules'),
-        },
+        ...(host.schedules
+          ? [
+              {
+                label: '定时任务',
+                checked: place.page === 'schedules',
+                run: () => open('schedules'),
+              },
+            ]
+          : []),
         {
           label: '设置',
           hint: hint('settings'),
@@ -1188,6 +1250,34 @@ export function App() {
     window.addEventListener('keydown', listener);
     return () => window.removeEventListener('keydown', listener);
   }, []);
+
+  if (browser && (state.status === 'disconnected' || state.status === 'connecting'))
+    return (
+      <main className="web-login">
+        <section className="web-login-body">
+          <h1>连接服务端工作台</h1>
+          {browser.selfSigned && <CertificateWarning />}
+          <p role="status">{currentError ?? '正在连接…'}</p>
+          {state.status === 'disconnected' && (
+            <button
+              className="button"
+              onClick={() =>
+                client.connectBrowser(
+                  browserSocket(),
+                  browser.expired,
+                  async () => (await browserSession()).authenticated,
+                )
+              }
+            >
+              重新连接
+            </button>
+          )}
+          <button className="button" onClick={disconnect}>
+            退出登录
+          </button>
+        </section>
+      </main>
+    );
 
   if (state.status === 'disconnected' || state.status === 'connecting')
     return localSettings ? (
@@ -1295,7 +1385,10 @@ export function App() {
     about: '关于与更新',
   };
   return (
-    <div className={`shell ${sideOpen ? '' : 'side-closed'}`}>
+    <div
+      className={`shell ${sideOpen ? '' : 'side-closed'} ${selfSigned ? 'web-self-signed' : ''}`}
+    >
+      {selfSigned && <CertificateWarning />}
       <TitleBar
         title={
           place.page === 'chat'
@@ -1316,7 +1409,8 @@ export function App() {
       <Rail
         page={place.page}
         go={(page) => open(page)}
-        update={pendingUpdate}
+        schedules={host.schedules}
+        update={host.serviceManagement ? pendingUpdate : null}
         openUpdate={(position) => setMenu({ kind: 'update', ...position })}
         openSettings={(position) => setMenu({ kind: 'settings', ...position })}
       />
@@ -1330,6 +1424,7 @@ export function App() {
       {place.page === 'settings' ? (
         <SettingsPage
           client={client}
+          browser={!!browser}
           section={place.section}
           go={(section) => open('settings', section)}
           native={nativeMode}
@@ -1344,7 +1439,7 @@ export function App() {
           version={version}
           service={state.service}
           adapterName={adapterName}
-          updates={updates}
+          updates={host.serviceManagement ? updates : []}
           showNotes={setNotes}
           account={
             <AccountPanel
@@ -1375,7 +1470,8 @@ export function App() {
             elsewhere={elsewhere}
             devices={state.devices}
             selectedId={selected?.id}
-            projects={projects}
+            projects={host.localProjects ? projects : []}
+            localProjects={host.localProjects}
             workspaceRoots={workspaceRoots}
             connected={connected}
             busy={busy}
@@ -1503,7 +1599,7 @@ export function App() {
                 </p>
               </div>
             )}
-            {selected && away && (
+            {selected && away && host.localProjects && (
               <div className="elsewhere-bar" role="status">
                 <Laptop />
                 {remote ? (
@@ -1551,12 +1647,20 @@ export function App() {
                 </button>
               </div>
             )}
+            {browser && selected && away && !remote && (
+              <div className="elsewhere-bar" role="status">
+                <Laptop />
+                <p>设备“{selected.device?.name ?? '未知设备'}”未连接，当前只能查看会话。</p>
+              </div>
+            )}
             {selected && (!away || remote) && !terminalSessionId && (
               <Composer
                 openAccount={() => open('settings', 'account')}
                 session={selected}
                 projectName={
-                  isInside(selected.projectPath, workspaceRoots)
+                  state.devices.some(
+                    (device) => device.server && device.id === selected.device?.id,
+                  ) || isInside(selected.projectPath, workspaceRoots)
                     ? null
                     : projectLabel(selected.projectPath)
                 }
@@ -1597,7 +1701,7 @@ export function App() {
                 stop={stopRun}
               />
             )}
-            {selected && !away && !terminalSessionId && (
+            {selected && (!away || (browser && remote)) && !terminalSessionId && (
               <SessionBar
                 client={client}
                 sessionId={selected.id}

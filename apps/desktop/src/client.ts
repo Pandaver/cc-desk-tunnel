@@ -23,7 +23,14 @@ type DataMessage = Extract<
   ServerMessage,
   {
     type:
-      'usage.summary' | 'usage.page' | 'session.stats' | 'settings.state' | 'instructions.state';
+      | 'usage.summary'
+      | 'usage.page'
+      | 'session.stats'
+      | 'settings.state'
+      | 'instructions.state'
+      | 'web.settings.state'
+      | 'web.totp.setup'
+      | 'web.certificate.state';
   }
 >;
 // Commands answered with a data frame, and the frame each one gets.
@@ -35,6 +42,15 @@ type Replies = {
   'settings.update': 'settings.state';
   'instructions.get': 'instructions.state';
   'instructions.update': 'instructions.state';
+  'web.settings.get': 'web.settings.state';
+  'web.settings.update': 'web.settings.state';
+  'web.sessions.revoke': 'web.settings.state';
+  'web.totp.setup': 'web.totp.setup';
+  'web.totp.enable': 'web.settings.state';
+  'web.totp.disable': 'web.settings.state';
+  'web.certificate.get': 'web.certificate.state';
+  'web.certificate.set': 'web.certificate.state';
+  'web.certificate.reset': 'web.certificate.state';
 };
 type TerminalMessage = Extract<
   ServerMessage,
@@ -60,6 +76,8 @@ export class RequestInterruptedError extends Error {
       'session.stats',
       'settings.get',
       'instructions.get',
+      'web.settings.get',
+      'web.certificate.get',
       'service.update.check',
     ].includes(type);
     super(
@@ -90,6 +108,7 @@ export type ClientState = {
   connectionId: string | null;
   // The computer this client signed in as; a session's commands run on the one it is on.
   device: Device | null;
+  browser: Extract<ServerMessage, { type: 'ready' }>['browser'] | null;
   // The user's computers connected to the service now, and whether commands reach each yet. Another
   // computer's sessions can be worked on from here while it is listed and ready.
   devices: ConnectedDevice[];
@@ -132,6 +151,7 @@ export class ProxyClient {
     status: 'disconnected',
     connectionId: null,
     device: null,
+    browser: null,
     devices: [],
     sessions: [],
     events: {},
@@ -158,7 +178,9 @@ export class ProxyClient {
   credentials: {
     url: string;
     token: string;
-    device: Device;
+    device: Device | null;
+    browser?: () => void;
+    validate?: () => Promise<boolean>;
     reconnect: boolean;
     // Remote mode: opens the bridge in the main process and resolves to its address. A bridge serves one
     // connection, so every attempt asks for a new one.
@@ -234,6 +256,7 @@ export class ProxyClient {
     this.update({
       status: 'connecting',
       device,
+      browser: null,
       devices: [],
       error: null,
       release: null,
@@ -252,9 +275,79 @@ export class ProxyClient {
     });
     this.open();
   }
+  // The browser has an HttpOnly session, not a desktop identity or execution channel.
+  connectBrowser(url: string, expired: () => void, validate?: () => Promise<boolean>) {
+    const address = new URL(url);
+    const expected = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    if (
+      address.protocol !== expected ||
+      address.host !== location.host ||
+      address.username ||
+      address.password ||
+      address.search ||
+      address.hash
+    )
+      throw new Error('浏览器只能连接当前服务。');
+    this.disconnect();
+    this.credentials = {
+      url: address.href,
+      token: '',
+      device: null,
+      reconnect: true,
+      browser: expired,
+      validate,
+    };
+    this.established = false;
+    this.cacheOrder = [];
+    this.update({
+      status: 'connecting',
+      device: null,
+      browser: null,
+      devices: [],
+      error: null,
+      sessions: [],
+      events: {},
+      live: {},
+      history: {},
+      selectedId: null,
+    });
+    this.open();
+  }
   private open() {
     const credentials = this.credentials;
     if (!credentials) return;
+    if (credentials.browser && credentials.validate) {
+      const turn = ++this.turn;
+      const current = () => this.credentials === credentials && this.turn === turn;
+      void credentials.validate().then(
+        (authenticated) => {
+          if (!current()) return;
+          if (authenticated) this.attach(credentials);
+          else {
+            this.credentials = null;
+            this.update({ status: 'disconnected', connectionId: null });
+            credentials.browser!();
+          }
+        },
+        () => {
+          if (!current()) return;
+          this.update({
+            status: 'reconnecting',
+            connectionId: null,
+            devices: [],
+            error: '暂时无法连接服务，正在重试。',
+          });
+          this.retryTimer = setTimeout(
+            () => {
+              this.retryTimer = undefined;
+              this.open();
+            },
+            Math.min(1000 * 2 ** this.retryAttempt++, 5000),
+          );
+        },
+      );
+      return;
+    }
     if (!credentials.bridge) {
       this.attach(credentials);
       return;
@@ -284,15 +377,19 @@ export class ProxyClient {
     this.socket = socket;
     const timeout = setTimeout(() => socket.close(), 50000);
     socket.onopen = () => {
+      if (credentials.browser) {
+        socket.send(JSON.stringify({ type: 'web.auth', protocolVersion: PROTOCOL_VERSION }));
+        return;
+      }
       socket.send(
         JSON.stringify({
           type: 'auth',
           protocolVersion: PROTOCOL_VERSION,
           token: credentials.token,
-          deviceName: credentials.device.name,
+          deviceName: credentials.device!.name,
         }),
       );
-      socket.send(JSON.stringify({ type: 'device', id: credentials.device.id }));
+      socket.send(JSON.stringify({ type: 'device', id: credentials.device!.id }));
     };
     socket.onmessage = ({ data }) => {
       if (this.socket !== socket) return;
@@ -306,7 +403,8 @@ export class ProxyClient {
         return;
       }
       if (message.type === 'ready') {
-        if (message.adapter === 'claude-code' && !credentials.bridge) credentials.reconnect = false;
+        if (message.adapter === 'claude-code' && !credentials.bridge && !credentials.browser)
+          credentials.reconnect = false;
         this.established = true;
         clearTimeout(timeout);
         this.retryAttempt = 0;
@@ -316,6 +414,7 @@ export class ProxyClient {
         this.update({
           status: 'connected',
           connectionId: message.connectionId,
+          browser: message.browser ?? null,
           sessions: message.sessions,
           selectedId,
           error: null,
@@ -332,9 +431,13 @@ export class ProxyClient {
         clearTimeout(request.timer);
         this.pending.delete(message.requestId);
         if (message.ok) request.resolve(message);
-        else request.reject(new Error(message.message ?? '请求失败。'));
+        else {
+          this.results.delete(message.requestId);
+          request.reject(new Error(message.message ?? '请求失败。'));
+        }
       } else if (message.type === 'connection.error') {
         this.update({ error: message.message });
+        if (message.code === 'unauthorized' && credentials.browser) credentials.browser();
         if (message.code === 'version_mismatch')
           this.update({
             mismatch: true,
@@ -369,7 +472,10 @@ export class ProxyClient {
         message.type === 'usage.page' ||
         message.type === 'session.stats' ||
         message.type === 'settings.state' ||
-        message.type === 'instructions.state'
+        message.type === 'instructions.state' ||
+        message.type === 'web.settings.state' ||
+        message.type === 'web.totp.setup' ||
+        message.type === 'web.certificate.state'
       ) {
         if (this.pending.has(message.requestId)) this.results.set(message.requestId, message);
       } else if (message.type === 'service.update') {
@@ -459,10 +565,14 @@ export class ProxyClient {
         this.streamTimer ??= setTimeout(() => this.flushStream(), 32);
       }
     };
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       clearTimeout(timeout);
       if (this.socket !== socket) return;
       this.socket = null;
+      if (credentials.browser && event.code === 4001) {
+        this.credentials = null;
+        credentials.browser();
+      }
       this.flushStream();
       this.rejectPending();
       if (
@@ -501,6 +611,7 @@ export class ProxyClient {
   }
   disconnect() {
     this.flushStream();
+    const browser = this.credentials?.browser;
     this.credentials = null;
     this.turn++;
     clearTimeout(this.retryTimer);
@@ -508,15 +619,17 @@ export class ProxyClient {
     const socket = this.socket;
     this.socket = null;
     // Said before closing, so that the service does not keep this computer's runs for it to come back to.
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'leave' }));
+    if (!browser && socket?.readyState === WebSocket.OPEN)
+      socket.send(JSON.stringify({ type: 'leave' }));
     socket?.close();
     this.rejectPending();
     this.retryAttempt = 0;
     this.update({ status: 'disconnected', connectionId: null });
   }
   private rejectPending() {
-    for (const request of this.pending.values()) {
+    for (const [requestId, request] of this.pending) {
       clearTimeout(request.timer);
+      this.results.delete(requestId);
       request.reject(new RequestInterruptedError(request.type));
     }
     this.pending.clear();
@@ -692,6 +805,12 @@ export class ProxyClient {
       this.terminalListeners.delete(listener);
     };
   };
+  // A browser's user is still there; its login's idle time starts over.
+  markActive() {
+    if (!this.state.browser || this.socket?.readyState !== WebSocket.OPEN) return false;
+    this.socket.send(JSON.stringify({ type: 'web.activity' }));
+    return true;
+  }
   terminalControl(command: TerminalControl) {
     if (this.state.status === 'connected' && this.socket?.readyState === WebSocket.OPEN)
       this.socket.send(JSON.stringify(command));
@@ -712,6 +831,7 @@ export class ProxyClient {
       const timer = setTimeout(
         () => {
           this.pending.delete(requestId);
+          this.results.delete(requestId);
           reject(new Error('请求超时；请查看历史确认结果，未自动重发。'));
         },
         command.type === 'session.status' ||
