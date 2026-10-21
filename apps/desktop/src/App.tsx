@@ -39,7 +39,7 @@ import type {
   Session,
   SessionEvent,
 } from '@cc-desk-tunnel/protocol';
-import { browserSession, browserSocket } from './browser-api.ts';
+import { browserSession, browserSocket, watchActivity } from './browser-api.ts';
 import { CertificateWarning } from './WebGate.tsx';
 import { hostCapabilities } from './host-capabilities.ts';
 import AccountPanel from './AccountPanel.tsx';
@@ -129,6 +129,11 @@ export function App({
     );
     return () => client.disconnect();
   }, [client, browser?.expired]);
+  const inBrowser = !!browser;
+  useEffect(
+    () => (inBrowser ? watchActivity(() => client.markActive()) : undefined),
+    [client, inBrowser],
+  );
   const [clock] = useState(() => ({ now: client.serviceNow, activityAt: client.activityAt }));
   // The version whose notes are shown, over whichever page is up.
   const [notes, setNotes] = useState<string | null>(null);
@@ -595,8 +600,7 @@ export function App({
   }
   // Moves the window to a place and remembers it; going back or forward revisits without adding to the trail.
   function visit(next: Place, record = true) {
-    if (next.sessionId && next.sessionId !== client.state.selectedId)
-      client.select(next.sessionId, !!browser);
+    if (next.sessionId && next.sessionId !== client.state.selectedId) client.select(next.sessionId);
     setPlace(next);
     closeSide();
     if (!record) return;
@@ -639,15 +643,11 @@ export function App({
       section = 'general';
     visit({ page, section, sessionId: client.state.selectedId });
   };
-  async function refreshStatus(sessionId = selected?.id ?? sessions[0]?.id, userInitiated = false) {
+  async function refreshStatus(sessionId = selected?.id ?? sessions[0]?.id) {
     if (!sessionId || refreshing) return;
     setRefreshing(true);
     try {
-      await client.request({
-        type: 'session.status',
-        sessionId,
-        ...(browser && userInitiated ? { userInitiated: true as const } : {}),
-      });
+      await client.request({ type: 'session.status', sessionId });
     } catch (error) {
       setError(
         error instanceof RequestInterruptedError
@@ -661,7 +661,6 @@ export function App({
     }
   }
   async function createSession(projectPath: string) {
-    if (!host.localProjects) return;
     const response = await client.request({ type: 'session.create', title: '新会话', projectPath });
     if (response.sessionId) show(response.sessionId);
   }
@@ -669,7 +668,6 @@ export function App({
     await act(() => createSession(path));
   }
   async function addProject() {
-    if (!host.localProjects) return;
     if (!window.desktop?.chooseProject) {
       setCreateOpen(true);
       return;
@@ -713,7 +711,6 @@ export function App({
   useEffect(() => window.desktop?.onNotifyClicked((sessionId) => sessionId && show(sessionId)));
   const schedules = useSchedules(
     async (task, due) => {
-      if (!host.schedules) return false;
       const { status, sessions, selectedId, device } = client.state;
       if (
         status !== 'connected' ||
@@ -917,7 +914,7 @@ export function App({
               icon: <RefreshCw />,
               disabled: !idle || anyRun || refreshing || !!history?.loading,
               run: () => {
-                void refreshStatus(session.id, true);
+                void refreshStatus(session.id);
               },
             },
           ]
@@ -1454,7 +1451,7 @@ export function App({
               disabled={!state.sessions.length || !connected || refreshing || anyTerminal}
               error={currentError}
               refresh={() => {
-                void refreshStatus(undefined, true);
+                void refreshStatus();
               }}
             />
           }
@@ -1546,7 +1543,7 @@ export function App({
               newSession={() => {
                 void newSession();
               }}
-              loadEarlier={(userInitiated) => client.loadEarlier(selected!.id, userInitiated)}
+              loadEarlier={() => client.loadEarlier(selected!.id)}
               edit={
                 controlsDisabled || away
                   ? undefined
@@ -1698,7 +1695,7 @@ export function App({
                   void compact();
                 }}
                 refresh={() => {
-                  void refreshStatus(undefined, true);
+                  void refreshStatus();
                 }}
                 configure={configure}
                 stop={stopRun}

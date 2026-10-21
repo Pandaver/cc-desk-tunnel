@@ -13,7 +13,7 @@ import { setImmediate as nextTurn } from 'node:timers/promises';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { WebCommand, WebSettingsState, WebTotpSetup } from '@cc-desk-tunnel/protocol';
 import { WebAccess, webStaticPath, type WebContext } from '../src/web-access.ts';
-import { Throttle } from '../src/throttle.ts';
+import { defaultCertificate } from './fixtures/web-certificates.ts';
 import { totp, totpSecret } from '../src/web-totp.ts';
 
 const password = 'test-web-service-token-' + randomUUID();
@@ -43,9 +43,9 @@ async function fixture(t: TestContext, tls = false) {
     database,
     token: password,
     directory,
-    tls,
+    dataDir: directory,
+    tls: tls ? defaultCertificate : undefined,
     host: '127.0.0.1',
-    throttle: new Throttle(),
     now: () => now,
   };
   let web = new WebAccess(options);
@@ -123,8 +123,13 @@ async function fixture(t: TestContext, tls = false) {
       req.on('error', reject);
       req.end(body === undefined ? undefined : JSON.stringify(body));
     });
-  const command = (value: object, custom: WebContext = context) =>
-    web.execute({ ...value, requestId: randomUUID() } as WebCommand, { ...custom, origin });
+  const command = (value: object, custom: WebContext = context) => {
+    const reply = web.execute({ ...value, requestId: randomUUID() } as WebCommand, {
+      ...custom,
+      origin,
+    });
+    return reply.type === 'web.settings.state' ? reply.values : reply;
+  };
   return {
     get web() {
       return web;
@@ -187,8 +192,13 @@ test('Web starts disabled, persists its switch and stable server device, and onl
   const outside = join(tmpdir(), `cc-web-outside-${randomUUID()}`);
   writeFileSync(outside, 'secret');
   t.after(() => rmSync(outside, { force: true }));
-  symlinkSync(outside, join(f.directory, 'assets', 'escape.js'));
-  assert.equal((await f.http('/assets/escape.js')).status, 404);
+  try {
+    symlinkSync(outside, join(f.directory, 'assets', 'escape.js'));
+    assert.equal((await f.http('/assets/escape.js')).status, 404);
+  } catch (error) {
+    // Windows allows symbolic links only to administrators or in developer mode.
+    if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error;
+  }
   f.command({ type: 'web.settings.update', values: { enabled: false } });
   f.restart();
   assert.equal(f.web.enabled, false);
@@ -299,7 +309,7 @@ test('TOTP matches RFC 6238 vectors and confirmation/replay protection survives 
   assert.match(setup.uri, /^otpauth:\/\/totp\//);
   assert.equal(f.web.state().totpEnabled, false);
   const code = totp(setup.secret, Math.floor(f.now() / 30_000));
-  f.command({ type: 'web.totp.enable', proof, code });
+  f.command({ type: 'web.totp.enable', code });
   assert.equal(f.web.state().totpEnabled, true);
   assert.equal((await f.login({ code })).status, 401, 'confirmation code cannot be replayed');
   f.advance(30_000);
@@ -359,7 +369,7 @@ test('desktop TOTP confirmation rejects missing or expired setup and allows a fr
   assert.equal(f.web.state().totpEnabled, true);
 });
 
-test('browser TOTP setup and enable still require fresh proof and an active browser session', async (t) => {
+test('browser TOTP setup requires fresh proof and an active login; the new code alone confirms it', async (t) => {
   const f = await fixture(t);
   f.enable();
   const login = await f.login();
@@ -376,13 +386,9 @@ test('browser TOTP setup and enable still require fresh proof and an active brow
   );
   const setup = f.command({ type: 'web.totp.setup', proof }, browser) as WebTotpSetup;
   const code = totp(setup.secret, Math.floor(f.now() / 30_000));
-  assert.throws(() => f.command({ type: 'web.totp.enable', code }, browser), /密码/);
-  assert.throws(
-    () => f.command({ type: 'web.totp.enable', code, proof: { password: 'wrong' } }, browser),
-    /密码/,
-  );
+  assert.throws(() => f.command({ type: 'web.totp.enable', code, proof }, browser));
   assert.equal(f.web.state().totpEnabled, false);
-  f.command({ type: 'web.totp.enable', code, proof }, browser);
+  f.command({ type: 'web.totp.enable', code }, browser);
   assert.equal(f.web.state().totpEnabled, true);
   assert.equal(f.web.active(login.data.session.id), true);
   assert.equal(f.web.active(other.data.session.id), false);
@@ -393,7 +399,6 @@ test('browser path changes require proof, desktop settings revoke old sessions, 
   f.enable();
   const login = await f.login();
   const browser = { desktop: false, address: '127.0.0.1', sessionId: login.data.session.id };
-  f.command({ type: 'web.settings.update', values: {} }, browser);
   assert.throws(
     () => f.command({ type: 'web.settings.update', values: { path: 'private' } }, browser),
     /密码/,
@@ -432,7 +437,7 @@ test('authenticated desktop saves access settings without proof or consuming a T
     if (enabled) {
       const setup = f.command({ type: 'web.totp.setup', proof }) as WebTotpSetup;
       const code = totp(setup.secret, Math.floor(f.now() / 30_000));
-      f.command({ type: 'web.totp.enable', code, proof });
+      f.command({ type: 'web.totp.enable', code });
     }
     const before = f.database.prepare('SELECT totp_last FROM web_settings').get();
     const values = {
@@ -557,9 +562,8 @@ test('public plain HTTP cannot be enabled and a configured domain rejects IP req
     database: db,
     token: password,
     directory: '.',
-    tls: false,
+    dataDir: tmpdir(),
     host: '0.0.0.0',
-    throttle: new Throttle(),
   });
   assert.throws(
     () =>
@@ -604,53 +608,6 @@ test('the server timer closes an idle WebSocket without traffic or a new authent
   assert.equal(f.web.active(login.data.session.id), false);
 });
 
-test('incomplete login bodies cannot create sessions after the entry is disabled or moved', async (t) => {
-  for (const values of [{ enabled: false }, { path: 'changed' }]) {
-    const f = await fixture(t);
-    f.enable();
-    const started = once(f.server, 'request');
-    let finish: (status: number) => void;
-    const result = new Promise<number>((resolve) => {
-      finish = resolve;
-    });
-    const req = request(
-      {
-        hostname: '127.0.0.1',
-        port: f.port,
-        path: '/api/login',
-        method: 'POST',
-        headers: { Origin: f.origin, 'Content-Type': 'application/json' },
-      },
-      (res) => {
-        res.resume();
-        res.once('end', () => finish(res.statusCode!));
-      },
-    );
-    req.write('{"password":');
-    await started;
-    f.command({ type: 'web.settings.update', values, proof });
-    req.end(JSON.stringify(password) + '}');
-    assert.equal(await result, 404);
-    assert.equal(
-      (f.database.prepare('SELECT COUNT(*) AS count FROM web_sessions').get() as { count: number })
-        .count,
-      0,
-    );
-  }
-});
-
-test('static requests do not finish serving a stale entry after it is disabled or moved', async (t) => {
-  for (const values of [{ enabled: false }, { path: 'changed' }]) {
-    const f = await fixture(t);
-    f.enable();
-    const started = once(f.server, 'request');
-    const response = f.http('/assets/app.js');
-    await started;
-    f.command({ type: 'web.settings.update', values, proof });
-    assert.equal((await response).status, 404);
-  }
-});
-
 test('browser privileges are limited, re-login rotates rather than duplicates its session, and only the exact prefix redirects', async (t) => {
   const f = await fixture(t);
   f.enable();
@@ -677,6 +634,23 @@ test('browser privileges are limited, re-login rotates rather than duplicates it
   for (const path of ['/', '/privat', '/private-more', '/private/api/session/'])
     assert.equal((await f.http(path)).status, 404, path);
   assert.equal((await f.http('/private', proof)).status, 404);
+});
+
+test('a desktop revokes freely; a browser signs itself out freely but needs proof to end another login', async (t) => {
+  const f = await fixture(t);
+  f.enable();
+  const [own, other, third] = [await f.login(), await f.login(), await f.login()];
+  const browser = { desktop: false, address: '127.0.0.1', sessionId: own.data.session.id };
+  assert.throws(
+    () => f.command({ type: 'web.sessions.revoke', sessionId: other.data.session.id }, browser),
+    /密码/,
+  );
+  f.command({ type: 'web.sessions.revoke', sessionId: other.data.session.id, proof }, browser);
+  assert.equal(f.web.active(other.data.session.id), false);
+  f.command({ type: 'web.sessions.revoke', sessionId: third.data.session.id });
+  assert.equal(f.web.active(third.data.session.id), false);
+  f.command({ type: 'web.sessions.revoke', sessionId: own.data.session.id }, browser);
+  assert.equal(f.web.active(own.data.session.id), false);
 });
 
 test('strict protocol and stored settings reject unknown or incomplete fields', async (t) => {

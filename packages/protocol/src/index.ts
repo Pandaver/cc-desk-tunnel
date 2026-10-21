@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { webCommandSchemas, webSettingsStateSchema, webTotpSetupSchema } from './web.ts';
+import { webCertificateStateSchema } from './web-certificate.ts';
 export * from './web.ts';
-import { webCertificateCommandSchemas, webCertificateStateSchema } from './web-certificate.ts';
 export * from './web-certificate.ts';
 
 export const PROTOCOL_VERSION = 20;
@@ -482,7 +482,6 @@ export type ServiceUpdate = z.infer<typeof serviceUpdateSchema>;
 const request = { requestId: id };
 export const commandSchema = z.discriminatedUnion('type', [
   ...webCommandSchemas,
-  ...webCertificateCommandSchemas,
   z
     .object({
       type: z.literal('server.session.create'),
@@ -603,14 +602,7 @@ export const commandSchema = z.discriminatedUnion('type', [
       projectPath: z.string().trim().min(1).max(2048).optional(),
     })
     .strict(),
-  z
-    .object({
-      type: z.literal('session.status'),
-      ...request,
-      sessionId: id,
-      userInitiated: z.literal(true).optional(),
-    })
-    .strict(),
+  z.object({ type: z.literal('session.status'), ...request, sessionId: id }).strict(),
   z
     .object({
       type: z.literal('terminal.open'),
@@ -628,8 +620,6 @@ export const commandSchema = z.discriminatedUnion('type', [
       type: z.literal('session.subscribe'),
       ...request,
       sessionId: id,
-      // Browsers mark manual reads; automatic subscriptions and refreshes do not renew login.
-      userInitiated: z.literal(true).optional(),
       afterSequence: z.number().int().nonnegative().default(0),
     })
     .strict(),
@@ -638,7 +628,6 @@ export const commandSchema = z.discriminatedUnion('type', [
       type: z.literal('session.history'),
       ...request,
       sessionId: id,
-      userInitiated: z.literal(true).optional(),
       beforeSequence: z.number().int().positive(),
     })
     .strict(),

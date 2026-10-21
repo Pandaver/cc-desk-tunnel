@@ -27,7 +27,7 @@
 
 `src/web.ts` 定义登录状态、`web.settings.*`、浏览器会话撤销和 TOTP；`src/index.ts` 定义 `server.session.create`；`src/web-certificate.ts` 定义桌面专用的证书命令与状态。Web 设置回复通过各自的状态消息返回，不进入 `ProxyClient` 的通用会话状态。服务端用显式命令白名单限制浏览器，新命令不会自动开放；浏览器不能发送 `device`、`tunnel.*`、项目管理或其他设备的会话创建 / 分叉命令。
 
-浏览器手动切换会话、读取更早记录、刷新状态或打开 Web 设置时，在对应的 `session.subscribe/history/status`、`web.settings.get` 上发送 `userInitiated: true`，服务端据此更新空闲时间。自动加载、状态刷新、重连不带此标记；桌面请求保持原样。该字段不改变命令权限，也不延长 30 天绝对期限。
+浏览器页面上有点击、按键、滚动或触摸时，最多每分钟发一次无 requestId 的 `web.activity` 帧，服务端据此更新空闲时间；发消息、审批等修改类命令本身也会更新。读取命令、自动加载和重连不会更新；桌面连接发送这一帧会被视为无效消息。它不改变命令权限，也不延长 30 天绝对期限。
 
 `server.session.create` 创建归属稳定服务端设备的普通会话，跨浏览器或服务重启保留归属；原生工具直接在容器里执行。浏览器仍可操作其他在线设备的已有会话。登录与权限边界见[浏览器访问](../../docs/server-web.md)。
 

@@ -46,3 +46,16 @@ export const browserLogin = async (proof: WebProof) =>
 export const browserLogout = async () => {
   await request('logout', {});
 };
+// What the user does on the page keeps the browser's login; the service hears of it at most once a minute.
+// Reading counts too, while updates pushed to an unattended page do not.
+export function watchActivity(tell: () => boolean) {
+  const events = ['pointerdown', 'keydown', 'wheel', 'touchstart'] as const;
+  let last = 0;
+  const note = () => {
+    if (Date.now() - last >= 60_000 && tell()) last = Date.now();
+  };
+  for (const type of events) window.addEventListener(type, note, { capture: true, passive: true });
+  return () => {
+    for (const type of events) window.removeEventListener(type, note, { capture: true });
+  };
+}

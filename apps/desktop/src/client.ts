@@ -734,7 +734,7 @@ export class ProxyClient {
       ? [...recorded, { ...unfinished, sequence: (recorded.at(-1)?.sequence ?? 0) + 1 }]
       : recorded;
   }
-  private load(sessionId: string, userInitiated = false) {
+  private load(sessionId: string) {
     const previous = this.state.history[sessionId];
     const afterSequence = previous?.lastSequence ?? 0;
     this.update({
@@ -751,21 +751,18 @@ export class ProxyClient {
         },
       },
     });
-    void this.request({
-      type: 'session.subscribe',
-      sessionId,
-      afterSequence,
-      ...(this.state.browser && userInitiated ? { userInitiated: true as const } : {}),
-    }).catch((error: Error) => {
-      const history = this.state.history[sessionId];
-      if (history)
-        this.update({
-          error: error.message,
-          history: { ...this.state.history, [sessionId]: { ...history, loading: false } },
-        });
-    });
+    void this.request({ type: 'session.subscribe', sessionId, afterSequence }).catch(
+      (error: Error) => {
+        const history = this.state.history[sessionId];
+        if (history)
+          this.update({
+            error: error.message,
+            history: { ...this.state.history, [sessionId]: { ...history, loading: false } },
+          });
+      },
+    );
   }
-  async loadEarlier(sessionId: string, userInitiated = false) {
+  async loadEarlier(sessionId: string) {
     const history = this.state.history[sessionId];
     if (!history?.hasEarlier || history.loadingEarlier || history.loading) return;
     this.update({
@@ -776,7 +773,6 @@ export class ProxyClient {
         type: 'session.history',
         sessionId,
         beforeSequence: history.firstSequence,
-        ...(this.state.browser && userInitiated ? { userInitiated: true as const } : {}),
       });
     } catch (error) {
       const current = this.state.history[sessionId];
@@ -787,7 +783,7 @@ export class ProxyClient {
       throw error;
     }
   }
-  select(sessionId: string, userInitiated = false) {
+  select(sessionId: string) {
     this.flushStream();
     this.cacheOrder = [...this.cacheOrder.filter((id) => id !== sessionId), sessionId];
     const events = { ...this.state.events };
@@ -800,7 +796,7 @@ export class ProxyClient {
       delete history[evicted];
     }
     this.update({ selectedId: sessionId, events, live, history });
-    if (this.state.status === 'connected') this.load(sessionId, userInitiated);
+    if (this.state.status === 'connected') this.load(sessionId);
   }
   // Terminal output bypasses the state store; xterm consumes it directly.
   onTerminal = (listener: (message: TerminalMessage) => void) => {
@@ -809,6 +805,12 @@ export class ProxyClient {
       this.terminalListeners.delete(listener);
     };
   };
+  // A browser's user is still there; its login's idle time starts over.
+  markActive() {
+    if (!this.state.browser || this.socket?.readyState !== WebSocket.OPEN) return false;
+    this.socket.send(JSON.stringify({ type: 'web.activity' }));
+    return true;
+  }
   terminalControl(command: TerminalControl) {
     if (this.state.status === 'connected' && this.socket?.readyState === WebSocket.OPEN)
       this.socket.send(JSON.stringify(command));

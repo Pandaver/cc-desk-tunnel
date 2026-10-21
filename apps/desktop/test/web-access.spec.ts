@@ -101,7 +101,7 @@ async function browserFixture(page: Page, authenticated = false, withHistory = f
             devices: [{ id: serverDeviceId, name: '服务端', ready: true, platform: 'linux' }],
           }),
         );
-      } else {
+      } else if (command.requestId) {
         if (command.type === 'session.subscribe' || command.type === 'session.history')
           socket.send(
             JSON.stringify({
@@ -600,156 +600,13 @@ for (const browser of [false, true])
       'web.totp.setup',
       'web.totp.enable',
     ]);
+    // The browser proves itself to see a secret; the new code alone then turns it on.
     for (const call of calls) {
-      if (browser) expect(call.proof).toEqual({ password: 'test-password' });
+      if (browser && call.type === 'web.totp.setup')
+        expect(call.proof).toEqual({ password: 'test-password' });
       else expect(call).not.toHaveProperty('proof');
     }
   });
-
-for (const browser of [false, true])
-  test(`TOTP setup expires behind a refresh overlay and replaces both QR and secret (browser ${browser})`, async ({
-    page,
-  }) => {
-    const errors: string[] = [];
-    page.on('pageerror', (error) => errors.push(error.message));
-    await page.clock.install({ time: new Date('2026-01-01T00:00:00Z') });
-    await settingsFixture(page, true, false, browser);
-    await page
-      .locator('.setting-row')
-      .filter({ hasText: '两步验证' })
-      .getByRole('button', { name: '设置', exact: true })
-      .click();
-    if (browser) {
-      await page.getByLabel('服务凭据', { exact: true }).fill('test-password');
-      await page.getByRole('button', { name: '下一步', exact: true }).click();
-    }
-    const qr = page.getByRole('img', { name: '验证器二维码' });
-    await expect(qr).toBeVisible();
-    const originalQr = await qr.getAttribute('src');
-    await page.getByLabel('验证新动态码').fill('123456');
-    await expect(page.getByText(/请在 .* 前完成验证/)).toHaveCount(0);
-    await page.clock.fastForward(600_001);
-    await expect(page.getByRole('status')).toHaveText('已过期');
-    await expect(page.getByRole('button', { name: '确认', exact: true })).toBeDisabled();
-    await expect(page.getByLabel('验证新动态码')).toBeDisabled();
-    await expect(page.getByRole('button', { name: '复制密钥', exact: true })).toHaveCount(0);
-    await expect(page.locator('.web-totp-secret')).toHaveCount(0);
-    if (browser) await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({ path: resolve(webScreenshots, `totp-expired-browser-${browser}.png`) });
-    await page.evaluate(() =>
-      (
-        window as unknown as { settingsFixture: { failSetup: () => void } }
-      ).settingsFixture.failSetup(),
-    );
-    await page.getByRole('button', { name: '刷新二维码', exact: true }).click();
-    await expect(page.getByRole('alert')).toContainText('生成失败');
-    await expect(page.getByRole('status')).toHaveText('已过期');
-    await expect(page.getByLabel('验证新动态码')).toHaveValue('');
-    await page.evaluate(() =>
-      (
-        window as unknown as { settingsFixture: { holdSetup: () => void } }
-      ).settingsFixture.holdSetup(),
-    );
-    await page.getByRole('button', { name: '刷新二维码', exact: true }).click();
-    await expect(page.getByRole('button', { name: '正在刷新…', exact: true })).toBeDisabled();
-    await expect(page.getByRole('status')).toHaveText('已过期');
-    await page.evaluate(() =>
-      (
-        window as unknown as { settingsFixture: { releaseSetup: () => void } }
-      ).settingsFixture.releaseSetup(),
-    );
-    await expect(qr).toBeVisible();
-    await expect(qr).not.toHaveAttribute('src', originalQr!);
-    await expect(page.locator('.web-totp-secret')).toHaveText('KRUGS4ZANFZSAYJAKRUGS4ZANFZSAYJA');
-    await expect(page.getByRole('button', { name: '复制密钥', exact: true })).toBeVisible();
-    await expect(page.getByLabel('验证新动态码')).toBeEnabled();
-    await expect(page.getByLabel('验证新动态码')).toHaveValue('');
-    await expect(page.getByRole('button', { name: '确认', exact: true })).toBeEnabled();
-    await expect(page.getByRole('status')).toHaveCount(0);
-    await expect(page.getByRole('alert')).toHaveCount(0);
-    await page.evaluate(() =>
-      Object.defineProperty(navigator, 'clipboard', {
-        configurable: true,
-        value: {
-          writeText: async (text: string) => Object.assign(window, { refreshedSecret: text }),
-        },
-      }),
-    );
-    await page.getByRole('button', { name: '复制密钥', exact: true }).click();
-    expect(
-      await page.evaluate(() => (window as unknown as { refreshedSecret: string }).refreshedSecret),
-    ).toBe('KRUGS4ZANFZSAYJAKRUGS4ZANFZSAYJA');
-    const calls = await page.evaluate(() =>
-      (
-        window as unknown as { settingsFixture: { calls: Record<string, unknown>[] } }
-      ).settingsFixture.calls.filter((call) => String(call.type).startsWith('web.totp.')),
-    );
-    expect(calls.map((call) => call.type)).toEqual([
-      'web.totp.setup',
-      'web.totp.setup',
-      'web.totp.setup',
-    ]);
-    for (const call of calls) {
-      if (browser) expect(call.proof).toEqual({ password: 'test-password' });
-      else expect(call).not.toHaveProperty('proof');
-    }
-    if (!browser) {
-      await page.evaluate(() =>
-        (
-          window as unknown as { settingsFixture: { holdSetup: () => void } }
-        ).settingsFixture.holdSetup(),
-      );
-      await page.clock.fastForward(600_001);
-      await page.getByRole('button', { name: '刷新二维码', exact: true }).click();
-      await expect(page.getByRole('button', { name: '正在刷新…', exact: true })).toBeDisabled();
-      await page.evaluate(() => {
-        const fixture = (
-          window as unknown as {
-            settingsFixture: {
-              disconnect: () => void;
-              releaseSetup: () => void;
-            };
-          }
-        ).settingsFixture;
-        fixture.disconnect();
-        fixture.releaseSetup();
-      });
-    } else await page.getByRole('button', { name: '取消', exact: true }).click();
-    await page.clock.fastForward(600_001);
-    await expect(page.getByRole('dialog')).toHaveCount(0);
-    expect(errors).toEqual([]);
-  });
-
-test('TOTP setup rechecks expiry after sleep and before submitting a code', async ({ page }) => {
-  const initial = new Date('2026-01-01T00:00:00Z');
-  await page.clock.install({ time: initial });
-  await settingsFixture(page, true, false);
-  await page
-    .locator('.setting-row')
-    .filter({ hasText: '两步验证' })
-    .getByRole('button', { name: '设置', exact: true })
-    .click();
-  await expect(page.getByRole('img', { name: '验证器二维码' })).toBeVisible();
-  await page.clock.setSystemTime(new Date(initial.getTime() + 660_000));
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
-  await expect(page.getByRole('status')).toHaveText('已过期');
-  await page.getByRole('button', { name: '刷新二维码', exact: true }).click();
-  await expect(page.getByLabel('验证新动态码')).toBeEnabled();
-  await page.getByLabel('验证新动态码').fill('123456');
-  await page.clock.setSystemTime(new Date(initial.getTime() + 1_320_000));
-  await page
-    .locator('.web-settings-form')
-    .evaluate((form) => (form as HTMLFormElement).requestSubmit());
-  await expect(page.getByRole('status')).toHaveText('已过期');
-  expect(
-    await page.evaluate(
-      () =>
-        (
-          window as unknown as { settingsFixture: { calls: { type: string }[] } }
-        ).settingsFixture.calls.filter((call) => call.type === 'web.totp.enable').length,
-    ),
-  ).toBe(0);
-});
 
 test('desktop TOTP setup retries errors and discards a pending result on disconnect', async ({
   page,
@@ -982,116 +839,21 @@ test('reverse proxy copy uses the desktop clipboard bridge when browser clipboar
   expect(errors).toEqual([]);
 });
 
-test('manual browser reads renew activity without marking automatic reloads or programmatic history scrolls', async ({
+test('user input in the browser reports activity at most once a minute; pushed updates report none', async ({
   page,
 }) => {
+  await page.clock.install();
   const fixture = await browserFixture(page, true, true);
-  const commands = (type: string) => fixture.commands.filter((value) => value.type === type);
-  await page.getByRole('button', { name: '展开其他设备的会话', exact: true }).click();
-  await page.locator('.session-row').filter({ hasText: '阅读测试' }).click();
-  await expect.poll(() => commands('session.status').length).toBe(1);
-  expect(commands('session.subscribe').at(-1)?.userInitiated).toBe(true);
-  expect(commands('session.status').at(-1)?.userInitiated).toBeUndefined();
-  await page.locator('.session-row').filter({ hasText: '阅读测试' }).click({ button: 'right' });
-  await page.getByRole('menuitem', { name: '刷新状态', exact: true }).click();
-  await expect.poll(() => commands('session.status').length).toBe(2);
-  expect(commands('session.status').at(-1)?.userInitiated).toBe(true);
-
-  const conversation = page.locator('.conversation');
-  const earlier = page.getByRole('button', { name: '加载更早记录', exact: true });
-  const scroll = async (top: number) => {
-    await conversation.evaluate((element, top) => {
-      element.scrollTop = top;
-      element.dispatchEvent(new Event('scroll'));
-    }, top);
-  };
-  await scroll(500);
-  let count = commands('session.history').length;
-  await scroll(100);
-  await expect.poll(() => commands('session.history').length).toBe(count + 1);
-  await expect(earlier).toBeEnabled();
-  expect(commands('session.history').at(-1)?.userInitiated).toBeUndefined();
-  // Keep the fixture's scroll position; this assertion concerns the button handler rather than auto-scroll.
-  await earlier.dispatchEvent('click');
-  await expect.poll(() => commands('session.history').length).toBe(count + 2);
-  await expect(earlier).toBeEnabled();
-  expect(commands('session.history').at(-1)?.userInitiated).toBe(true);
-
-  await expect
-    .poll(() => conversation.evaluate((element) => element.scrollHeight - element.clientHeight))
-    .toBeGreaterThan(500);
-  await scroll(500);
-  await conversation.hover();
-  count = commands('session.history').length;
-  await page.mouse.wheel(0, -400);
-  await expect.poll(() => commands('session.history').length).toBe(count + 1);
-  await expect(earlier).toBeEnabled();
-  expect(commands('session.history').at(-1)?.userInitiated).toBe(true);
-
-  for (const input of ['wheel', 'key', 'pointer'] as const) {
-    await scroll(500);
-    count = commands('session.history').length;
-    await conversation.evaluate((element, input) => {
-      if (input === 'wheel')
-        element.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, bubbles: true }));
-      if (input === 'key')
-        element.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', bubbles: true }));
-      if (input === 'pointer')
-        element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
-      element.scrollTop = 100;
-      element.dispatchEvent(new Event('scroll'));
-      if (input === 'pointer') window.dispatchEvent(new PointerEvent('pointerup'));
-    }, input);
-    await expect.poll(() => commands('session.history').length).toBe(count + 1);
-    await expect(earlier).toBeEnabled();
-    expect(commands('session.history').at(-1)?.userInitiated).toBe(true);
-    await scroll(500);
-    await scroll(100);
-    await expect.poll(() => commands('session.history').length).toBe(count + 2);
-    await expect(earlier).toBeEnabled();
-    expect(commands('session.history').at(-1)?.userInitiated).toBeUndefined();
-  }
-  // An input which does not scroll cannot tag an unrelated later layout change.
-  await scroll(500);
-  await conversation.evaluate(async (element) => {
-    element.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', bubbles: true }));
-    await new Promise<void>((done) => requestAnimationFrame(() => done()));
-  });
-  count = commands('session.history').length;
-  await scroll(100);
-  await expect.poll(() => commands('session.history').length).toBe(count + 1);
-  await expect(earlier).toBeEnabled();
-  expect(commands('session.history').at(-1)?.userInitiated).toBeUndefined();
-
-  const subscriptions = commands('session.subscribe').length;
-  fixture.sockets.at(-1)!.close({ code: 1011, reason: 'network' });
-  await expect.poll(() => commands('session.subscribe').length).toBe(subscriptions + 1);
-  expect(commands('session.subscribe').at(-1)?.userInitiated).toBeUndefined();
-});
-
-test('opening and retrying Web settings marks only browser activity, not reconnection or desktop reads', async ({
-  page,
-}) => {
-  for (const browser of [true, false]) {
-    await settingsFixture(page, true, false, browser);
-    const calls = () =>
-      page.evaluate(() =>
-        (
-          window as unknown as { settingsFixture: { calls: Record<string, unknown>[] } }
-        ).settingsFixture.calls.filter((value) => value.type === 'web.settings.get'),
-      );
-    expect((await calls())[0].userInitiated).toBe(browser ? true : undefined);
-    await page.evaluate(() => {
-      const fixture = (
-        window as unknown as { settingsFixture: { reconnect: () => void; failGet: () => void } }
-      ).settingsFixture;
-      fixture.failGet();
-      fixture.reconnect();
-    });
-    await expect(page.getByRole('button', { name: '重试', exact: true })).toBeVisible();
-    expect((await calls()).at(-1)?.userInitiated).toBeUndefined();
-    await page.getByRole('button', { name: '重试', exact: true }).click();
-    await expect(page.getByRole('button', { name: '重试', exact: true })).toHaveCount(0);
-    expect((await calls()).at(-1)?.userInitiated).toBe(browser ? true : undefined);
-  }
+  await expect(page.locator('.shell')).toBeVisible();
+  const activity = () => fixture.commands.filter((command) => command.type === 'web.activity');
+  await page.clock.runFor(5 * 60_000);
+  expect(activity()).toHaveLength(0);
+  await page.mouse.wheel(0, -200);
+  await expect.poll(() => activity().length).toBe(1);
+  await page.keyboard.press('ArrowUp');
+  await page.mouse.click(400, 300);
+  expect(activity()).toHaveLength(1);
+  await page.clock.runFor(61_000);
+  await page.keyboard.press('ArrowUp');
+  await expect.poll(() => activity().length).toBe(2);
 });

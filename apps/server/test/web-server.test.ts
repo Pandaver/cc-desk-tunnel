@@ -163,6 +163,21 @@ test('desktop explicitly enables Web, disabling only ends browsers, and desktop 
   assert.equal((await fetch(f.url + '/')).status, 404);
 });
 
+test('wrong browser sign-ins never lock out a desktop at the same address', async (t) => {
+  const f = await fixture(t);
+  const desktop = await f.desktop();
+  await desktop.request({ type: 'web.settings.update', values: { enabled: true } });
+  const attempt = () =>
+    fetch(f.url + '/api/login', {
+      method: 'POST',
+      headers: { Origin: f.url, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: 'wrong' }),
+    });
+  for (let index = 0; index < 6; index++) assert.equal((await attempt()).status, 401);
+  assert.equal((await attempt()).status, 429);
+  await f.desktop();
+});
+
 test('browser sessions belong to the stable server device, survive restart, and remain operable from desktop', async (t) => {
   const f = await fixture(t);
   let desktop = await f.desktop();
@@ -178,7 +193,11 @@ test('browser sessions belong to the stable server device, survive restart, and 
   assert.equal(session.device?.id, serverId);
   assert.ok(session.nativeRoot);
   assert.equal(session.projectPath, join(f.dataDir, 'native', session.nativeRoot));
-  const inventory = await client.wait((message) => message.type === 'devices');
+  // The service is listed once it holds a session.
+  const inventory = await client.wait(
+    (message) =>
+      message.type === 'devices' && message.devices.some((device) => device.id === serverId),
+  );
   assert.equal(inventory.type, 'devices');
   assert.equal(
     inventory.devices.filter((device) => device.id === serverId && device.ready).length,
@@ -390,7 +409,7 @@ test('sensitive settings require reauthentication, move the whole entry, and lea
   await assert.rejects(foreign.open(true), /401/);
 });
 
-test('authenticated desktop TOTP commands omit proof while browser commands retain it', async (t) => {
+test('authenticated desktop TOTP commands omit proof; a browser needs it to set up, and a code alone enables nothing', async (t) => {
   const f = await fixture(t);
   const desktop = await f.desktop();
   await desktop.request({ type: 'web.settings.update', values: { enabled: true } });
@@ -399,7 +418,7 @@ test('authenticated desktop TOTP commands omit proof while browser commands reta
   assert.equal((await client.request({ type: 'web.totp.setup' })).code, 'web_unauthorized');
   assert.equal(
     (await client.request({ type: 'web.totp.enable', code: '123456' })).code,
-    'web_unauthorized',
+    'web_totp_invalid',
   );
   assert.equal((await desktop.request({ type: 'web.totp.setup' })).ok, true);
   const setup = await desktop.wait((message) => message.type === 'web.totp.setup');
@@ -436,39 +455,7 @@ test('background read types do not renew activity; the server terminal has no re
   );
 });
 
-test('only browser-readable navigation commands accept an explicit user-initiated marker', () => {
-  const requestId = randomUUID();
-  const sessionId = randomUUID();
-  for (const command of [
-    { type: 'session.subscribe', sessionId },
-    { type: 'session.history', sessionId, beforeSequence: 1 },
-    { type: 'session.status', sessionId },
-    { type: 'web.settings.get' },
-  ]) {
-    assert.equal(commandSchema.safeParse({ ...command, requestId }).success, true);
-    assert.equal(
-      commandSchema.safeParse({ ...command, requestId, userInitiated: true }).success,
-      true,
-    );
-    for (const userInitiated of [false, 'true', 1, null])
-      assert.equal(
-        commandSchema.safeParse({ ...command, requestId, userInitiated }).success,
-        false,
-      );
-  }
-  for (const command of [
-    { type: 'account.status' },
-    { type: 'session.stats', sessionId },
-    { type: 'session.delete', sessionId },
-    { type: 'web.certificate.get' },
-  ])
-    assert.equal(
-      commandSchema.safeParse({ ...command, requestId, userInitiated: true }).success,
-      false,
-    );
-});
-
-test('manual browser reads renew idle time while background reads and reconnects do not', async (t) => {
+test('browser activity renews idle time while reads, reconnects and desktop frames do not', async (t) => {
   const f = await fixture(t);
   const desktop = await f.desktop();
   await desktop.request({ type: 'web.settings.update', values: { enabled: true } });
@@ -494,25 +481,24 @@ test('manual browser reads renew idle time while background reads and reconnects
   ]) {
     reset();
     await client.request(command);
-    assert.equal(active(), before, `${command.type}: background read does not renew`);
-    await client.request({ ...command, userInitiated: true });
-    assert.ok(Number(active()) > before, `${command.type}: manual read renews`);
+    assert.equal(active(), before, `${command.type}: a read does not renew`);
   }
+  client.send({ type: 'web.activity' });
+  await client.request({ type: 'web.settings.get' });
+  assert.ok(Number(active()) > before, 'activity renews');
   reset();
   await fetch(f.url + '/api/session', { headers: { Cookie: signed.cookie } });
   client.socket.terminate();
   ({ client } = await f.browser(signed.cookie));
   assert.equal(active(), before, 'cookie checks and reconnects do not renew');
-  await desktop.request({ type: 'session.subscribe', sessionId, userInitiated: true });
-  assert.equal(active(), before, 'desktop requests do not renew a browser session');
-  client.send({ type: 'web.settings.get', requestId: randomUUID(), userInitiated: 'true' });
-  const invalid = await client.wait((message) => message.type === 'connection.error');
+  desktop.send({ type: 'web.activity' });
+  const invalid = await desktop.wait((message) => message.type === 'connection.error');
   assert.equal(invalid.type, 'connection.error');
   assert.equal(invalid.code, 'invalid_command');
-  assert.equal(active(), before, 'invalid metadata does not renew');
+  assert.equal(active(), before, 'a desktop cannot renew a browser login');
 });
 
-test('manual reads cannot revive an idle-expired or absolutely expired browser session', async (t) => {
+test('activity cannot revive an idle-expired or absolutely expired browser session', async (t) => {
   const f = await fixture(t);
   const desktop = await f.desktop();
   await desktop.request({ type: 'web.settings.update', values: { enabled: true } });
@@ -529,7 +515,7 @@ test('manual reads cannot revive an idle-expired or absolutely expired browser s
         .prepare('UPDATE web_sessions SET expires = ? WHERE id = ?')
         .run(Date.now() - 1, signed.data.session.id);
     const closed = once(client.socket, 'close');
-    client.send({ type: 'web.settings.get', requestId: randomUUID(), userInitiated: true });
+    client.send({ type: 'web.activity' });
     const [code] = await closed;
     assert.equal(code, 4001);
     assert.equal(

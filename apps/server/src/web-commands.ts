@@ -29,7 +29,7 @@ export const browserCommands = new Set<Command['type']>([
   'web.totp.disable',
 ]);
 
-// These mutations are always user activity. Reads renew only with an explicit userInitiated marker.
+// What a browser changes is its user's doing; reading is told apart by the page with \web.activity\.
 export const browserActivity = new Set<Command['type']>([
   'server.session.create',
   'session.rename',
@@ -49,3 +49,8 @@ export const browserActivity = new Set<Command['type']>([
   'web.totp.enable',
   'web.totp.disable',
 ]);
+
+// Web settings, browser logins and the domain certificate are answered by WebAccess.
+export const isWebCommand = (
+  command: Command,
+): command is Extract<Command, { type: `web.${string}` }> => command.type.startsWith('web.');

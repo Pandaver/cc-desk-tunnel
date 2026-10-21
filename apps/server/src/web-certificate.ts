@@ -2,8 +2,8 @@ import { createPrivateKey, X509Certificate } from 'node:crypto';
 import fs from 'node:fs';
 import { join } from 'node:path';
 import { createSecureContext, type SecureContext } from 'node:tls';
-import type { WebCertificateState } from '../../../packages/protocol/src/web-certificate.ts';
-import { webDomainSchema } from '../../../packages/protocol/src/web.ts';
+import { webDomainSchema } from '@cc-desk-tunnel/protocol';
+import type { WebCertificateState } from '@cc-desk-tunnel/protocol';
 import { DomainError } from './errors.ts';
 
 type Material = { cert: string; key: string };

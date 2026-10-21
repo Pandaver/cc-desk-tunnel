@@ -132,12 +132,15 @@ for (const path of ['', 'private-access'])
           message.type === 'session.updated' && message.session.device?.name === '服务端',
       )!.session;
       expect(created.device?.platform).toBe('linux');
-      expect(
-        received
-          .filter((message) => message.type === 'devices')
-          .flatMap((message) => message.devices)
-          .find((device) => device.id === created.device?.id),
-      ).toMatchObject({ server: true, ready: true });
+      // The service is listed once it holds a session; the list follows that session.
+      await expect
+        .poll(() =>
+          received
+            .filter((message) => message.type === 'devices')
+            .flatMap((message) => message.devices)
+            .find((device) => device.id === created.device?.id),
+        )
+        .toMatchObject({ server: true, ready: true });
       await page.getByRole('button', { name: '展开其他设备的会话', exact: true }).click();
       await expect(
         page.getByRole('button', { name: '收起设备 · 服务端', exact: true }),

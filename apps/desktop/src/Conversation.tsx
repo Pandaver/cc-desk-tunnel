@@ -482,7 +482,7 @@ export default function Conversation({
   ownsRun: boolean;
   busy: boolean;
   newSession: () => void;
-  loadEarlier: (userInitiated?: boolean) => Promise<void>;
+  loadEarlier: () => Promise<void>;
   findRequest: number;
   // Ends one background task of the run, or the run with all of them.
   stopTask: (taskId: string) => void;
@@ -599,22 +599,8 @@ export default function Conversation({
   const lastTop = useRef(0);
   // A button is held on the conversation: on its scrollbar, or selecting text past its edge.
   const held = useRef(false);
-  // Only the next scroll caused by an upward input is activity. Layout and history anchoring also scroll.
-  const scrollInput = useRef<number | null>(null);
-  const clearScrollInput = () => {
-    if (scrollInput.current !== null) cancelAnimationFrame(scrollInput.current);
-    scrollInput.current = null;
-  };
-  const readingInput = () => {
-    clearScrollInput();
-    scrollInput.current = requestAnimationFrame(() => {
-      scrollInput.current = null;
-    });
-  };
-  useEffect(() => clearScrollInput, [session?.id]);
   const toEnd = () => scroll.current?.scrollTo(0, scroll.current.scrollHeight);
-  const loadMore = (userInitiated = false) => {
-    clearScrollInput();
+  const loadMore = () => {
     if (!session || !connected || !history?.hasEarlier || history.loadingEarlier || history.loading)
       return;
     setLoadError('');
@@ -624,7 +610,7 @@ export default function Conversation({
         height: scroll.current.scrollHeight,
         top: scroll.current.scrollTop,
       };
-    void loadEarlier(userInitiated).catch(() => setLoadError('更早记录加载失败，请重试'));
+    void loadEarlier().catch(() => setLoadError('更早记录加载失败，请重试'));
   };
   useLayoutEffect(() => {
     prependAnchor.current = null;
@@ -724,8 +710,6 @@ export default function Conversation({
           });
         }}
         onScroll={() => {
-          const userInitiated = held.current || scrollInput.current !== null;
-          clearScrollInput();
           if (!scroll.current) return;
           const top = scroll.current.scrollTop;
           // Reaching the end follows again. Only the reader leaves it: settling heights move the view too.
@@ -733,7 +717,7 @@ export default function Conversation({
             follow.current = true;
           else if (held.current && top < lastTop.current) follow.current = false;
           // Reading on upwards past what is loaded brings the page before it; a failed load waits for the button.
-          if (top < lastTop.current && top < 240 && !loadError) loadMore(userInitiated);
+          if (top < lastTop.current && top < 240 && !loadError) loadMore();
           lastTop.current = top;
         }}
         onPointerDown={(event) => {
@@ -751,18 +735,12 @@ export default function Conversation({
         onKeyDown={(event) => {
           if ((event.target as HTMLElement).closest('input, textarea, [contenteditable="true"]'))
             return;
-          if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) {
-            follow.current = false;
-            readingInput();
-          }
+          if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) follow.current = false;
         }}
         onWheel={(event) => {
-          if (event.deltaY < 0) {
-            follow.current = false;
-            readingInput();
-          }
+          if (event.deltaY < 0) follow.current = false;
           // A loaded page shorter than the window cannot scroll, so the wheel itself asks for more.
-          if (event.deltaY < 0 && scroll.current?.scrollTop === 0 && !loadError) loadMore(true);
+          if (event.deltaY < 0 && scroll.current?.scrollTop === 0 && !loadError) loadMore();
         }}
       >
         {!session ? (
@@ -791,7 +769,7 @@ export default function Conversation({
                 type="button"
                 className="history-load"
                 disabled={!connected || history.loadingEarlier || history.loading}
-                onClick={() => loadMore(true)}
+                onClick={loadMore}
               >
                 <ArrowUpToLine />
                 {history.loadingEarlier ? '加载中' : '加载更早记录'}

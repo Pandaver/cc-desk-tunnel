@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { webCertificateCommandSchemas } from './web-certificate.ts';
 
 export const webDomainSchema = z
   .string()
@@ -87,7 +88,6 @@ export const webCommandSchemas = [
     .object({
       type: z.literal('web.settings.get'),
       ...request,
-      userInitiated: z.literal(true).optional(),
     })
     .strict(),
   z
@@ -103,7 +103,7 @@ export const webCommandSchemas = [
       type: z.literal('web.sessions.revoke'),
       ...request,
       sessionId: z.uuid(),
-      proof: webProofSchema,
+      proof: webProofSchema.optional(),
     })
     .strict(),
   z
@@ -114,12 +114,14 @@ export const webCommandSchemas = [
       type: z.literal('web.totp.enable'),
       ...request,
       code: z.string().regex(/^\d{6}$/),
-      proof: webProofSchema.optional(),
     })
     .strict(),
   z
     .object({ type: z.literal('web.totp.disable'), ...request, proof: webProofSchema.optional() })
     .strict(),
+  ...webCertificateCommandSchemas,
 ] as const;
 export const webCommandSchema = z.discriminatedUnion('type', webCommandSchemas);
 export type WebCommand = z.infer<typeof webCommandSchema>;
+// A browser tells the service its user is still there, so that the login's idle time starts over.
+export const webActivitySchema = z.object({ type: z.literal('web.activity') }).strict();

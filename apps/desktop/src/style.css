@@ -3694,7 +3694,6 @@ dialog:has(.web-settings-form) {
   gap: 14px;
 }
 .web-totp-qr {
-  position: relative;
   width: 200px;
   height: 200px;
   margin: auto;
@@ -3702,15 +3701,7 @@ dialog:has(.web-settings-form) {
 .web-totp-qr img {
   display: block;
 }
-.web-totp-expired {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-content: center;
-  justify-items: center;
-  gap: 12px;
-  background: color-mix(in srgb, var(--surface) 94%, transparent);
-}
+
 .web-totp-manual {
   display: grid;
   gap: 6px;

@@ -28,8 +28,8 @@ import {
   tunnelAttachSchema,
   tunnelCredentialsSchema,
   terminalControlSchema,
+  webActivitySchema,
   webAuthSchema,
-  webCommandSchema,
 } from '@cc-desk-tunnel/protocol';
 import type {
   AccountState,
@@ -62,8 +62,7 @@ import { ServiceUpdates, serviceVersion } from './updates.ts';
 import type { UpdateOptions } from './updates.ts';
 import { UsageLog, createUsageReceiver, telemetryEnvironment } from './usage.ts';
 import { WebAccess } from './web-access.ts';
-import { WebCertificates } from './web-certificate.ts';
-import { browserCommands, browserActivity } from './web-commands.ts';
+import { browserActivity, browserCommands, isWebCommand } from './web-commands.ts';
 
 type Peer = {
   socket: WebSocket;
@@ -201,25 +200,14 @@ export function createProxyServer(options: ServerOptions) {
       )
     : undefined;
   const throttle = new Throttle();
-  let certificates: WebCertificates;
   const web = new WebAccess({
     database: store.database,
     token: options.token,
     directory: options.webDirectory ?? fileURLToPath(new URL('../web/', import.meta.url)),
-    tls: !!options.tls,
-    reverseProxy: !!options.reverseProxy,
-    host: options.host ?? '127.0.0.1',
-    throttle,
-    selfSigned: (hostname) => certificates?.selfSigned(hostname) ?? false,
-    validateDomain: (domain) => certificates.validateDomain(domain),
-  });
-  certificates = new WebCertificates({
     dataDir: options.dataDir,
-    tls: options.tls
-      ? { cert: options.tls.cert.toString(), key: options.tls.key.toString() }
-      : undefined,
+    tls: options.tls,
     reverseProxy: options.reverseProxy,
-    domain: web.domain,
+    host: options.host ?? '127.0.0.1',
   });
   const serverDevice: Device = { id: web.serverDeviceId, name: '服务端', platform: 'linux' };
   const originOf = (request: IncomingMessage) =>
@@ -278,7 +266,7 @@ export function createProxyServer(options: ServerOptions) {
     ? createHttpsServer(
         {
           ...options.tls,
-          SNICallback: (servername, done) => done(null, certificates.context(servername)),
+          SNICallback: (servername, done) => done(null, web.certificates.context(servername)),
         },
         handler,
       )
@@ -292,7 +280,7 @@ export function createProxyServer(options: ServerOptions) {
         socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
         return;
       }
-      if (throttle.blocked(address) || !throttle.enter(address)) {
+      if (web.throttle.blocked(address) || !web.throttle.enter(address)) {
         socket.end('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n');
         return;
       }
@@ -376,7 +364,9 @@ export function createProxyServer(options: ServerOptions) {
     return {
       type: 'devices',
       devices: [
-        ...(web.enabled || store.list().some((session) => session.device?.id === serverDevice.id)
+        // The service itself is always there. It is listed once it has sessions, with Web on or off, so a
+        // desktop that never used it is told of its computers just as before.
+        ...(store.list().some((session) => session.device?.id === serverDevice.id)
           ? [{ ...serverDevice, ready: true, server: true as const }]
           : []),
         ...[...seats.values()].flatMap((seat) => {
@@ -988,40 +978,25 @@ export function createProxyServer(options: ServerOptions) {
 
   // Resolves to the session ID carried in the response frame; account and usage commands have none.
   async function execute(peer: Peer, command: Command): Promise<string | undefined> {
-    const webCommand = webCommandSchema.safeParse(command);
-    if (webCommand.success) {
-      const result = web.execute(webCommand.data, {
-        desktop: !peer.browser,
-        address: peer.address,
-        sessionId: peer.browser,
-        origin: peer.origin,
-      });
-      if ('secret' in result)
-        send(peer, { type: 'web.totp.setup', requestId: command.requestId, ...result });
-      else send(peer, { type: 'web.settings.state', requestId: command.requestId, values: result });
-      announce();
+    if (isWebCommand(command)) {
+      send(
+        peer,
+        web.execute(command, {
+          desktop: !peer.browser,
+          address: peer.address,
+          sessionId: peer.browser,
+          origin: peer.origin,
+        }),
+      );
       return undefined;
     }
     switch (command.type) {
-      case 'web.certificate.get':
-      case 'web.certificate.set':
-      case 'web.certificate.reset':
-        if (peer.browser) throw new DomainError('web_desktop_only', '请在桌面客户端管理证书。');
-        if (command.type === 'web.certificate.set')
-          certificates.set({ domain: web.domain, cert: command.cert, key: command.key });
-        if (command.type === 'web.certificate.reset') certificates.reset();
-        send(peer, {
-          type: 'web.certificate.state',
-          requestId: command.requestId,
-          ...certificates.state(),
-        });
-        return undefined;
       case 'server.session.create': {
-        if (!web.enabled) throw new DomainError('web_disabled', '请先在桌面设置中启用 Web。');
         const session = store.createOnServer(command.requestId, command.title, serverDevice);
         peer.subscriptions.clear();
         peer.subscriptions.add(session.id);
         broadcast({ type: 'session.updated', session });
+        announce();
         return session.id;
       }
       case 'account.status':
@@ -1124,7 +1099,6 @@ export function createProxyServer(options: ServerOptions) {
         return session.id;
       }
     }
-    if (!('sessionId' in command)) throw new DomainError('invalid_command', '请求格式无效。');
     const { session } = store.get(command.sessionId);
     if (mutations.has(command.sessionId))
       throw new DomainError('session_busy', '会话正在更新，请稍后重试。');
@@ -1237,9 +1211,7 @@ export function createProxyServer(options: ServerOptions) {
         browser: {
           sessionId: peer.browser,
           serverDeviceId: serverDevice.id,
-          selfSigned: certificates.selfSigned(
-            peer.origin ? new URL(peer.origin).hostname : undefined,
-          ),
+          selfSigned: web.selfSigned(peer.origin),
         },
       });
       send(peer, devices());
@@ -1529,9 +1501,11 @@ export function createProxyServer(options: ServerOptions) {
         responses: new Map(),
       };
       peers.add(peer);
+      // Browsers wait for sign-in in places of their own, so that they cannot crowd out desktops.
+      const gate = peer.browser ? web.throttle : throttle;
       if (peer.browser && !web.attach(peer.browser, socket)) {
         peers.delete(peer);
-        throttle.leave(address);
+        gate.leave(address);
         socket.close(4001, 'Browser session unavailable');
         return;
       }
@@ -1580,13 +1554,17 @@ export function createProxyServer(options: ServerOptions) {
           if (channel ? attachChannel(peer, value) : authenticate(peer, value)) {
             clearTimeout(authTimer);
             signedIn = true;
-            throttle.leave(address);
+            gate.leave(address);
           }
           return;
         }
         if (peer.browser) {
           if (!web.active(peer.browser)) {
             socket.close(4001, 'Browser session ended');
+            return;
+          }
+          if (webActivitySchema.safeParse(value).success) {
+            web.touch(peer.browser);
             return;
           }
           const type = (value as { type?: unknown } | null)?.type;
@@ -1658,18 +1636,14 @@ export function createProxyServer(options: ServerOptions) {
             });
             return;
           }
-          if (
-            browserActivity.has(command.data.type) ||
-            ('userInitiated' in command.data && command.data.userInitiated)
-          )
-            web.touch(peer.browser);
+          if (browserActivity.has(command.data.type)) web.touch(peer.browser);
         }
         dispatch(peer, command.data);
       });
       socket.on('close', (code) => {
         clearTimeout(authTimer);
         clearInterval(heartbeat);
-        if (!signedIn) throttle.leave(address);
+        if (!signedIn) gate.leave(address);
         // Why a connection ended is the first thing needed when a run was cut short.
         const device = peer.device?.id;
         const before = [...runs.values()].filter((run) => run.device === device).length;

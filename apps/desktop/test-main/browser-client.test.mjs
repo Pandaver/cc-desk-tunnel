@@ -93,62 +93,16 @@ test('browser capabilities exclude local-only features without changing desktop 
   assert.ok(Object.values(hostCapabilities(true)).every((value) => !value));
 });
 
-test('only explicit browser navigation and history reads carry user activity, never reconnect or desktop reads', async (t) => {
-  const { client, socket, browser } = fixture(t);
-  const now = new Date().toISOString();
-  const session = {
-    id: randomUUID(),
-    title: '读取活动',
-    autoTitle: false,
-    projectPath: '/work/session',
-    permissionMode: 'auto',
-    model: null,
-    effort: null,
-    createdAt: now,
-    updatedAt: now,
-    activeRun: null,
-  };
-  client.update({ sessions: [session] });
-  const acknowledge = () => {
-    const command = socket.sent.at(-1);
-    socket.message({ type: 'response', requestId: command.requestId, ok: true });
-    return command;
-  };
-  client.select(session.id, true);
-  assert.equal(acknowledge().userInitiated, true);
-  socket.message({
-    type: 'ready',
-    protocolVersion: PROTOCOL_VERSION,
-    version: '0.3.4',
-    connectionId: randomUUID(),
-    adapter: 'claude-code',
-    sessions: [session],
-    browser,
-  });
-  assert.equal('userInitiated' in acknowledge(), false, 'ready reload is automatic');
-  for (const browserHost of [true, false]) {
-    client.update({ browser: browserHost ? browser : null });
-    for (const userInitiated of [false, true]) {
-      client.update({
-        history: {
-          [session.id]: {
-            firstSequence: 2,
-            lastSequence: 3,
-            hasEarlier: true,
-            loading: false,
-            loadingEarlier: false,
-          },
-        },
-      });
-      const pending = client.loadEarlier(session.id, userInitiated);
-      const command = acknowledge();
-      await pending;
-      assert.equal(command.type, 'session.history');
-      assert.equal(command.userInitiated, browserHost && userInitiated ? true : undefined);
-    }
-    client.select(session.id, true);
-    assert.equal(acknowledge().userInitiated, browserHost ? true : undefined);
-  }
+test('a connected browser tells the service its user is active; a desktop or a closed socket does not', (t) => {
+  const { client, socket } = fixture(t);
+  assert.equal(client.markActive(), true);
+  assert.deepEqual(socket.sent.at(-1), { type: 'web.activity' });
+  const sent = socket.sent.length;
+  client.update({ browser: null });
+  assert.equal(client.markActive(), false);
+  socket.readyState = 3;
+  assert.equal(client.markActive(), false);
+  assert.equal(socket.sent.length, sent);
 });
 
 test('a browser reconnect probes cookies before the handshake, distinguishes offline, and ignores a late probe after disconnect', async (t) => {
