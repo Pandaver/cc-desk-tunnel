@@ -1,8 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ShieldAlert } from 'lucide-react';
+import { Fingerprint, ShieldAlert } from 'lucide-react';
 import type { WebLoginState } from '@cc-desk-tunnel/protocol';
 import { browserLogin, browserLogout, browserSession } from './browser-api.ts';
 import { App } from './App.tsx';
+import PasskeyBrowser from './PasskeyBrowser.tsx';
+import {
+  cancelPasskey,
+  loginWithPasskey,
+  passkeyError,
+  readPasskeyLink,
+  supportsPasskeys,
+} from './passkey.ts';
+
+const passkeyLink = readPasskeyLink();
 
 export function CertificateWarning() {
   const ref = useRef<HTMLParagraphElement>(null);
@@ -29,12 +39,25 @@ export function CertificateWarning() {
   );
 }
 export default function WebGate() {
+  const [link, setLink] = useState(passkeyLink);
+  useEffect(() => {
+    const changed = () => {
+      const next = readPasskeyLink();
+      if (next) setLink(next);
+    };
+    window.addEventListener('hashchange', changed);
+    return () => window.removeEventListener('hashchange', changed);
+  }, []);
+  return link ? <PasskeyBrowser key={link.token} link={link} /> : <BrowserLogin />;
+}
+function BrowserLogin() {
   const [session, setSession] = useState<WebLoginState | null>(null);
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState('');
   const generation = useRef(0);
+  const passkeyRequest = useRef<AbortController | null>(null);
   const check = useCallback(async () => {
     const current = ++generation.current;
     setBusy(true);
@@ -53,6 +76,8 @@ export default function WebGate() {
     void check();
     return () => {
       generation.current++;
+      passkeyRequest.current?.abort();
+      cancelPasskey();
     };
   }, [check]);
   const expired = useCallback(() => {
@@ -71,6 +96,24 @@ export default function WebGate() {
       throw new Error(error instanceof Error ? error.message : '退出登录失败，请重试。');
     }
   }, [expired]);
+  async function passkeyLogin() {
+    const current = ++generation.current;
+    const controller = new AbortController();
+    passkeyRequest.current = controller;
+    setBusy(true);
+    setError('');
+    try {
+      const value = await loginWithPasskey(controller.signal);
+      if (current !== generation.current) return;
+      setPassword('');
+      setCode('');
+      setSession(value);
+    } catch (error) {
+      if (current === generation.current) setError(passkeyError(error));
+    } finally {
+      if (current === generation.current) setBusy(false);
+    }
+  }
   if (session?.authenticated)
     return <App browser={{ selfSigned: session.selfSigned, expired, logout }} />;
   return (
@@ -149,6 +192,20 @@ export default function WebGate() {
             <button className="button primary" disabled={busy}>
               {busy ? '正在登录…' : '登录'}
             </button>
+            {session.passkeyAvailable && (
+              <button
+                className="button web-passkey-login"
+                type="button"
+                disabled={busy || !supportsPasskeys()}
+                title={
+                  supportsPasskeys() ? undefined : '请使用支持通行密钥的浏览器和可信 HTTPS 地址'
+                }
+                onClick={() => void passkeyLogin()}
+              >
+                <Fingerprint aria-hidden="true" />
+                使用通行密钥登录
+              </button>
+            )}
           </form>
         )}
       </section>

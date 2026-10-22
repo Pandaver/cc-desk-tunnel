@@ -71,8 +71,8 @@ type Peer = {
   authenticated: boolean;
   browser?: string;
   origin?: string;
-  // A browser that came through a trusted proxy, which serves it the proxy's certificate.
-  proxied?: boolean;
+  // Keep the socket source: trusted proxies may change while this connection stays open.
+  remoteAddress: string | undefined;
   // The computer it is from: the name it signed in with, and the identity that follows in a frame of its own.
   name: string;
   device?: Device;
@@ -290,7 +290,7 @@ export function createProxyServer(options: ServerOptions) {
         wss.emit('connection', ws, address, {
           browser: session.id,
           origin: originOf(request),
-          proxied: web.proxied(request),
+          remoteAddress: request.socket.remoteAddress,
         }),
       );
       return;
@@ -311,7 +311,10 @@ export function createProxyServer(options: ServerOptions) {
       return;
     }
     wss.handleUpgrade(request, socket, head, (ws) =>
-      wss.emit('connection', ws, address, { origin: originOf(request) }),
+      wss.emit('connection', ws, address, {
+        origin: originOf(request),
+        remoteAddress: request.socket.remoteAddress,
+      }),
     );
   });
 
@@ -992,6 +995,10 @@ export function createProxyServer(options: ServerOptions) {
           address: peer.address,
           sessionId: peer.browser,
           origin: peer.origin,
+          connectionId: peer.id,
+          get proxied() {
+            return web.trustedProxy(peer.remoteAddress);
+          },
         }),
       );
       return undefined;
@@ -1217,7 +1224,7 @@ export function createProxyServer(options: ServerOptions) {
         browser: {
           sessionId: peer.browser,
           serverDeviceId: serverDevice.id,
-          selfSigned: web.selfSigned(peer.origin, peer.proxied),
+          selfSigned: web.selfSigned(peer.origin, web.trustedProxy(peer.remoteAddress)),
         },
       });
       send(peer, devices());
@@ -1494,7 +1501,7 @@ export function createProxyServer(options: ServerOptions) {
     (
       socket: WebSocket,
       address: string,
-      context?: { browser?: string; origin: string; proxied?: boolean },
+      context: { browser?: string; origin: string; remoteAddress: string | undefined },
     ) => {
       void releases.refresh();
       const peer: Peer = {
@@ -1502,9 +1509,9 @@ export function createProxyServer(options: ServerOptions) {
         id: randomUUID(),
         address,
         authenticated: false,
-        browser: context?.browser,
-        origin: context?.origin,
-        proxied: context?.proxied,
+        browser: context.browser,
+        origin: context.origin,
+        remoteAddress: context.remoteAddress,
         name: '',
         registering: false,
         left: false,
@@ -1652,6 +1659,7 @@ export function createProxyServer(options: ServerOptions) {
         dispatch(peer, command.data);
       });
       socket.on('close', (code) => {
+        web.disconnected(peer.id);
         clearTimeout(authTimer);
         clearInterval(heartbeat);
         if (!signedIn) gate.leave(address);

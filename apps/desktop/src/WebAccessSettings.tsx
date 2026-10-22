@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import type { ReactNode } from 'react';
-import { ChevronRight, Copy, ExternalLink, RotateCcw, Trash2 } from 'lucide-react';
+import { ChevronRight, Copy, ExternalLink, Pencil, RotateCcw, Trash2 } from 'lucide-react';
 import type {
   WebCertificateState,
   WebProof,
@@ -8,127 +7,13 @@ import type {
   WebTotpSetup,
 } from '@cc-desk-tunnel/protocol';
 import type { ProxyClient } from './client.ts';
-import { IconButton, Modal, Switch } from './ui.tsx';
+import { IconButton, Switch } from './ui.tsx';
 import { CopyButton } from './copy.tsx';
 import ReverseProxyHelp from './ReverseProxyHelp.tsx';
+import { resolveWebProof, supportsPasskeys } from './passkey.ts';
+import { DialogForm, ProofFields, Row, message, useSubmit } from './WebSettingsForm.tsx';
+import { PasskeyDialog, RenamePasskeyDialog } from './PasskeySettings.tsx';
 
-const message = (error: unknown) => (error instanceof Error ? error.message : '请求失败，请重试。');
-
-function Row({ title, detail, children }: { title: string; detail?: string; children: ReactNode }) {
-  return (
-    <div className="setting-row">
-      <span>
-        <strong>{title}</strong>
-        {detail && <small>{detail}</small>}
-      </span>
-      {children}
-    </div>
-  );
-}
-// The service token, and the current authenticator code once two-step verification is on.
-function ProofFields({
-  proof,
-  change,
-  totp,
-}: {
-  proof: WebProof;
-  change: (value: WebProof) => void;
-  totp: boolean;
-}) {
-  return (
-    <>
-      <label>
-        服务凭据
-        <input
-          type="password"
-          autoComplete="current-password"
-          required
-          value={proof.password}
-          onChange={(event) => change({ ...proof, password: event.target.value })}
-        />
-      </label>
-      {totp && (
-        <label>
-          当前验证器动态码
-          <input
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            pattern="[0-9]{6}"
-            maxLength={6}
-            required
-            value={proof.code ?? ''}
-            onChange={(event) => change({ ...proof, code: event.target.value })}
-          />
-        </label>
-      )}
-    </>
-  );
-}
-function useSubmit() {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  async function run(task: () => Promise<void>) {
-    setBusy(true);
-    setError('');
-    try {
-      await task();
-    } catch (error) {
-      setError(message(error));
-    } finally {
-      setBusy(false);
-    }
-  }
-  return { busy, error, setError, run };
-}
-function DialogForm({
-  title,
-  busy,
-  error,
-  submit,
-  submitLabel,
-  close,
-  children,
-}: {
-  title: string;
-  busy: boolean;
-  error: string;
-  submit: () => void;
-  submitLabel?: string;
-  close: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <Modal
-      title={title}
-      onClose={() => {
-        if (!busy) close();
-      }}
-    >
-      <form
-        className="web-settings-form"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!busy) submit();
-        }}
-      >
-        <fieldset disabled={busy}>{children}</fieldset>
-        {error && (
-          <p className="error" role="alert">
-            {error}
-          </p>
-        )}
-        <div className="dialog-actions">
-          <button type="button" className="button" disabled={busy} onClick={close}>
-            取消
-          </button>
-          <button className="button primary" disabled={busy}>
-            {submitLabel ?? (busy ? '正在保存…' : '确认')}
-          </button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
 export function displayWebAddress(value: string) {
   try {
     const url = new URL(value);
@@ -139,7 +24,16 @@ export function displayWebAddress(value: string) {
   }
 }
 
-type Dialog = 'access' | 'totp' | 'disable' | 'certificate' | 'reset' | { revoke: string };
+type Dialog =
+  | 'access'
+  | 'totp'
+  | 'disable'
+  | 'certificate'
+  | 'reset'
+  | 'passkey'
+  | { revoke: string }
+  | { rename: string }
+  | { remove: string };
 
 // The Web entry of the service this window is connected to. Its state lives here, not in ProxyClient; a
 // connection that ends or changes closes the dialogs and forgets what was typed into them.
@@ -224,7 +118,14 @@ export default function WebAccessSettings({
       </>
     );
   const close = () => setDialog(null);
-  const own = connection.browser?.sessionId;
+  const renderGeneration = generation.current;
+  const applyValues = (next: WebSettingsState) => {
+    if (generation.current === renderGeneration) setValues(next);
+  };
+  const applyCertificate = (next: WebCertificateState) => {
+    if (generation.current === renderGeneration) setCertificate(next);
+  };
+  const own = values?.currentSessionId;
   const expires =
     certificate?.details &&
     Math.ceil((Date.parse(certificate.details.validTo) - Date.now()) / 86400000);
@@ -287,7 +188,9 @@ export default function WebAccessSettings({
                 <Row
                   title="两步验证"
                   detail={
-                    values.totpEnabled ? '登录时需要验证器动态码。' : '建议开启验证器两步验证。'
+                    values.totpEnabled
+                      ? '使用服务凭据登录时，需要验证器动态码。'
+                      : '建议开启验证器两步验证。'
                   }
                 >
                   <button
@@ -298,6 +201,70 @@ export default function WebAccessSettings({
                     {values.totpEnabled ? '关闭' : '设置'}
                   </button>
                 </Row>
+                <Row
+                  title="添加通行密钥"
+                  detail={
+                    !values.passkeyAvailable
+                      ? (values.passkeyUnavailableReason ?? '请先设置固定域名并使用可信 HTTPS。')
+                      : browser && !supportsPasskeys()
+                        ? '请使用支持通行密钥的浏览器和可信 HTTPS 地址。'
+                        : '使用指纹、面容或设备锁屏密码登录 Web 工作台。'
+                  }
+                >
+                  <button
+                    className="button"
+                    disabled={busy || !values.passkeyAvailable || (browser && !supportsPasskeys())}
+                    onClick={() => setDialog('passkey')}
+                  >
+                    添加
+                  </button>
+                </Row>
+                <details className="web-sessions web-passkeys">
+                  <summary>
+                    已添加的通行密钥{' '}
+                    <span>
+                      {values.passkeys.length}
+                      <ChevronRight aria-hidden="true" />
+                    </span>
+                  </summary>
+                  {values.passkeys.length === 0 ? (
+                    <p className="muted">尚未添加通行密钥</p>
+                  ) : (
+                    <ul>
+                      {values.passkeys.map((key) => (
+                        <li key={key.id}>
+                          <span>
+                            <strong>{key.name}</strong>
+                            <small>
+                              {key.available
+                                ? key.lastUsedAt
+                                  ? `最近使用 ${new Date(key.lastUsedAt).toLocaleString()}`
+                                  : '尚未使用'
+                                : `绑定于 ${key.rpId}，当前域名不可用`}
+                            </small>
+                            <small>创建于 {new Date(key.createdAt).toLocaleString()}</small>
+                          </span>
+                          <div className="web-row-actions">
+                            <IconButton
+                              title={`重命名 ${key.name}`}
+                              disabled={busy}
+                              onClick={() => setDialog({ rename: key.id })}
+                            >
+                              <Pencil />
+                            </IconButton>
+                            <IconButton
+                              title={`删除 ${key.name}`}
+                              disabled={busy}
+                              onClick={() => setDialog({ remove: key.id })}
+                            >
+                              <Trash2 />
+                            </IconButton>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </details>
                 <details className="web-sessions">
                   <summary>
                     已登录浏览器{' '}
@@ -407,41 +374,91 @@ export default function WebAccessSettings({
           certificate={certificate}
           connectionUrl={connectionUrl}
           close={close}
-          changed={setValues}
+          changed={applyValues}
         />
       )}
       {values && dialog === 'totp' && (
-        <TotpDialog client={client} browser={browser} close={close} changed={setValues} />
+        <TotpDialog
+          client={client}
+          browser={browser}
+          passkeyAvailable={values.passkeyAvailable && values.passkeys.some((key) => key.available)}
+          close={close}
+          changed={applyValues}
+        />
       )}
       {values && dialog === 'disable' && (
         <ConfirmDialog
           title="关闭两步验证"
           text="关闭两步验证后，使用服务凭据即可登录。已登录浏览器将退出。"
           proof={browser ? values.totpEnabled : undefined}
+          passkeyAvailable={
+            browser && values.passkeyAvailable && values.passkeys.some((key) => key.available)
+          }
           act={async (proof) => {
             const result = await client.fetch({ type: 'web.totp.disable', ...proof });
-            setValues(result.values);
+            applyValues(result.values);
           }}
           close={close}
         />
       )}
-      {values && typeof dialog === 'object' && dialog && (
+      {values && typeof dialog === 'object' && dialog && 'revoke' in dialog && (
         <ConfirmDialog
           title="退出浏览器登录"
           text={
             dialog.revoke === own
               ? '退出当前浏览器的登录？'
-              : '退出这个浏览器的登录？它需要重新输入服务凭据和动态码。'
+              : '退出这个浏览器的登录？它需要重新验证身份。'
           }
           // Ending another login from a browser asks for proof; a desktop or this browser itself need none.
           proof={browser && dialog.revoke !== own ? values.totpEnabled : undefined}
+          passkeyAvailable={
+            browser && values.passkeyAvailable && values.passkeys.some((key) => key.available)
+          }
           act={async (proof) => {
             const result = await client.fetch({
               type: 'web.sessions.revoke',
               sessionId: dialog.revoke,
               ...proof,
             });
-            setValues(result.values);
+            applyValues(result.values);
+          }}
+          close={close}
+        />
+      )}
+      {dialog === 'passkey' && values && (
+        <PasskeyDialog
+          client={client}
+          browser={browser}
+          values={values}
+          close={close}
+          changed={applyValues}
+        />
+      )}
+      {values && typeof dialog === 'object' && dialog && 'rename' in dialog && (
+        <RenamePasskeyDialog
+          client={client}
+          values={values}
+          browser={browser}
+          id={dialog.rename}
+          close={close}
+          changed={applyValues}
+        />
+      )}
+      {values && typeof dialog === 'object' && dialog && 'remove' in dialog && (
+        <ConfirmDialog
+          title="删除通行密钥"
+          text={`删除“${values.passkeys.find((key) => key.id === dialog.remove)?.name ?? '通行密钥'}”？通过它登录的浏览器也将退出。你仍可使用服务凭据登录。`}
+          proof={browser ? values.totpEnabled : undefined}
+          passkeyAvailable={
+            browser && values.passkeyAvailable && values.passkeys.some((key) => key.available)
+          }
+          act={async (proof) => {
+            const result = await client.fetch({
+              type: 'web.passkeys.remove',
+              passkeyId: dialog.remove,
+              ...proof,
+            });
+            applyValues(result.values);
           }}
           close={close}
         />
@@ -451,14 +468,14 @@ export default function WebAccessSettings({
           client={client}
           domain={values.domain}
           close={close}
-          changed={setCertificate}
+          changed={applyCertificate}
         />
       )}
       {dialog === 'reset' && (
         <ConfirmDialog
           title="恢复默认证书"
           text="恢复部署时的默认证书？当前自定义证书将被移除；如果默认证书为自签名，浏览器会重新提示证书确认。"
-          act={async () => setCertificate(await client.fetch({ type: 'web.certificate.reset' }))}
+          act={async () => applyCertificate(await client.fetch({ type: 'web.certificate.reset' }))}
           close={close}
         />
       )}
@@ -471,12 +488,14 @@ function ConfirmDialog({
   title,
   text,
   proof: totp,
+  passkeyAvailable = false,
   act,
   close,
 }: {
   title: string;
   text: string;
   proof?: boolean;
+  passkeyAvailable?: boolean;
   act: (proof: { proof?: WebProof }) => Promise<void>;
   close: () => void;
 }) {
@@ -489,14 +508,22 @@ function ConfirmDialog({
       error={error}
       close={close}
       submit={() =>
-        void run(async () => {
-          await act(totp === undefined ? {} : { proof });
+        void run(async (signal) => {
+          await act(totp === undefined ? {} : { proof: await resolveWebProof(proof, signal) });
+          signal.throwIfAborted();
           close();
         })
       }
     >
       <p>{text}</p>
-      {totp !== undefined && <ProofFields proof={proof} change={setProof} totp={totp} />}
+      {totp !== undefined && (
+        <ProofFields
+          proof={proof}
+          change={setProof}
+          totp={totp}
+          passkeyAvailable={passkeyAvailable}
+        />
+      )}
     </DialogForm>
   );
 }
@@ -529,12 +556,12 @@ function AccessDialog({
   const { busy, error, run } = useSubmit();
   // A browser may only move the entry, and proves itself for it; a desktop saves the rest as well.
   const save = () =>
-    run(async () => {
+    run(async (signal) => {
       const path = draft.path.trim();
       const result = await client.fetch({
         type: 'web.settings.update',
         ...(browser
-          ? { values: { path }, proof }
+          ? { values: { path }, proof: await resolveWebProof(proof, signal) }
           : {
               values: {
                 ...draft,
@@ -547,6 +574,7 @@ function AccessDialog({
               },
             }),
       });
+      signal.throwIfAborted();
       if (browser && result.values.path !== values.path) {
         const url = new URL(result.values.url ?? '', location.href);
         const expected = result.values.path ? `/${result.values.path}/` : '/';
@@ -574,6 +602,11 @@ function AccessDialog({
               ? '请先恢复默认证书，再修改或清空域名。'
               : '留空使用部署地址；填写后仅允许指定域名访问，其他入口返回 404。'}
           </small>
+          {values.passkeys.length > 0 && (
+            <small className="muted">
+              通行密钥绑定当前域名。更换后，原密钥在新域名不可用，关联登录会话也将退出；请在新域名重新添加。
+            </small>
+          )}
         </label>
       )}
       <label>
@@ -645,7 +678,14 @@ function AccessDialog({
           )}
         </>
       )}
-      {browser && <ProofFields proof={proof} change={setProof} totp={values.totpEnabled} />}
+      {browser && (
+        <ProofFields
+          proof={proof}
+          change={setProof}
+          totp={values.totpEnabled}
+          passkeyAvailable={values.passkeyAvailable && values.passkeys.some((key) => key.available)}
+        />
+      )}
     </DialogForm>
   );
 }
@@ -654,11 +694,13 @@ function AccessDialog({
 function TotpDialog({
   client,
   browser,
+  passkeyAvailable,
   close,
   changed,
 }: {
   client: ProxyClient;
   browser: boolean;
+  passkeyAvailable: boolean;
   close: () => void;
   changed: (values: WebSettingsState) => void;
 }) {
@@ -670,10 +712,14 @@ function TotpDialog({
   // One request however often React runs the effect that asks for it.
   const pending = useRef<Promise<WebTotpSetup> | null>(null);
   const prepare = () =>
-    run(async () => {
-      pending.current ??= client.fetch({ type: 'web.totp.setup', ...(browser ? { proof } : {}) });
+    run(async (signal) => {
+      pending.current ??= client.fetch({
+        type: 'web.totp.setup',
+        ...(browser ? { proof: await resolveWebProof(proof, signal) } : {}),
+      });
       try {
-        setSetup(await pending.current);
+        const value = await pending.current;
+        if (!signal.aborted) setSetup(value);
       } finally {
         pending.current = null;
       }
@@ -699,8 +745,9 @@ function TotpDialog({
     };
   }, [setup]);
   const enable = () =>
-    run(async () => {
+    run(async (signal) => {
       const result = await client.fetch({ type: 'web.totp.enable', code });
+      signal.throwIfAborted();
       changed(result.values);
       close();
     });
@@ -713,7 +760,14 @@ function TotpDialog({
       submit={() => void (setup ? enable() : prepare())}
       submitLabel={setup ? undefined : busy ? '正在准备…' : browser ? '下一步' : '重试'}
     >
-      {!setup && browser && <ProofFields proof={proof} change={setProof} totp={false} />}
+      {!setup && browser && (
+        <ProofFields
+          proof={proof}
+          change={setProof}
+          totp={false}
+          passkeyAvailable={passkeyAvailable}
+        />
+      )}
       {!setup && !browser && busy && <p role="status">正在生成验证器密钥…</p>}
       {setup && (
         <div className="web-totp-setup">
@@ -778,8 +832,10 @@ function CertificateDialog({
       error={error}
       close={close}
       submit={() =>
-        void run(async () => {
-          changed(await client.fetch({ type: 'web.certificate.set', cert, key }));
+        void run(async (signal) => {
+          const result = await client.fetch({ type: 'web.certificate.set', cert, key });
+          signal.throwIfAborted();
+          changed(result);
           close();
         })
       }

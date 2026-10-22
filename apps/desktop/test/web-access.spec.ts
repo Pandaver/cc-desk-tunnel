@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { PROTOCOL_VERSION } from '@cc-desk-tunnel/protocol';
 import type { Session } from '@cc-desk-tunnel/protocol';
-import { screenshots } from './helpers.ts';
+import { login, screenshots } from './helpers.ts';
 
 const webScreenshots = resolve(screenshots, 'web');
 mkdirSync(webScreenshots, { recursive: true });
@@ -43,6 +43,9 @@ async function browserFixture(page: Page, authenticated = false, withHistory = f
     proxyEnabled: false,
     trustedProxies: [],
     totpEnabled: true,
+    passkeyAvailable: false,
+    passkeys: [],
+    currentSessionId: sessionId,
     sessions: [
       {
         id: sessionId,
@@ -71,6 +74,7 @@ async function browserFixture(page: Page, authenticated = false, withHistory = f
         json: {
           authenticated: loggedIn,
           totpEnabled: true,
+          passkeyAvailable: false,
           selfSigned: true,
           ...(loggedIn ? { session: values.sessions[0] } : {}),
         },
@@ -296,10 +300,24 @@ async function settingsFixture(
   custom = true,
   browser = false,
   totp = false,
+  passkeys = false,
 ) {
-  await page.goto('/');
+  await page.route('**/__settings-fixture', (route) =>
+    route.fulfill({
+      contentType: 'text/html',
+      body: `<html><head><script type="module">
+      import RefreshRuntime from '/@react-refresh';
+      RefreshRuntime.injectIntoGlobalHook(window);
+      window.$RefreshReg$ = () => {};
+      window.$RefreshSig$ = () => (type) => type;
+      window.__vite_plugin_react_preamble_installed__ = true;
+    </script><link rel="stylesheet" href="/src/style.css"></head><body></body></html>`,
+    }),
+  );
+  await page.goto('/__settings-fixture');
+  await page.waitForFunction(() => '__vite_plugin_react_preamble_installed__' in window);
   await page.evaluate(
-    async ({ enabled, custom, browser, totp }) => {
+    async ({ enabled, custom, browser, totp, passkeys }) => {
       const reactPath = '/node_modules/.vite/deps/react.js';
       const domPath = '/node_modules/.vite/deps/react-dom_client.js';
       const componentPath = '/src/WebAccessSettings.tsx';
@@ -318,6 +336,18 @@ async function settingsFixture(
         proxyEnabled: false,
         trustedProxies: [],
         totpEnabled: totp,
+        passkeyAvailable: passkeys && enabled,
+        passkeys: passkeys
+          ? [
+              {
+                id: crypto.randomUUID(),
+                name: '日常使用',
+                rpId: 'web.example.com',
+                available: true,
+                createdAt: new Date().toISOString(),
+              },
+            ]
+          : [],
         sessions: [],
         selfSigned: true,
         url: 'https://web.example.com/entry/',
@@ -328,6 +358,14 @@ async function settingsFixture(
       let failGet = false;
       let failSetup = false;
       let setupCount = 0;
+      let registrationStatus = 'pending';
+      const registrationId = crypto.randomUUID();
+      const opened: string[] = [];
+      if (passkeys && !browser)
+        Object.defineProperty(window, 'desktop', {
+          configurable: true,
+          value: { openWeb: async (url: string) => opened.push(url) },
+        });
       let setupReady: Promise<void> = Promise.resolve();
       let releaseSetup = () => {};
       client.fetch = async (command: Record<string, unknown>) => {
@@ -365,6 +403,19 @@ async function settingsFixture(
           };
         }
         if (command.type === 'web.totp.enable') settings = { ...settings, totpEnabled: true };
+        if (command.type === 'web.passkeys.rename')
+          settings.passkeys = settings.passkeys.map((key) =>
+            key.id === command.passkeyId ? { ...key, name: String(command.name) } : key,
+          );
+        if (command.type === 'web.passkeys.remove')
+          settings.passkeys = settings.passkeys.filter((key) => key.id !== command.passkeyId);
+        if (command.type === 'web.passkeys.start' || command.type === 'web.passkeys.status')
+          return {
+            registrationId,
+            status: registrationStatus,
+            url: 'https://web.example.com/entry/#passkey-register=one-time-grant',
+            expiresAt: new Date(Date.now() + 600000).toISOString(),
+          };
         return { values: settings };
       };
       const root = document.createElement('div');
@@ -384,6 +435,20 @@ async function settingsFixture(
       Object.assign(window, {
         settingsFixture: {
           calls,
+          opened,
+          completeRegistration: () => {
+            registrationStatus = 'complete';
+            settings.passkeys.push({
+              id: crypto.randomUUID(),
+              name: '备用密钥',
+              rpId: 'web.example.com',
+              available: true,
+              createdAt: new Date().toISOString(),
+            });
+          },
+          expireRegistration: () => {
+            registrationStatus = 'expired';
+          },
           disconnect: () => client.update({ status: 'disconnected', connectionId: null }),
           reconnect: () =>
             client.update({ status: 'connected', connectionId: crypto.randomUUID() }),
@@ -405,9 +470,12 @@ async function settingsFixture(
         },
       });
     },
-    { enabled, custom, browser, totp },
+    { enabled, custom, browser, totp, passkeys },
   );
-  if (browser) await expect(page.locator('.web-sessions > summary')).toHaveText('已登录浏览器 0');
+  if (browser)
+    await expect(
+      page.locator('.web-sessions > summary').filter({ hasText: '已登录浏览器' }),
+    ).toHaveText('已登录浏览器 0');
   else await expect(page.getByRole('switch', { name: '启用 Web 访问' })).toBeVisible();
 }
 
@@ -760,9 +828,7 @@ test('reverse proxy help stays folded, copies verified TLS configuration, and ne
   await page.getByRole('button', { name: 'Caddy', exact: true }).click();
   await expect(page.getByLabel('反代配置', { exact: true })).toContainText('tls_trust_pool file');
   await expect(page.getByRole('status')).toHaveCount(0);
-  await page
-    .getByLabel('上游地址', { exact: false })
-    .fill('https://192.0.2.42:8787/invalid');
+  await page.getByLabel('上游地址', { exact: false }).fill('https://192.0.2.42:8787/invalid');
   await expect(page.getByRole('button', { name: '复制反代配置', exact: true })).toBeDisabled();
   await expect(page.getByLabel('反代配置', { exact: true })).toHaveCount(0);
   await page.getByLabel('上游地址', { exact: false }).fill('https://127.0.0.1:9443');
@@ -911,4 +977,168 @@ test('user input in the browser reports activity at most once a minute; pushed u
   await page.clock.runFor(61_000);
   await page.keyboard.press('ArrowUp');
   await expect.poll(() => activity().length).toBe(2);
+});
+
+test('desktop manages Web Passkeys without repeating its existing authentication', async ({
+  page,
+}) => {
+  await settingsFixture(page, true, false, false, true, true);
+  await expect(page.getByRole('button', { name: '添加', exact: true })).toBeEnabled();
+  await expect(
+    page.locator('.web-sessions summary').filter({ hasText: '已登录浏览器' }),
+  ).toBeVisible();
+  await page.locator('.web-passkeys summary').click();
+  await page.getByRole('button', { name: '重命名 日常使用' }).click();
+  await expect(page.getByLabel('服务凭据', { exact: true })).toHaveCount(0);
+  await page.getByLabel('名称', { exact: true }).fill('旅行备用');
+  await page.getByRole('button', { name: '确认', exact: true }).click();
+  await page.getByRole('button', { name: '删除 旅行备用' }).click();
+  await expect(page.getByRole('dialog')).toContainText('通过它登录的浏览器也将退出');
+  await page.getByRole('button', { name: '取消', exact: true }).click();
+  await expect(page.getByRole('button', { name: '删除 旅行备用' })).toBeVisible();
+  await page.getByRole('button', { name: '删除 旅行备用' }).click();
+  await page.getByRole('button', { name: '确认', exact: true }).click();
+  await expect(page.getByText('尚未添加通行密钥')).toBeVisible();
+});
+
+test('Web Passkey registration from desktop settings waits for completion and cancellation revokes its grant', async ({
+  page,
+}) => {
+  await settingsFixture(page, true, true, false, false, true);
+  await page.getByRole('button', { name: '添加', exact: true }).click();
+  await page.getByLabel('名称', { exact: true }).fill('备用密钥');
+  await page.getByRole('button', { name: '前往浏览器设置' }).click();
+  await expect(page.getByRole('status')).toContainText('等待浏览器');
+  expect(
+    await page.evaluate(
+      () => (window as unknown as { settingsFixture: { opened: string[] } }).settingsFixture.opened,
+    ),
+  ).toEqual(['https://web.example.com/entry/#passkey-register=one-time-grant']);
+  await page.getByRole('button', { name: '取消', exact: true }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as unknown as { settingsFixture: { calls: { type: string }[] } }
+          ).settingsFixture.calls.filter((call) => call.type === 'web.passkeys.cancel').length,
+      ),
+    )
+    .toBe(1);
+  await page.getByRole('button', { name: '添加', exact: true }).click();
+  await page.getByRole('button', { name: '前往浏览器设置' }).click();
+  await page.evaluate(() =>
+    (
+      window as unknown as { settingsFixture: { completeRegistration: () => void } }
+    ).settingsFixture.completeRegistration(),
+  );
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.locator('.web-passkeys summary').click();
+  await expect(page.getByRole('button', { name: '删除 备用密钥' })).toBeVisible();
+  await page.screenshot({ path: resolve(webScreenshots, 'passkey-settings-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({
+    path: resolve(webScreenshots, 'passkey-settings-mobile.png'),
+    fullPage: true,
+  });
+});
+
+test('Web Passkey registration expires without reporting success and disconnect closes its settings dialog', async ({
+  page,
+}) => {
+  await settingsFixture(page, true, true, false, false, true);
+  await page.getByRole('button', { name: '添加', exact: true }).click();
+  await page.getByRole('button', { name: '前往浏览器设置' }).click();
+  await page.evaluate(() =>
+    (
+      window as unknown as { settingsFixture: { expireRegistration: () => void } }
+    ).settingsFixture.expireRegistration(),
+  );
+  await expect(page.getByRole('status')).toContainText('已过期');
+  await expect(page.getByRole('button', { name: '重新设置' })).toBeVisible();
+  await page.evaluate(() =>
+    (
+      window as unknown as { settingsFixture: { disconnect: () => void } }
+    ).settingsFixture.disconnect(),
+  );
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByText('连接服务端后管理浏览器访问。')).toBeVisible();
+});
+
+test('desktop login uses its service credentials', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByLabel('服务凭据', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '使用通行密钥登录', exact: true })).toHaveCount(0);
+  await login(page);
+  await expect(page.locator('.connection-status')).toContainText('已连接');
+});
+
+test('Web off hides optional settings and Web Passkey management until the entry is enabled', async ({
+  page,
+}) => {
+  await settingsFixture(page, false, false, false, true, true);
+  await expect(page.getByRole('heading', { name: '浏览器访问', exact: true })).toBeVisible();
+  await expect(page.locator('.web-access-settings .setting-row')).toHaveCount(1);
+  await expect(page.getByRole('heading', { name: '通行密钥', exact: true })).toHaveCount(0);
+  await expect(page.locator('.web-access-settings .web-sessions')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '添加', exact: true })).toHaveCount(0);
+  await page.getByRole('switch', { name: '启用 Web 访问' }).click();
+  await expect(page.getByRole('button', { name: '添加', exact: true })).toBeVisible();
+  await expect(
+    page.locator('.web-access-settings > .web-sessions:not(.web-passkeys) > summary'),
+  ).toHaveText('已登录浏览器 0');
+  await page.getByRole('switch', { name: '启用 Web 访问' }).click();
+  await expect(page.locator('.web-access-settings .web-sessions')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '添加', exact: true })).toHaveCount(0);
+});
+
+test('Web Passkeys stay inside browser access with an in-flow action and a nested list on narrow screens', async ({
+  page,
+}) => {
+  await settingsFixture(page, true, false, false, false, true);
+  await expect(page.locator('.page-heading')).toHaveText(['浏览器访问']);
+  const card = page.locator('.web-access-settings');
+  await expect(page.locator('.card')).toHaveCount(1);
+  await expect(card.locator('.card')).toHaveCount(0);
+  const passkeys = card.locator(':scope > .web-passkeys');
+  await expect(passkeys).toHaveCount(1);
+  expect(
+    await passkeys.evaluate(
+      (element) => element.previousElementSibling?.querySelector('strong')?.textContent,
+    ),
+  ).toBe('添加通行密钥');
+  await expect(passkeys.locator('summary')).toContainText('已添加的通行密钥');
+  await passkeys.locator('summary').click();
+  await page.getByRole('button', { name: '重命名 日常使用' }).click();
+  const name = '长期使用的浏览器通行密钥'.repeat(4);
+  await page.getByLabel('名称', { exact: true }).fill(name);
+  await page.getByRole('button', { name: '确认', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(card.getByRole('button', { name: '添加', exact: true })).toBeVisible();
+  const layout = await card.evaluate((element) => {
+    const row = element.querySelector('.setting-row:has(+ .web-passkeys)')!;
+    const button = row.querySelector('button')!;
+    const list = element.querySelector('.web-passkeys ul')!;
+    const r = row.getBoundingClientRect();
+    const b = button.getBoundingClientRect();
+    return {
+      position: getComputedStyle(button).position,
+      actionInRow: b.top >= r.top && b.bottom <= r.bottom,
+      listIndented: list.getBoundingClientRect().left > element.getBoundingClientRect().left,
+      overflow: document.documentElement.scrollWidth > innerWidth,
+    };
+  });
+  expect(layout).toEqual({
+    position: 'static',
+    actionInRow: true,
+    listIndented: true,
+    overflow: false,
+  });
+  await expect(page.getByRole('button', { name: `删除 ${name}`, exact: true })).toBeVisible();
+  await page.screenshot({
+    path: resolve(webScreenshots, 'passkey-settings-mobile.png'),
+    fullPage: true,
+  });
 });

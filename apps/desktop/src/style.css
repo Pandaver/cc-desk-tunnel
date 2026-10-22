@@ -3648,6 +3648,46 @@ dialog {
   overflow-wrap: anywhere;
   font-size: 12px;
 }
+.web-access-settings > .setting-row:has(+ .web-passkeys) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  border-bottom: 0;
+}
+.web-passkeys .web-row-actions {
+  flex-shrink: 0;
+}
+.web-passkeys li > span,
+.web-sessions li > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.web-proof-choice {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+.web-passkey-login {
+  gap: 8px;
+}
+.web-passkey-login svg,
+.passkey-authorization .button svg,
+.passkey-complete svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+.passkey-authorization {
+  overflow-wrap: anywhere;
+}
+.passkey-authorization > .button {
+  margin: 8px 8px 0 0;
+  gap: 8px;
+}
+.passkey-complete {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .web-sessions {
   border-top: 1px solid var(--line-soft);
   padding: 16px 0;

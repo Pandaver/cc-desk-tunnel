@@ -75,6 +75,8 @@ test('revocation ends browser reconnect and reports expiry; settings data remain
     trustedProxies: [],
     totpEnabled: false,
     sessions: [],
+    passkeys: [],
+    passkeyAvailable: false,
     selfSigned: true,
   };
   socket.message({ type: 'web.settings.state', requestId: request.requestId, values });
@@ -180,5 +182,31 @@ test('disconnect cleanup does not discard a successful response awaiting its pro
   socket.message({ type: 'response', requestId, ok: true });
   client.disconnect();
   assert.equal((await pending).secret, 'FIXTURESECRET');
+  assert.equal(client.results.size, 0);
+});
+
+test('Passkey registration URLs stay request-local and are discarded after a failed response', async (t) => {
+  const { client, socket } = fixture(t);
+  const pending = client.fetch({
+    type: 'web.passkeys.start',
+    name: 'Test key',
+    proof: { password: 'fixture-password' },
+  });
+  const { requestId } = socket.sent.at(-1);
+  const registration = {
+    type: 'web.passkey.registration',
+    requestId,
+    registrationId: randomUUID(),
+    status: 'pending',
+    url: 'https://work.example.com/entry/#passkey-register=test-only-grant',
+    expiresAt: new Date(Date.now() + 300000).toISOString(),
+  };
+  socket.message(registration);
+  assert.equal(client.results.size, 1);
+  assert.equal(JSON.stringify(client.state).includes('test-only-grant'), false);
+  socket.message({ type: 'response', requestId, ok: false, message: 'test failure' });
+  await assert.rejects(pending);
+  assert.equal(client.results.size, 0);
+  socket.message(registration);
   assert.equal(client.results.size, 0);
 });

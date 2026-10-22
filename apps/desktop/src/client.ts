@@ -30,6 +30,7 @@ type DataMessage = Extract<
       | 'instructions.state'
       | 'web.settings.state'
       | 'web.totp.setup'
+      | 'web.passkey.registration'
       | 'web.certificate.state';
   }
 >;
@@ -48,6 +49,11 @@ type Replies = {
   'web.totp.setup': 'web.totp.setup';
   'web.totp.enable': 'web.settings.state';
   'web.totp.disable': 'web.settings.state';
+  'web.passkeys.start': 'web.passkey.registration';
+  'web.passkeys.status': 'web.passkey.registration';
+  'web.passkeys.cancel': 'web.settings.state';
+  'web.passkeys.rename': 'web.settings.state';
+  'web.passkeys.remove': 'web.settings.state';
   'web.certificate.get': 'web.certificate.state';
   'web.certificate.set': 'web.certificate.state';
   'web.certificate.reset': 'web.certificate.state';
@@ -77,6 +83,7 @@ export class RequestInterruptedError extends Error {
       'settings.get',
       'instructions.get',
       'web.settings.get',
+      'web.passkeys.status',
       'web.certificate.get',
       'service.update.check',
     ].includes(type);
@@ -475,6 +482,7 @@ export class ProxyClient {
         message.type === 'instructions.state' ||
         message.type === 'web.settings.state' ||
         message.type === 'web.totp.setup' ||
+        message.type === 'web.passkey.registration' ||
         message.type === 'web.certificate.state'
       ) {
         if (this.pending.has(message.requestId)) this.results.set(message.requestId, message);
