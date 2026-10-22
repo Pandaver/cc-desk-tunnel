@@ -735,7 +735,7 @@ test('reverse proxy help stays folded, copies verified TLS configuration, and ne
   await page.getByRole('switch', { name: '信任反向代理' }).click();
   await expect(page.locator('.web-proxy-help')).not.toHaveAttribute('open', '');
   await page.getByText('反向代理配置示例', { exact: true }).click();
-  await expect(page.getByLabel('上游 HTTPS 地址', { exact: false })).toHaveValue(
+  await expect(page.getByLabel('上游地址', { exact: false })).toHaveValue(
     'https://192.0.2.42:8787',
   );
   await expect(page.getByLabel('上游证书校验名', { exact: false })).toHaveValue(
@@ -761,11 +761,11 @@ test('reverse proxy help stays folded, copies verified TLS configuration, and ne
   await expect(page.getByLabel('反代配置', { exact: true })).toContainText('tls_trust_pool file');
   await expect(page.getByRole('status')).toHaveCount(0);
   await page
-    .getByLabel('上游 HTTPS 地址', { exact: false })
+    .getByLabel('上游地址', { exact: false })
     .fill('https://192.0.2.42:8787/invalid');
   await expect(page.getByRole('button', { name: '复制反代配置', exact: true })).toBeDisabled();
   await expect(page.getByLabel('反代配置', { exact: true })).toHaveCount(0);
-  await page.getByLabel('上游 HTTPS 地址', { exact: false }).fill('https://127.0.0.1:9443');
+  await page.getByLabel('上游地址', { exact: false }).fill('https://127.0.0.1:9443');
   await page.screenshot({ path: resolve(webScreenshots, 'proxy-help-desktop.png') });
   await page.setViewportSize({ width: 390, height: 844 });
   await expect
@@ -794,6 +794,61 @@ test('reverse proxy help stays folded, copies verified TLS configuration, and ne
     proxyEnabled: true,
     trustedProxies: ['127.0.0.1'],
   });
+});
+
+test('reverse proxy HTTP upstream hides TLS inputs and switching back restores required certificate validation', async ({
+  page,
+}) => {
+  await settingsFixture(page, true, false);
+  await page
+    .locator('.setting-row')
+    .filter({ hasText: '访问设置' })
+    .getByRole('button', { name: '设置', exact: true })
+    .click();
+  await page.getByRole('switch', { name: '信任反向代理' }).click();
+  await page.getByText('反向代理配置示例', { exact: true }).click();
+  await page.getByLabel('上游证书校验名', { exact: false }).fill('');
+  await page.getByLabel('受信任 PEM 文件', { exact: false }).fill('');
+  await expect(page.getByRole('button', { name: '复制反代配置', exact: true })).toBeDisabled();
+  await page.getByLabel('上游地址', { exact: false }).fill('http://127.0.0.1:8787');
+  await expect(page.getByLabel('上游证书校验名', { exact: false })).toHaveCount(0);
+  await expect(page.getByLabel('受信任 PEM 文件', { exact: false })).toHaveCount(0);
+  await expect(page.getByText('如何准备信任文件', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '复制反代配置', exact: true })).toBeEnabled();
+  const config = page.getByLabel('反代配置', { exact: true });
+  await expect(config).toContainText('location = /ws { proxy_pass http://127.0.0.1:8787; }');
+  await expect(config).toContainText(
+    'location = /client/installer { proxy_pass http://127.0.0.1:8787; }',
+  );
+  await expect(config).toContainText('proxy_set_header Host $http_host;');
+  await expect(config).not.toContainText('proxy_ssl_');
+  await expect(page.locator('.web-proxy-help')).toContainText('公网入口仍使用 HTTPS');
+  await page.screenshot({ path: resolve(webScreenshots, 'proxy-http-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const dialog = document.querySelector('dialog')!;
+        return dialog.scrollWidth <= dialog.clientWidth;
+      }),
+    )
+    .toBe(true);
+  await page.screenshot({ path: resolve(webScreenshots, 'proxy-http-mobile.png') });
+  await page.getByRole('button', { name: 'Caddy', exact: true }).click();
+  await expect(config).toContainText('@web path /entry/* /ws /client/installer');
+  await expect(config).toContainText('header_up Host {hostport}');
+  await expect(config).not.toContainText('tls_');
+  await page.getByLabel('上游地址', { exact: false }).fill('https://127.0.0.1:8787');
+  await expect(page.getByLabel('上游证书校验名', { exact: false })).toHaveValue('');
+  await expect(page.getByLabel('受信任 PEM 文件', { exact: false })).toHaveValue('');
+  await expect(page.getByRole('button', { name: '复制反代配置', exact: true })).toBeDisabled();
+  await page.getByLabel('上游证书校验名', { exact: false }).fill('cc-desk-tunnel.local');
+  await page
+    .getByLabel('受信任 PEM 文件', { exact: false })
+    .fill('/etc/cc-desk-tunnel/upstream.pem');
+  await expect(config).toContainText('tls_server_name cc-desk-tunnel.local');
+  await expect(config).toContainText('tls_trust_pool file /etc/cc-desk-tunnel/upstream.pem');
+  await expect(page.getByRole('button', { name: '复制反代配置', exact: true })).toBeEnabled();
 });
 
 test('reverse proxy copy uses the desktop clipboard bridge when browser clipboard permission is denied', async ({
