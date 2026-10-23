@@ -11,9 +11,11 @@ import {
   webLoginSchema,
   webStoredSettingsSchema,
   webDomainSchema,
+  webProxyDetectSchema,
 } from '@cc-desk-tunnel/protocol';
 import type {
   ServerMessage,
+  Command,
   WebCommand,
   WebLoginState,
   WebProof,
@@ -26,6 +28,7 @@ import { WebCertificates } from './web-certificate.ts';
 import { Passkeys, type PasskeyEntry } from './passkeys.ts';
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from '@simplewebauthn/server';
 import { totpSecret, totpStep } from './web-totp.ts';
+import { WebProxyProbe } from './web-proxy-probe.ts';
 
 const DAY = 86_400_000;
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -121,6 +124,7 @@ export class WebAccess {
   private closed = false;
   private accessRevision = 0;
   private index?: Buffer;
+  private proxyProbe = new WebProxyProbe();
   readonly serverDeviceId: string;
   // Browser sign-ins are counted apart from desktops: mistakes typed in a browser never lock out a desktop
   // that shares its address.
@@ -272,6 +276,7 @@ export class WebAccess {
   }
   disconnected(connectionId: string) {
     this.passkeys.revokeOwner(connectionId);
+    this.proxyProbe.cancel(connectionId);
   }
 
   // Whether the request came through the deployment's proxy or one the user named.
@@ -446,6 +451,27 @@ export class WebAccess {
     return Math.min(row.expires, row.active + this.settings.idleMinutes * 60_000);
   }
 
+  async detectProxy(input: Extract<Command, { type: 'web.proxy.detect' }>, context: WebContext) {
+    const command = webProxyDetectSchema.parse(input);
+    if (!context.desktop || !context.connectionId)
+      fail('web_desktop_only', '请在桌面客户端检测反向代理。');
+    if (!this.enabled) fail('web_disabled', '请先启用 Web 访问。');
+    if (!this.https || !this.settings.publicOrigin)
+      fail('web_invalid_settings', '请先填写并保存 HTTPS 的 Web 对外地址。');
+    const { publicOrigin, path } = this.settings;
+    const address = await this.proxyProbe.detect(
+      new URL(`${this.prefix}/api/proxy-detect`, publicOrigin),
+      context.connectionId!,
+    );
+    return {
+      type: 'web.proxy.detected' as const,
+      requestId: command.requestId,
+      address,
+      publicOrigin,
+      path,
+    };
+  }
+
   execute(input: WebCommand, context: WebContext): WebReply {
     const command = webCommandSchema.parse(input);
     const { requestId } = command;
@@ -522,6 +548,7 @@ export class WebAccess {
         if (command.type === 'web.certificate.reset') this.certificates.reset();
         if (command.type !== 'web.certificate.get') {
           this.accessRevision++;
+          this.proxyProbe.cancel();
           this.passkeys.clearPending();
         }
         return { type: 'web.certificate.state', requestId, ...this.certificates.state() };
@@ -558,6 +585,7 @@ export class WebAccess {
       .prepare('UPDATE web_settings SET settings = ? WHERE id = 1')
       .run(JSON.stringify(next));
     this.settings = next;
+    this.proxyProbe.cancel();
     // Logins belong to an address; a browser that moved it is told after its answer is on the way.
     if (moved || !next.enabled || trustChanged) {
       this.accessRevision++;
@@ -678,6 +706,17 @@ export class WebAccess {
     }
     const route = this.route(request);
     if (!route) return this.empty(response, 404);
+    if (route === '/api/proxy-detect') {
+      const forwarded = request.headers['x-real-ip'];
+      const address = ip(request.socket.remoteAddress ?? '');
+      const matched =
+        request.method === 'GET' &&
+        typeof forwarded === 'string' &&
+        !!isIP(forwarded) &&
+        !!isIP(address) &&
+        this.proxyProbe.observe(request.headers['x-cc-proxy-probe'], address);
+      return this.empty(response, matched ? 204 : 404);
+    }
     if (route.startsWith('/api/')) return this.api(route, request, response);
     if (!reading) return this.empty(response, 404);
     return this.file(route, request, response);
@@ -929,6 +968,7 @@ export class WebAccess {
   }
   close() {
     this.closed = true;
+    this.proxyProbe.cancel();
     this.accessRevision++;
     this.passkeys.clearPending();
     clearTimeout(this.timer);

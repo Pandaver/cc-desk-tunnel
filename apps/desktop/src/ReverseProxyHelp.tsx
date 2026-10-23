@@ -139,7 +139,8 @@ export default function ReverseProxyHelp({
           {httpUpstream
             ? 'HTTP 仅用于反代到上游的连接，公网入口仍使用 HTTPS。'
             : 'HTTPS 上游会校验证书，不关闭 TLS 校验。'}
-          示例保留访问路径，并转发桌面连接和安装包入口。只将反代机器实际来源 IP 加入信任列表。
+          示例保留访问路径，并转发桌面连接和安装包入口。需要区分访客 IP 时，再开启「识别真实访客
+          IP」并检测代理来源，核对后保存；关闭不影响反代访问。
         </p>
       </div>
     </details>

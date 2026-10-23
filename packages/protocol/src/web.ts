@@ -113,6 +113,9 @@ export const webLoginStateSchema = z.object({
 });
 export type WebLoginState = z.infer<typeof webLoginStateSchema>;
 const request = { requestId: z.uuid() };
+export const webProxyDetectSchema = z
+  .object({ type: z.literal('web.proxy.detect'), ...request })
+  .strict();
 export const webCommandSchemas = [
   z
     .object({

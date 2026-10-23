@@ -3832,6 +3832,29 @@ dialog:has(.web-settings-form) {
   transform: rotate(90deg);
 }
 
+.web-proxy-detection {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.web-proxy-detection-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.web-proxy-detection-heading .button {
+  flex: none;
+}
+.web-proxy-detection textarea {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  background: var(--surface);
+  color: var(--text);
+  line-height: 1.5;
+}
 .web-proxy-help {
   min-width: 0;
   border-top: 1px solid var(--line-soft);

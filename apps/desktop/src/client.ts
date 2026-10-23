@@ -29,6 +29,7 @@ type DataMessage = Extract<
       | 'settings.state'
       | 'instructions.state'
       | 'web.settings.state'
+      | 'web.proxy.detected'
       | 'web.totp.setup'
       | 'web.passkey.registration'
       | 'web.certificate.state';
@@ -45,6 +46,7 @@ type Replies = {
   'instructions.update': 'instructions.state';
   'web.settings.get': 'web.settings.state';
   'web.settings.update': 'web.settings.state';
+  'web.proxy.detect': 'web.proxy.detected';
   'web.sessions.revoke': 'web.settings.state';
   'web.totp.setup': 'web.totp.setup';
   'web.totp.enable': 'web.settings.state';
@@ -83,6 +85,7 @@ export class RequestInterruptedError extends Error {
       'settings.get',
       'instructions.get',
       'web.settings.get',
+      'web.proxy.detect',
       'web.passkeys.status',
       'web.certificate.get',
       'service.update.check',
@@ -481,6 +484,7 @@ export class ProxyClient {
         message.type === 'settings.state' ||
         message.type === 'instructions.state' ||
         message.type === 'web.settings.state' ||
+        message.type === 'web.proxy.detected' ||
         message.type === 'web.totp.setup' ||
         message.type === 'web.passkey.registration' ||
         message.type === 'web.certificate.state'

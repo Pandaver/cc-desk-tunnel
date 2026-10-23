@@ -1,5 +1,12 @@
 import { z } from 'zod';
-import { webCommandSchemas, webSettingsStateSchema, webTotpSetupSchema } from './web.ts';
+import {
+  webCommandSchemas,
+  webProxyDetectSchema,
+  webPublicOriginSchema,
+  webPathSchema,
+  webSettingsStateSchema,
+  webTotpSetupSchema,
+} from './web.ts';
 import { webCertificateStateSchema } from './web-certificate.ts';
 import { passkeyRegistrationSchema } from './passkey.ts';
 export * from './web.ts';
@@ -485,6 +492,7 @@ export type ServiceUpdate = z.infer<typeof serviceUpdateSchema>;
 const request = { requestId: id };
 export const commandSchema = z.discriminatedUnion('type', [
   ...webCommandSchemas,
+  webProxyDetectSchema,
   z
     .object({
       type: z.literal('server.session.create'),
@@ -718,6 +726,13 @@ export const deviceIdentitySchema = z
 // the way, and what the device was running is kept for it to come back to.
 export const leaveSchema = z.object({ type: z.literal('leave') }).strict();
 export const serverMessageSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('web.proxy.detected'),
+    requestId: id,
+    address: z.union([z.ipv4(), z.ipv6()]),
+    publicOrigin: webPublicOriginSchema.refine((value) => !!value),
+    path: webPathSchema,
+  }),
   z.object({
     type: z.literal('web.passkey.registration'),
     requestId: id,

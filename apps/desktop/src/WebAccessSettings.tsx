@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { ChevronRight, Copy, ExternalLink, Pencil, RotateCcw, Trash2 } from 'lucide-react';
+import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react';
+import { ChevronRight, Copy, ExternalLink, Pencil, RotateCcw, Search, Trash2 } from 'lucide-react';
 import type {
   WebCertificateState,
   WebProof,
@@ -555,7 +555,44 @@ function AccessDialog({
     trustedProxies: values.trustedProxies.join('\n'),
   });
   const [originEdited, setOriginEdited] = useState(false);
+  const proxyInputId = useId();
+  const [detecting, setDetecting] = useState(false);
+  const [detected, setDetected] = useState(false);
   const { busy, error, run } = useSubmit();
+  const origin = webPublicOriginSchema.safeParse(
+    draft.publicOrigin.trim() ? `https://${draft.publicOrigin.trim()}` : '',
+  );
+  const detectionHint = !values.publicOrigin
+    ? '请先保存 Web 对外地址，再自动检测。'
+    : !origin.success || origin.data !== values.publicOrigin || draft.path.trim() !== values.path
+      ? '地址或路径有改动，请先保存后再检测。'
+      : '';
+  const detect = () =>
+    run(async (signal) => {
+      setDetecting(true);
+      setDetected(false);
+      try {
+        const result = await client.fetch({ type: 'web.proxy.detect' });
+        signal.throwIfAborted();
+        if (result.publicOrigin !== values.publicOrigin || result.path !== values.path)
+          throw new Error('服务端访问地址已变更，请关闭并重新打开访问设置后检测。');
+        const addresses = [
+          ...new Set([
+            ...draft.trustedProxies
+              .split(/[\n,]/)
+              .map((value) => value.trim())
+              .filter(Boolean),
+            result.address,
+          ]),
+        ];
+        if (addresses.length > 16)
+          throw new Error('最多保存 16 个代理 IP，请先移除不用的地址后重试。');
+        setDraft((current) => ({ ...current, trustedProxies: addresses.join('\n') }));
+        setDetected(true);
+      } finally {
+        if (!signal.aborted) setDetecting(false);
+      }
+    });
   // A browser may only move the entry, and proves itself for it; a desktop saves the rest as well.
   const save = () =>
     run(async (signal) => {
@@ -593,7 +630,14 @@ function AccessDialog({
       close();
     });
   return (
-    <DialogForm title="访问设置" busy={busy} error={error} close={close} submit={() => void save()}>
+    <DialogForm
+      title="访问设置"
+      busy={busy}
+      error={error}
+      close={close}
+      submit={() => void save()}
+      submitLabel={detecting ? '确认' : undefined}
+    >
       {!browser && (
         <label>
           Web 对外地址
@@ -608,6 +652,7 @@ function AccessDialog({
               spellCheck={false}
               onChange={(event) => {
                 setOriginEdited(true);
+                setDetected(false);
                 setDraft({ ...draft, publicOrigin: event.target.value });
               }}
             />
@@ -639,7 +684,10 @@ function AccessDialog({
             value={draft.path}
             maxLength={64}
             pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?|"
-            onChange={(event) => setDraft({ ...draft, path: event.target.value })}
+            onChange={(event) => {
+              setDetected(false);
+              setDraft({ ...draft, path: event.target.value });
+            }}
           />
         </div>
         <small className="muted">
@@ -659,26 +707,58 @@ function AccessDialog({
               onChange={(event) => setDraft({ ...draft, idleMinutes: Number(event.target.value) })}
             />
           </label>
-          <Row title="信任反向代理">
+          <Row
+            title="识别真实访客 IP"
+            detail="让反代后的访客分别计算登录尝试次数。关闭不影响正常访问。"
+          >
             <Switch
-              label="信任反向代理"
+              label="识别真实访客 IP"
               checked={draft.proxyEnabled}
               disabled={busy}
-              onChange={(proxyEnabled) => setDraft({ ...draft, proxyEnabled })}
+              onChange={(proxyEnabled) => {
+                setDetected(false);
+                setDraft({ ...draft, proxyEnabled });
+              }}
             />
           </Row>
           {draft.proxyEnabled && (
-            <label>
-              反向代理 IP
-              <textarea
-                rows={3}
-                required
-                value={draft.trustedProxies}
-                onChange={(event) => setDraft({ ...draft, trustedProxies: event.target.value })}
-                placeholder="每行一个 IP 地址"
-              />
-              <small className="muted">只信任这些地址转发的客户端 IP 信息。</small>
-            </label>
+            <div className="web-proxy-detection">
+              <div className="web-proxy-detection-heading">
+                <span className="muted">不知道代理 IP？可通过已保存的 Web 地址检测。</span>
+                <button
+                  type="button"
+                  className="button"
+                  disabled={busy || !!detectionHint}
+                  onClick={() => void detect()}
+                >
+                  <Search />
+                  {detecting ? '正在检测…' : '自动检测'}
+                </button>
+              </div>
+              <label>
+                可信反向代理 IP
+                <textarea
+                  id={proxyInputId}
+                  aria-describedby={`${proxyInputId}-help`}
+                  rows={3}
+                  required
+                  value={draft.trustedProxies}
+                  onChange={(event) => {
+                    setDraft({ ...draft, trustedProxies: event.target.value });
+                  }}
+                  placeholder="每行一个 IP 地址"
+                />
+                <small className="muted" id={`${proxyInputId}-help`}>
+                  填写 NGINX 等代理的来源 IP，不是访客 IP。可自动检测，也可每行填写一个。
+                </small>
+              </label>
+              {detectionHint && <small className="muted">{detectionHint}</small>}
+              {detected && (
+                <small className="muted" role="status">
+                  已填入检测到的地址，确认是你的反向代理后保存。
+                </small>
+              )}
+            </div>
           )}
           <ReverseProxyHelp
             connectionUrl={connectionUrl}

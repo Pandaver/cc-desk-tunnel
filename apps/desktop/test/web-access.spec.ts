@@ -913,9 +913,11 @@ test('reverse proxy help stays folded, copies verified TLS configuration, and ne
     .getByRole('button', { name: '设置', exact: true })
     .click();
   await expect(page.locator('.web-proxy-help')).not.toHaveAttribute('open', '');
-  await expect(page.getByLabel('反向代理 IP', { exact: false })).toHaveCount(0);
-  await page.getByRole('switch', { name: '信任反向代理' }).click();
-  await expect(page.getByLabel('反向代理 IP', { exact: false })).toBeVisible();
+  await expect(page.getByRole('button', { name: '自动检测', exact: true })).toHaveCount(0);
+  await expect(page.getByLabel('可信反向代理 IP', { exact: false })).toHaveCount(0);
+  await page.getByRole('switch', { name: '识别真实访客 IP' }).click();
+  await expect(page.getByRole('button', { name: '自动检测', exact: true })).toBeVisible();
+  await expect(page.getByLabel('可信反向代理 IP', { exact: false })).toBeVisible();
   await expect(page.locator('.web-proxy-help')).not.toHaveAttribute('open', '');
   await page.getByText('反向代理配置示例', { exact: true }).click();
   await expect(page.getByLabel('上游地址', { exact: false })).toHaveValue(
@@ -1122,7 +1124,7 @@ test('reverse proxy HTTP upstream hides TLS inputs and switching back restores r
     .filter({ hasText: '访问设置' })
     .getByRole('button', { name: '设置', exact: true })
     .click();
-  await page.getByRole('switch', { name: '信任反向代理' }).click();
+  await page.getByRole('switch', { name: '识别真实访客 IP' }).click();
   await page.getByText('反向代理配置示例', { exact: true }).click();
   await page.getByLabel('上游证书校验名', { exact: false }).fill('');
   await page.getByLabel('受信任 PEM 文件', { exact: false }).fill('');
@@ -1179,7 +1181,7 @@ test('reverse proxy copy uses the desktop clipboard bridge when browser clipboar
     .filter({ hasText: '访问设置' })
     .getByRole('button', { name: '设置', exact: true })
     .click();
-  await page.getByRole('switch', { name: '信任反向代理' }).click();
+  await page.getByRole('switch', { name: '识别真实访客 IP' }).click();
   await page.getByText('反向代理配置示例', { exact: true }).click();
   await page.evaluate(() => {
     Object.defineProperty(navigator, 'clipboard', {

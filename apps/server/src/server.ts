@@ -982,7 +982,12 @@ export function createProxyServer(options: ServerOptions) {
         sessionId: peer.browser,
         connectionId: peer.id,
       };
-      send(peer, web.execute(command, context));
+      send(
+        peer,
+        command.type === 'web.proxy.detect'
+          ? await web.detectProxy(command, context)
+          : web.execute(command, context),
+      );
       return undefined;
     }
     switch (command.type) {
