@@ -1277,6 +1277,31 @@ dialog:has(.release-notes) {
   overflow-wrap: anywhere;
   text-align: right;
 }
+.service-update-card .setting-actions {
+  flex-shrink: 0;
+  max-width: 100%;
+}
+.service-update-notice {
+  padding: 14px 0;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.service-update-notice p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.service-update-notice details {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.service-update-notice summary {
+  cursor: pointer;
+}
+.service-update-notice details p {
+  margin-top: 8px;
+  white-space: pre-wrap;
+}
 .instructions-card {
   display: grid;
   gap: 10px;

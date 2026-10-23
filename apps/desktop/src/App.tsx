@@ -379,9 +379,6 @@ export function App({
   };
 
   const update = state.update;
-  useEffect(() => {
-    if (update?.state === 'failed' && update.detail) setError(update.detail);
-  }, [update]);
   const serviceUpdate = !nativeMode
     ? null
     : update?.state === 'available'
@@ -418,9 +415,17 @@ export function App({
               label:
                 update?.state === 'checking'
                   ? '正在检查更新…'
-                  : update?.state === 'idle' && update.checkedAt
-                    ? `已是最新 ${state.service} · 再次检查`
-                    : '检查更新',
+                  : update?.state === 'failed'
+                    ? '重新检查更新'
+                    : update?.state === 'idle' && update.checkedAt
+                      ? `已是最新 ${state.service} · 再次检查`
+                      : '检查更新',
+              detail:
+                update?.state === 'failed'
+                  ? update.latest
+                    ? '服务端升级未完成，请在关于与更新中查看原因'
+                    : '上次检查失败，不影响当前连接'
+                  : undefined,
               icon: <RefreshCw />,
               disabled: busy || update?.state === 'checking',
               run: () => {
@@ -1079,12 +1084,14 @@ export function App({
     ...(upgradeItem ? [upgradeItem] : []),
     ...(serviceUpdate ? [serviceUpdate] : []),
   ];
-  // The rail shows its button only for an update that exists, not for the standing offer to look for one.
+  // Keep an unfinished upgrade discoverable, but do not badge a failed background check.
   const pendingUpdate = upgrade
     ? `客户端可升级到 ${upgrade}`
     : update && ['available', 'manual', 'installing', 'restarting'].includes(update.state)
       ? (serviceUpdate?.label ?? null)
-      : null;
+      : update?.state === 'failed' && update.latest
+        ? '服务端升级未完成'
+        : null;
   // What a menu shows beside an item that has a shortcut.
   const hint = (action: Action) =>
     (prefs.shortcuts.enabled && comboText(keyFor(prefs, action))) || undefined;
@@ -1439,6 +1446,7 @@ export function App({
           service={state.service}
           adapterName={adapterName}
           updates={host.serviceManagement ? updates : []}
+          update={nativeMode && host.serviceManagement ? (update ?? undefined) : undefined}
           showNotes={setNotes}
           account={
             <AccountPanel
