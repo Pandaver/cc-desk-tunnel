@@ -23,7 +23,7 @@ export const supportsPasskeys = () => !passkeySupportError();
 export const cancelPasskey = () => WebAuthnAbortService.cancelCeremony();
 export function passkeyError(error: unknown) {
   if (error instanceof Error && ['NotAllowedError', 'AbortError'].includes(error.name))
-    return '验证已取消或超时，请重试。';
+    return '验证未完成或已取消，请检查浏览器提示后重试。';
   if (error instanceof Error && error.name === 'InvalidStateError')
     return '此认证器已保存通行密钥，请选择其他认证器。';
   if (error instanceof Error && ['ConstraintError', 'NotSupportedError'].includes(error.name))
@@ -47,7 +47,9 @@ const registrationOptions = z.object({
     (value) => !!value && typeof value === 'object' && 'challenge' in value,
   ),
   name: z.string(),
+  expiresAt: z.iso.datetime(),
 });
+export type PasskeyRegistrationOptions = z.infer<typeof registrationOptions>;
 async function authenticate(kind: 'login' | 'proof', signal?: AbortSignal) {
   const unsupported = passkeySupportError();
   if (unsupported) throw new Error(unsupported);
@@ -71,12 +73,14 @@ export async function resolveWebProof(proof: WebProof, signal?: AbortSignal): Pr
   const result = z.object({ proof: z.string().min(1) }).parse(await authenticate('proof', signal));
   return { passkey: result.proof };
 }
-export async function registerPasskey(grant: string, signal?: AbortSignal) {
-  const unsupported = passkeySupportError();
-  if (unsupported) throw new Error(unsupported);
-  const result = registrationOptions.parse(
+export async function loadPasskeyRegistration(grant: string, signal?: AbortSignal) {
+  return registrationOptions.parse(
     await browserRequest('passkey/register/options', { grant }, signal),
   );
+}
+export async function registerPasskey(result: PasskeyRegistrationOptions, signal?: AbortSignal) {
+  const unsupported = passkeySupportError();
+  if (unsupported) throw new Error(unsupported);
   signal?.throwIfAborted();
   const response = await startRegistration({ optionsJSON: result.options });
   signal?.throwIfAborted();
@@ -91,13 +95,8 @@ export async function registerPasskey(grant: string, signal?: AbortSignal) {
     );
 }
 export type PasskeyLink = { token: string };
-export async function describePasskeyLink(link: PasskeyLink, signal: AbortSignal) {
-  return z
-    .object({ name: z.string(), expiresAt: z.iso.datetime() })
-    .parse(await browserRequest('passkey/register/options', { grant: link.token }, signal));
-}
-// Keep short-lived authorizations out of subsequent links, history and referrers. No ceremony starts
-// here: the destination still asks the user to confirm the purpose and server on the page.
+// Keep short-lived authorizations out of subsequent links, history and referrers. The destination
+// validates the authorization before opening the system's registration prompt.
 export function readPasskeyLink(): PasskeyLink | null {
   const fragment = new URLSearchParams(location.hash.slice(1));
   const token = fragment.get('passkey-register');

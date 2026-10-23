@@ -11,13 +11,14 @@ import {
 import type { WebAuthnCredential } from '@simplewebauthn/server';
 import { PROTOCOL_VERSION } from '@cc-desk-tunnel/protocol';
 
-const origin = 'https://web.example.test';
-const entry = `${origin}/entry/`;
+const secureOrigin = 'https://web.example.test';
+const entry = `${secureOrigin}/entry/`;
 const rpID = 'web.example.test';
 
 // Exercise the shipped browser adapter with Chromium's authenticator and real signature verification.
 // Only the transport is isolated; the WebAuthn ceremony and UV requirement are not replaced.
-async function passkeyFixture(page: Page) {
+async function passkeyFixture(page: Page, origin = secureOrigin) {
+  const entry = `${origin}/entry/`;
   const cdp = await page.context().newCDPSession(page);
   await cdp.send('WebAuthn.enable');
   await cdp.send('WebAuthn.addVirtualAuthenticator', {
@@ -30,7 +31,9 @@ async function passkeyFixture(page: Page) {
       automaticPresenceSimulation: true,
     },
   });
+  let ceremonyRpID = rpID;
   let credential: WebAuthnCredential | undefined;
+  let passkeyAvailable = false;
   let authenticated = false;
   let expired = false;
   let registrations = 0;
@@ -38,6 +41,8 @@ async function passkeyFixture(page: Page) {
   let freshProof: unknown;
   let registrationStarts = 0;
   let failSettingsGet = false;
+  let registrationOptionsRequests = 0;
+  let expiresAt = new Date(Date.now() + 600000).toISOString();
   let optionsReady: Promise<void> = Promise.resolve();
   let releaseOptions = () => {};
   let verificationReady: Promise<void> = Promise.resolve();
@@ -50,14 +55,13 @@ async function passkeyFixture(page: Page) {
   const session = {
     id: sessionId,
     name: '测试浏览器',
-    passkeyId,
     createdAt: now,
     lastActiveAt: now,
     expiresAt: new Date(Date.now() + 7200000).toISOString(),
   };
   const state = () => ({
     authenticated,
-    passkeyAvailable: !!credential,
+    passkeyAvailable: !!credential || passkeyAvailable,
     totpEnabled: true,
     ...(authenticated ? { session } : {}),
   });
@@ -79,16 +83,24 @@ async function passkeyFixture(page: Page) {
         return route.fulfill({ status: 410, json: { error: '授权已过期，请重新发起。' } });
       const challengeId = randomUUID();
       const kind = name.split('/')[1];
+      if (kind === 'register') {
+        registrationOptionsRequests++;
+        for (const [id, challenge] of challenges)
+          if (challenge.kind === 'register') challenges.delete(id);
+      }
       const options =
         kind === 'register'
           ? await generateRegistrationOptions({
               rpName: 'CC Desk Tunnel',
-              rpID,
+              rpID: ceremonyRpID,
               userName: 'workbench',
               userID: new Uint8Array(32).fill(7),
               authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
             })
-          : await generateAuthenticationOptions({ rpID, userVerification: 'required' });
+          : await generateAuthenticationOptions({
+              rpID: ceremonyRpID,
+              userVerification: 'required',
+            });
       challenges.set(challengeId, { value: options.challenge, kind });
       await optionsReady;
       return route.fulfill({
@@ -96,7 +108,7 @@ async function passkeyFixture(page: Page) {
           challengeId,
           options,
           name: '旅行备用',
-          expiresAt: new Date(Date.now() + 600000).toISOString(),
+          expiresAt,
         },
       });
     }
@@ -134,7 +146,7 @@ async function passkeyFixture(page: Page) {
     }
     return route.fulfill({ status: 404, json: { error: '未找到接口。' } });
   });
-  await page.routeWebSocket(`${entry.replace('https:', 'wss:')}api/ws`, (socket) => {
+  await page.routeWebSocket(`${entry.replace(/^http/, 'ws')}api/ws`, (socket) => {
     socket.onMessage((raw) => {
       const command = JSON.parse(String(raw));
       if (command.type === 'web.settings.get' && failSettingsGet) {
@@ -212,12 +224,22 @@ async function passkeyFixture(page: Page) {
   });
   return {
     requests,
+    advertisePasskey: () => {
+      passkeyAvailable = true;
+    },
+    useWrongRpId: () => {
+      ceremonyRpID = 'unrelated.example.test';
+    },
     registrationStarts: () => registrationStarts,
     failNextSettingsGet: () => {
       failSettingsGet = true;
     },
     freshProof: () => freshProof,
     registrations: () => registrations,
+    registrationOptionsRequests: () => registrationOptionsRequests,
+    setExpiry: (value: string) => {
+      expiresAt = value;
+    },
     authenticated: () => authenticated,
     expire: () => {
       expired = true;
@@ -237,22 +259,26 @@ async function passkeyFixture(page: Page) {
   };
 }
 
-test('Passkey registration and login use the same discoverable key and require explicit user actions', async ({
+test('an authorized page starts registration once while login still requires a user action', async ({
   page,
 }) => {
   const fixture = await passkeyFixture(page);
+  fixture.holdVerification();
   await page.goto(`${entry}#passkey-register=short-lived-authorization`);
   await expect(page.getByText('旅行备用', { exact: true })).toBeVisible();
   await expect(page).toHaveURL(entry);
-  expect(fixture.registrations()).toBe(0);
-  await page.getByRole('button', { name: '创建通行密钥', exact: true }).click();
+  fixture.releaseVerification();
   await expect(page.getByRole('status')).toContainText('通行密钥已保存');
   expect(fixture.registrations()).toBe(1);
+  expect(fixture.registrationOptionsRequests()).toBe(1);
+  await expect(page.getByRole('button', { name: '创建通行密钥', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '取消验证', exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain(
     'short-lived-authorization',
   );
   await page.goto(entry);
   await expect(page.getByLabel('服务凭据', { exact: true })).toBeVisible();
+  expect(fixture.requests).not.toContain('passkey/login/options');
   await page.getByRole('button', { name: '使用通行密钥登录' }).click();
   await expect(page.locator('.shell')).toBeVisible();
   expect(fixture.authenticated()).toBe(true);
@@ -274,9 +300,7 @@ test('cancelled system verification stays on the authorization page and can be r
   page,
 }) => {
   const fixture = await passkeyFixture(page);
-  await page.goto(`${entry}#passkey-register=short-lived-authorization`);
-  await expect(page.getByText('旅行备用', { exact: true })).toBeVisible();
-  await page.evaluate(() => {
+  await page.addInitScript(() => {
     const create = navigator.credentials.create.bind(navigator.credentials);
     let cancelled = false;
     navigator.credentials.create = async (options) => {
@@ -287,12 +311,20 @@ test('cancelled system verification stays on the authorization page and can be r
       return create(options);
     };
   });
-  await page.getByRole('button', { name: '创建通行密钥', exact: true }).click();
-  await expect(page.getByRole('alert')).toContainText('已取消或超时');
+  await page.clock.install();
+  await page.goto(`${entry}#passkey-register=short-lived-authorization`);
+  await expect(page.getByRole('alert')).toContainText('创建未完成或已取消');
+  await page.clock.runFor(60000);
   expect(fixture.registrations()).toBe(0);
-  await page.getByRole('button', { name: '创建通行密钥', exact: true }).click();
+  expect(fixture.registrationOptionsRequests()).toBe(1);
+  await expect(page.getByRole('button', { name: '取消验证', exact: true })).toHaveCount(0);
+  const retry = page.getByRole('button', { name: '重新创建', exact: true });
+  await expect(retry).toBeVisible();
+  await expect(retry).toBeEnabled();
+  await retry.click();
   await expect(page.getByRole('status')).toContainText('通行密钥已保存');
   expect(fixture.registrations()).toBe(1);
+  expect(fixture.registrationOptionsRequests()).toBe(2);
 });
 
 test('an expired registration never starts a system ceremony or reports a successful setting', async ({
@@ -302,37 +334,170 @@ test('an expired registration never starts a system ceremony or reports a succes
   fixture.expire();
   await page.goto(`${entry}#passkey-register=expired-authorization`);
   await expect(page.getByRole('alert')).toContainText('授权已过期');
+  await expect(page.getByRole('button', { name: '重新创建', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '创建通行密钥', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '创建通行密钥', exact: true })).toBeDisabled();
   await expect(page.getByRole('heading', { name: '设置完成' })).toHaveCount(0);
   expect(fixture.registrations()).toBe(0);
 });
 
-test('cancelling while options are loading prevents a late system ceremony and allows retry', async ({
+test('the creation button stays visible but disabled until authorization details arrive', async ({
   page,
 }) => {
   const fixture = await passkeyFixture(page);
-  await page.goto(`${entry}#passkey-register=short-lived-authorization`);
-  await expect(page.getByText('旅行备用', { exact: true })).toBeVisible();
-  fixture.holdOptions();
-  await page.getByRole('button', { name: '创建通行密钥', exact: true }).click();
-  await page.getByRole('button', { name: '取消验证', exact: true }).click();
-  fixture.releaseOptions();
-  await expect(page.getByRole('alert')).toContainText('已取消等待');
-  await expect(page.getByRole('button', { name: '创建通行密钥', exact: true })).toBeEnabled();
-  expect(fixture.registrations()).toBe(0);
-  expect(fixture.requests).not.toContain('passkey/register/verify');
-  await page.getByRole('button', { name: '创建通行密钥', exact: true }).click();
+  let releaseDescription = () => {};
+  const descriptionReady = new Promise<void>((resolve) => {
+    releaseDescription = resolve;
+  });
+  await page.route(
+    `${entry}api/passkey/register/options`,
+    async (route) => {
+      await descriptionReady;
+      await route.fallback();
+    },
+    { times: 1 },
+  );
+  await page.goto(`${entry}#passkey-register=loading-description`);
+  const create = page.getByRole('button', { name: '创建通行密钥', exact: true });
+  await expect(create).toBeVisible();
+  await expect(create).toBeDisabled();
+  await expect(page.getByRole('status')).toHaveText('正在读取授权请求…');
+  await expect(page.getByRole('button', { name: '取消验证', exact: true })).toHaveCount(0);
+  expect(fixture.registrationOptionsRequests()).toBe(0);
+  releaseDescription();
   await expect(page.getByRole('status')).toContainText('通行密钥已保存');
   expect(fixture.registrations()).toBe(1);
+  expect(fixture.registrationOptionsRequests()).toBe(1);
 });
+
+test('leaving while options are loading prevents a late system ceremony', async ({ page }) => {
+  const fixture = await passkeyFixture(page);
+  fixture.holdOptions();
+  await page.goto(`${entry}#passkey-register=short-lived-authorization`);
+  await expect(page.getByRole('status')).toHaveText('正在读取授权请求…');
+  const waiting = page.getByRole('button', { name: '创建通行密钥', exact: true });
+  await expect(waiting).toBeVisible();
+  await expect(waiting).toBeDisabled();
+  await expect.poll(() => fixture.registrationOptionsRequests()).toBe(1);
+  await expect(page.getByRole('button', { name: '取消验证', exact: true })).toHaveCount(0);
+  await page.goto(entry);
+  fixture.releaseOptions();
+  await expect(page.getByLabel('服务凭据', { exact: true })).toBeVisible();
+  expect(fixture.registrations()).toBe(0);
+  expect(fixture.requests).not.toContain('passkey/register/verify');
+});
+
+test('an authorization that expired before its details arrived never starts registration', async ({
+  page,
+}) => {
+  const fixture = await passkeyFixture(page);
+  fixture.setExpiry(new Date(Date.now() - 1000).toISOString());
+  await page.goto(`${entry}#passkey-register=expired-in-transit`);
+  await expect(page.getByRole('alert')).toHaveText('授权已过期，请返回客户端重新发起。');
+  const create = page.getByRole('button', { name: '创建通行密钥', exact: true });
+  await expect(create).toBeVisible();
+  await expect(create).toBeDisabled();
+  await expect(page.getByRole('button')).toHaveCount(1);
+  expect(fixture.registrationOptionsRequests()).toBe(1);
+  expect(fixture.registrations()).toBe(0);
+});
+
+test('expiry aborts a pending system prompt without automatically retrying', async ({ page }) => {
+  const fixture = await passkeyFixture(page);
+  const now = new Date();
+  fixture.setExpiry(new Date(now.getTime() + 5000).toISOString());
+  await page.clock.install({ time: now });
+  await page.addInitScript(() => {
+    navigator.credentials.create = (options) =>
+      new Promise((_, reject) => {
+        options!.signal!.addEventListener(
+          'abort',
+          () => {
+            document.documentElement.dataset.ceremonyAborted = 'true';
+            reject(new DOMException('Aborted', 'AbortError'));
+          },
+          { once: true },
+        );
+        document.documentElement.dataset.ceremonyStarted = 'true';
+      });
+  });
+  await page.goto(`${entry}#passkey-register=expires-during-prompt`);
+  await expect(page.locator('html')).toHaveAttribute('data-ceremony-started', 'true');
+  await expect(page.getByRole('status')).toHaveText('等待系统验证…');
+  await expect(page.getByRole('button', { name: '等待系统验证…', exact: true })).toBeDisabled();
+  await page.clock.runFor(6000);
+  await expect(page.locator('html')).toHaveAttribute('data-ceremony-aborted', 'true');
+  await expect(page.getByRole('alert')).toHaveText('授权已过期，请返回客户端重新发起。');
+  const create = page.getByRole('button', { name: '创建通行密钥', exact: true });
+  await expect(create).toBeVisible();
+  await expect(create).toBeDisabled();
+  await expect(page.getByRole('button')).toHaveCount(1);
+  expect(fixture.registrationOptionsRequests()).toBe(1);
+  expect(fixture.requests).not.toContain('passkey/register/verify');
+});
+
+test('failed registration options can be reread and then start registration exactly once', async ({
+  page,
+}) => {
+  const fixture = await passkeyFixture(page);
+  await page.route(
+    `${entry}api/passkey/register/options`,
+    (route) =>
+      route.fulfill({
+        status: 503,
+        json: { error: '暂时未能读取授权，请重试。' },
+      }),
+    { times: 1 },
+  );
+  await page.goto(`${entry}#passkey-register=retry-description`);
+  await expect(page.getByRole('alert')).toContainText('暂时未能读取授权');
+  await expect(page.getByRole('button', { name: '创建通行密钥', exact: true })).toBeDisabled();
+  expect(fixture.registrations()).toBe(0);
+  await page.getByRole('button', { name: '重新读取', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('通行密钥已保存');
+  expect(fixture.registrations()).toBe(1);
+  expect(fixture.registrationOptionsRequests()).toBe(1);
+});
+
+for (const width of [1280, 390])
+  test(`registration waiting and retry remain usable at ${width}px`, async ({ page }, testInfo) => {
+    await passkeyFixture(page);
+    await page.setViewportSize({ width, height: 900 });
+    await page.addInitScript(() => {
+      navigator.credentials.create = () =>
+        new Promise((_, reject) => {
+          window.addEventListener(
+            'test-cancel-registration',
+            () => reject(new DOMException('User cancelled', 'NotAllowedError')),
+            { once: true },
+          );
+          document.documentElement.dataset.ceremonyStarted = 'true';
+        });
+    });
+    await page.goto(`${entry}#passkey-register=layout-grant`);
+    await expect(page.locator('html')).toHaveAttribute('data-ceremony-started', 'true');
+    await expect(page.getByRole('status')).toHaveText('等待系统验证…');
+    const waiting = page.getByRole('button', { name: '等待系统验证…', exact: true });
+    await expect(waiting).toBeVisible();
+    await expect(waiting).toBeDisabled();
+    await expect(waiting.getByRole('status')).toHaveText('等待系统验证…');
+    await expect(page.getByRole('button')).toHaveCount(1);
+    await page.screenshot({ path: testInfo.outputPath('waiting.png') });
+    await page.evaluate(() => window.dispatchEvent(new Event('test-cancel-registration')));
+    await expect(page.getByRole('button', { name: '重新创建', exact: true })).toBeVisible();
+    await page.keyboard.press('Tab');
+    await expect(page.getByRole('button', { name: '重新创建', exact: true })).toBeFocused();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    await page.screenshot({ path: testInfo.outputPath('retry.png') });
+  });
 
 test('a confirmed browser registration only rereads settings after its first refresh fails', async ({
   page,
 }) => {
   const fixture = await passkeyFixture(page);
   await page.goto(`${entry}#passkey-register=first-grant`);
-  await expect(page.getByText('旅行备用', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: '创建通行密钥', exact: true }).click();
   await expect(page.getByRole('status')).toContainText('通行密钥已保存');
   await page.goto(entry);
   await page.getByRole('button', { name: '使用通行密钥登录' }).click();
@@ -355,18 +520,90 @@ test('a confirmed browser registration only rereads settings after its first ref
   expect(fixture.registrationStarts()).toBe(1);
 });
 
-test('cancelling a submitted verification stops waiting without claiming the server rolled it back', async ({
+test('a submitted verification has no redundant cancel or retry action and waits for confirmation', async ({
   page,
 }) => {
   const fixture = await passkeyFixture(page);
+  fixture.holdVerification();
   await page.goto(`${entry}#passkey-register=short-lived-authorization`);
   await expect(page.getByText('旅行备用', { exact: true })).toBeVisible();
-  fixture.holdVerification();
-  await page.getByRole('button', { name: '创建通行密钥', exact: true }).click();
   await expect.poll(() => fixture.registrations()).toBe(1);
-  await page.getByRole('button', { name: '取消验证', exact: true }).click();
-  fixture.releaseVerification();
-  await expect(page.getByRole('alert')).toHaveText('已取消等待；若已确认，请返回客户端查看结果。');
+  await expect(page.getByRole('status')).toHaveText('等待系统验证…');
+  const waiting = page.getByRole('button', { name: '等待系统验证…', exact: true });
+  await expect(waiting).toBeVisible();
+  await expect(waiting).toBeDisabled();
+  await expect(waiting.getByRole('status')).toHaveText('等待系统验证…');
+  await expect(page.getByRole('button')).toHaveCount(1);
   await expect(page.getByRole('heading', { name: '设置完成' })).toHaveCount(0);
+  fixture.releaseVerification();
+  await expect(page.getByRole('status')).toContainText('通行密钥已保存');
   expect(fixture.registrations()).toBe(1);
+});
+
+test('an unsupported browser disables Passkey without treating the HTTPS context as untrusted', async ({
+  page,
+}) => {
+  const fixture = await passkeyFixture(page);
+  await page.goto(`${entry}#passkey-register=first-grant`);
+  await expect(page.getByRole('status')).toContainText('通行密钥已保存');
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'PublicKeyCredential', { configurable: true, value: undefined });
+  });
+  await page.goto(entry);
+  expect(await page.evaluate(() => window.isSecureContext)).toBe(true);
+  await expect(page.locator('.web-context-warning')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '使用通行密钥登录' })).toBeDisabled();
+  await expect(page.getByLabel('服务凭据', { exact: true })).toBeEnabled();
+  expect(fixture.requests).not.toContain('passkey/login/options');
+  await page.goto(`${entry}#passkey-register=second-grant`);
+  await expect(page.getByRole('alert')).toContainText('当前浏览器不支持通行密钥');
+  await expect(page.getByRole('button', { name: '重新创建', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '创建通行密钥', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '创建通行密钥', exact: true })).toBeDisabled();
+  expect(fixture.registrations()).toBe(1);
+});
+
+for (const kind of ['register', 'login'])
+  test(`the browser's real RP ID SecurityError is reported for Passkey ${kind}`, async ({
+    page,
+  }) => {
+    const fixture = await passkeyFixture(page);
+    if (kind === 'login') {
+      await page.goto(`${entry}#passkey-register=first-grant`);
+      await expect(page.getByRole('status')).toContainText('通行密钥已保存');
+    }
+    fixture.useWrongRpId();
+    await page.goto(kind === 'register' ? `${entry}#passkey-register=invalid-rp-grant` : entry);
+    expect(await page.evaluate(() => window.isSecureContext)).toBe(true);
+    await expect(page.locator('.web-context-warning')).toHaveCount(0);
+    if (kind === 'login') await page.getByRole('button', { name: '使用通行密钥登录' }).click();
+    await expect(page.getByRole('alert')).toContainText('请确认当前域名和 HTTPS 证书有效');
+    expect(fixture.requests).not.toContain(`passkey/${kind}/verify`);
+    expect(fixture.authenticated()).toBe(false);
+  });
+
+test('a real insecure HTTP context disables advertised Passkeys for login and registration', async ({
+  page,
+}) => {
+  const insecureOrigin = 'http://web.example.test';
+  const insecureEntry = `${insecureOrigin}/entry/`;
+  const fixture = await passkeyFixture(page, insecureOrigin);
+  fixture.advertisePasskey();
+  await page.goto(insecureEntry);
+  expect(await page.evaluate(() => window.isSecureContext)).toBe(false);
+  expect(await page.evaluate(() => typeof window.PublicKeyCredential)).toBe('undefined');
+  await expect(page.locator('.web-context-warning')).toBeVisible();
+  await expect(page.getByRole('button', { name: '使用通行密钥登录' })).toBeDisabled();
+  await expect(page.getByRole('status')).toContainText('当前页面未处于安全上下文');
+  expect(fixture.requests).not.toContain('passkey/login/options');
+  await page.goto(`${insecureEntry}#passkey-register=insecure-context-grant`);
+  await expect(page.getByText('旅行备用', { exact: true })).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('当前页面未处于安全上下文');
+  await expect(page.getByRole('button', { name: '重新创建', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '创建通行密钥', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '创建通行密钥', exact: true })).toBeDisabled();
+  expect(fixture.requests).not.toContain('passkey/register/verify');
+  expect(fixture.requests).not.toContain('passkey/login/verify');
+  expect(fixture.registrations()).toBe(0);
+  expect(fixture.authenticated()).toBe(false);
 });

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { PasskeyRegistration, WebProof, WebSettingsState } from '@cc-desk-tunnel/protocol';
 import type { ProxyClient } from './client.ts';
-import { registerPasskey, resolveWebProof } from './passkey.ts';
+import { loadPasskeyRegistration, registerPasskey, resolveWebProof } from './passkey.ts';
 import { DialogForm, ProofFields, message, useSubmit } from './WebSettingsForm.tsx';
 
 export function PasskeyDialog({
@@ -117,7 +117,8 @@ export function PasskeyDialog({
           throw new Error('Web 对外地址已变化，请从新的服务端地址重新登录。');
         const grant = new URLSearchParams(url.hash.slice(1)).get('passkey-register');
         if (!grant) throw new Error('注册授权不完整，请重新设置。');
-        await registerPasskey(grant, signal);
+        const options = await loadPasskeyRegistration(grant, signal);
+        await registerPasskey(options, signal);
         signal.throwIfAborted();
         active.current = null;
         setCreated(true);
