@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { proxyCertificateName, proxyConfiguration, proxyUpstream } from '../src/reverse-proxy.ts';
 
 const values = {
-  domain: 'web.example.com',
+  publicOrigin: 'https://web.example.com',
   path: 'private-entry',
   upstream: 'https://192.0.2.42:8787',
   serverName: 'cc-desk-tunnel.local',
@@ -103,7 +103,7 @@ test('HTTP upstreams omit certificate fields while keeping public HTTPS and root
     assert.match(nginx, /location \/ \{ return 404; \}/);
     assert.doesNotMatch(nginx, /proxy_ssl_/);
     const caddy = proxyConfiguration('caddy', http);
-    assert.match(caddy, /^web\.example\.com \{/);
+    assert.match(caddy, /^https:\/\/web\.example\.com \{/);
     assert.match(caddy, /reverse_proxy http:\/\//);
     assert.match(caddy, /header_up Host \{hostport\}/);
     assert.match(caddy, /@web path \/private-entry\/\* \/ws \/client\/installer\n/);
@@ -142,7 +142,18 @@ test('root entry and IPv6 upstream generate without an invented path or port', (
 
 test('invalid and injected fields cannot produce copyable configuration', () => {
   for (const [key, invalid] of Object.entries({
-    domain: ['', '192.0.2.42', 'https://web.example.com', 'example.com; listen 80;'],
+    publicOrigin: [
+      '',
+      'https://192.0.2.42',
+      'web.example.com',
+      'http://web.example.com',
+      'https://web.example.com:65536',
+      'https://web.example.com/path',
+      'https://web.example.com?query=1',
+      'https://web.example.com#hash',
+      'https://user:secret@web.example.com',
+      'https://example.com; listen 80;',
+    ],
     path: ['ws', 'api', '../entry', 'entry; return 200;', 'entry\n}'],
     upstream: [
       'ftp://127.0.0.1:8787',
@@ -183,4 +194,16 @@ test('invalid and injected fields cannot produce copyable configuration', () => 
           `${key}: ${JSON.stringify(value)}`,
         );
   }
+});
+
+test('public origin controls the proxy listener independently of the upstream port', () => {
+  const custom = { ...values, publicOrigin: 'https://web.example.com:1443' };
+  const nginx = proxyConfiguration('nginx', custom);
+  assert.match(nginx, /listen 1443 ssl;/);
+  assert.match(nginx, /server_name web\.example\.com;/);
+  assert.match(nginx, /proxy_pass https:\/\/192\.0\.2\.42:8787;/);
+  assert.match(proxyConfiguration('caddy', custom), /^https:\/\/web\.example\.com:1443 \{/);
+  const standard = { ...custom, publicOrigin: 'https://WEB.EXAMPLE.COM:443/' };
+  assert.match(proxyConfiguration('nginx', standard), /listen 443 ssl;/);
+  assert.match(proxyConfiguration('caddy', standard), /^https:\/\/web\.example\.com \{/);
 });

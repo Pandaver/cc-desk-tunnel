@@ -6,11 +6,12 @@ import type {
   WebSettingsState,
   WebTotpSetup,
 } from '@cc-desk-tunnel/protocol';
+import { webPublicOriginSchema } from '@cc-desk-tunnel/protocol';
 import type { ProxyClient } from './client.ts';
 import { IconButton, Switch } from './ui.tsx';
 import { CopyButton } from './copy.tsx';
 import ReverseProxyHelp from './ReverseProxyHelp.tsx';
-import { resolveWebProof, supportsPasskeys } from './passkey.ts';
+import { passkeySupportError, resolveWebProof, supportsPasskeys } from './passkey.ts';
 import { DialogForm, ProofFields, Row, message, useSubmit } from './WebSettingsForm.tsx';
 import { PasskeyDialog, RenamePasskeyDialog } from './PasskeySettings.tsx';
 
@@ -125,7 +126,7 @@ export default function WebAccessSettings({
   const applyCertificate = (next: WebCertificateState) => {
     if (generation.current === renderGeneration) setCertificate(next);
   };
-  const own = values?.currentSessionId;
+  const own = connection.browser?.sessionId;
   const expires =
     certificate?.details &&
     Math.ceil((Date.parse(certificate.details.validTo) - Date.now()) / 86400000);
@@ -176,11 +177,11 @@ export default function WebAccessSettings({
                         </IconButton>
                       </>
                     ) : (
-                      <span className="muted">地址未就绪</span>
+                      <span className="muted">请在访问设置中填写 Web 对外地址</span>
                     )}
                   </div>
                 </Row>
-                <Row title="访问设置" detail={values.domain || '使用部署地址'}>
+                <Row title="访问设置" detail={values.publicOrigin || 'Web 对外地址未设置'}>
                   <button className="button" disabled={busy} onClick={() => setDialog('access')}>
                     设置
                   </button>
@@ -205,9 +206,9 @@ export default function WebAccessSettings({
                   title="添加通行密钥"
                   detail={
                     !values.passkeyAvailable
-                      ? (values.passkeyUnavailableReason ?? '请先设置固定域名并使用可信 HTTPS。')
+                      ? (values.passkeyUnavailableReason ?? '请先设置使用域名的 Web 对外地址。')
                       : browser && !supportsPasskeys()
-                        ? '请使用支持通行密钥的浏览器和可信 HTTPS 地址。'
+                        ? passkeySupportError()
                         : '使用指纹、面容或设备锁屏密码登录 Web 工作台。'
                   }
                 >
@@ -306,7 +307,7 @@ export default function WebAccessSettings({
               certificate &&
               (values.enabled || certificate.mode === 'custom' || certificate.error) && (
                 <Row
-                  title="HTTPS 证书"
+                  title="服务端直连证书"
                   detail={
                     certificate.error ??
                     (certificate.mode === 'custom'
@@ -316,8 +317,8 @@ export default function WebAccessSettings({
                         : certificate.mode === 'unavailable'
                           ? '当前服务未配置 TLS'
                           : certificate.selfSigned
-                            ? '使用默认自签名证书'
-                            : '使用部署证书')
+                            ? '默认自签名证书'
+                            : '部署证书')
                   }
                 >
                   <div className="web-row-actions">
@@ -325,7 +326,7 @@ export default function WebAccessSettings({
                       <button
                         className="button"
                         disabled={busy || !values.domain}
-                        title={values.domain ? undefined : '请先设置访问域名'}
+                        title={values.domain ? undefined : '请先设置使用域名的 Web 对外地址'}
                         onClick={() => setDialog('certificate')}
                       >
                         导入证书
@@ -474,7 +475,7 @@ export default function WebAccessSettings({
       {dialog === 'reset' && (
         <ConfirmDialog
           title="恢复默认证书"
-          text="恢复部署时的默认证书？当前自定义证书将被移除；如果默认证书为自签名，浏览器会重新提示证书确认。"
+          text="恢复部署时的默认证书？当前自定义证书将被移除，直连访问可能需要重新确认信任。反向代理对外提供的证书不受影响。"
           act={async () => applyCertificate(await client.fetch({ type: 'web.certificate.reset' }))}
           close={close}
         />
@@ -547,26 +548,32 @@ function AccessDialog({
 }) {
   const [proof, setProof] = useState<WebProof>({ password: '' });
   const [draft, setDraft] = useState({
-    domain: values.domain,
+    publicOrigin: values.publicOrigin.replace(/^https:\/\//, ''),
     path: values.path,
     idleMinutes: values.idleMinutes,
     proxyEnabled: values.proxyEnabled,
     trustedProxies: values.trustedProxies.join('\n'),
   });
+  const [originEdited, setOriginEdited] = useState(false);
   const { busy, error, run } = useSubmit();
   // A browser may only move the entry, and proves itself for it; a desktop saves the rest as well.
   const save = () =>
     run(async (signal) => {
       const path = draft.path.trim();
+      const authority = draft.publicOrigin.trim();
+      const publicOrigin = webPublicOriginSchema.safeParse(authority ? `https://${authority}` : '');
+      if (!publicOrigin.success)
+        throw new Error('Web 对外地址只填写域名或 IP，可带端口；不要包含协议、路径或参数。');
       const result = await client.fetch({
         type: 'web.settings.update',
         ...(browser
           ? { values: { path }, proof: await resolveWebProof(proof, signal) }
           : {
               values: {
-                ...draft,
-                domain: draft.domain.trim(),
+                ...(originEdited ? { publicOrigin: publicOrigin.data } : {}),
                 path,
+                idleMinutes: draft.idleMinutes,
+                proxyEnabled: draft.proxyEnabled,
                 trustedProxies: draft.trustedProxies
                   .split(/[\n,]/)
                   .map((value) => value.trim())
@@ -576,8 +583,8 @@ function AccessDialog({
       });
       signal.throwIfAborted();
       if (browser && result.values.path !== values.path) {
-        const url = new URL(result.values.url ?? '', location.href);
         const expected = result.values.path ? `/${result.values.path}/` : '/';
+        const url = new URL(result.values.url ?? expected, location.origin);
         if (url.origin !== location.origin || url.pathname !== expected || url.search || url.hash)
           throw new Error('路径已保存，请从桌面端复制新的访问地址。');
         location.assign(url.href);
@@ -589,22 +596,37 @@ function AccessDialog({
     <DialogForm title="访问设置" busy={busy} error={error} close={close} submit={() => void save()}>
       {!browser && (
         <label>
-          访问域名
-          <input
-            value={draft.domain}
-            disabled={certificate?.mode === 'custom'}
-            placeholder="web.example.com"
-            maxLength={253}
-            onChange={(event) => setDraft({ ...draft, domain: event.target.value })}
-          />
+          Web 对外地址
+          <div className="web-origin-input">
+            <span aria-hidden="true">https://</span>
+            <input
+              aria-label="Web 对外地址"
+              value={draft.publicOrigin}
+              placeholder="web.example.com:1443"
+              maxLength={259}
+              autoCapitalize="none"
+              spellCheck={false}
+              onChange={(event) => {
+                setOriginEdited(true);
+                setDraft({ ...draft, publicOrigin: event.target.value });
+              }}
+            />
+          </div>
           <small className="muted">
-            {certificate?.mode === 'custom'
-              ? '请先恢复默认证书，再修改或清空域名。'
-              : '留空使用部署地址；填写后仅允许指定域名访问，其他入口返回 404。'}
+            填写浏览器访问的域名或 IP，可带端口。留空不生成访问链接，与桌面连接地址无关。
           </small>
+          <small className="muted">证书由服务端或反代提供；填写地址不会申请或验证证书。</small>
+          {certificate?.mode === 'custom' && (
+            <small className="muted">端口可修改；修改或清空域名前，请先恢复默认证书。</small>
+          )}
+          {!values.publicOrigin && values.domain && (
+            <small className="muted">
+              当前仍限制域名 {values.domain}，请补全实际对外地址及端口。
+            </small>
+          )}
           {values.passkeys.length > 0 && (
             <small className="muted">
-              通行密钥绑定当前域名。更换后，原密钥在新域名不可用，关联登录会话也将退出；请在新域名重新添加。
+              更换域名后，原通行密钥在新域名不可用；仅修改端口不需要重新添加。
             </small>
           )}
         </label>
@@ -621,7 +643,7 @@ function AccessDialog({
           />
         </div>
         <small className="muted">
-          留空使用根路径。修改域名或路径后，已登录浏览器需要重新登录。
+          留空使用根路径。修改对外地址或路径后，已登录浏览器需要重新登录。
         </small>
       </label>
       {!browser && (
@@ -646,36 +668,24 @@ function AccessDialog({
             />
           </Row>
           {draft.proxyEnabled && (
-            <>
-              <label>
-                反向代理 IP
-                <textarea
-                  rows={3}
-                  required
-                  value={draft.trustedProxies}
-                  onChange={(event) => setDraft({ ...draft, trustedProxies: event.target.value })}
-                  placeholder="每行一个 IP 地址"
-                />
-                <small className="muted">只信任这些地址转发的客户端 IP 信息。</small>
-                {values.forwardedBy &&
-                  !draft.trustedProxies
-                    .split(/[\n,]/)
-                    .map((value) => value.trim())
-                    .includes(values.forwardedBy) && (
-                    <small className="muted">
-                      最近一次带客户端 IP 的请求来自 {values.forwardedBy}
-                      ，它不在上面的列表中。确认这是你的反向代理后再填写，不认识的地址不要加入。
-                    </small>
-                  )}
-              </label>
-              <ReverseProxyHelp
-                connectionUrl={connectionUrl}
-                domain={draft.domain}
-                path={draft.path}
-                certificate={certificate}
+            <label>
+              反向代理 IP
+              <textarea
+                rows={3}
+                required
+                value={draft.trustedProxies}
+                onChange={(event) => setDraft({ ...draft, trustedProxies: event.target.value })}
+                placeholder="每行一个 IP 地址"
               />
-            </>
+              <small className="muted">只信任这些地址转发的客户端 IP 信息。</small>
+            </label>
           )}
+          <ReverseProxyHelp
+            connectionUrl={connectionUrl}
+            publicOrigin={draft.publicOrigin ? `https://${draft.publicOrigin.trim()}` : ''}
+            path={draft.path}
+            certificate={certificate}
+          />
         </>
       )}
       {browser && (

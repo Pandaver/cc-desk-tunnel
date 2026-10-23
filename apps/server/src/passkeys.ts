@@ -32,7 +32,6 @@ type Registration = PasskeyEntry & {
   id: string;
   grantHash: string;
   owner: string;
-  sessionId?: string;
   name: string;
   expires: number;
   status: 'pending' | 'complete';
@@ -107,7 +106,7 @@ export class Passkeys {
   }
   revokeOwner(owner: string) {
     for (const [id, value] of this.registrations)
-      if (value.owner === owner || value.sessionId === owner) this.registrations.delete(id);
+      if (value.owner === owner) this.registrations.delete(id);
     for (const [id, value] of this.challenges)
       if (
         value.sessionId === owner ||
@@ -137,13 +136,7 @@ export class Passkeys {
     if (collection.size >= limit)
       throw new DomainError('passkey_busy', '等待验证的请求过多，请稍后重试。');
   }
-  start(
-    name: string,
-    owner: string,
-    entry: PasskeyEntry,
-    sessionId?: string,
-    sessionExpires = Infinity,
-  ) {
+  start(name: string, owner: string, entry: PasskeyEntry, sessionExpires = Infinity) {
     this.room(this.registrations, 64);
     if (this.list(entry.rpId).length >= 32)
       throw new DomainError('passkey_limit', '通行密钥已达上限，请先删除不用的密钥。');
@@ -153,7 +146,6 @@ export class Passkeys {
       id: randomUUID(),
       grantHash: hash(grant),
       owner,
-      sessionId,
       name,
       expires: Math.min(this.now() + lifetime, sessionExpires),
       status: 'pending',

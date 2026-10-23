@@ -10,7 +10,13 @@ import { login, screenshots } from './helpers.ts';
 const webScreenshots = resolve(screenshots, 'web');
 mkdirSync(webScreenshots, { recursive: true });
 
-async function browserFixture(page: Page, authenticated = false, withHistory = false) {
+async function browserFixture(
+  page: Page,
+  authenticated = false,
+  withHistory = false,
+  configuredOrigin = true,
+  entryOrigin = '',
+) {
   let loggedIn = authenticated;
   let offline = false;
   const commands: Record<string, unknown>[] = [];
@@ -38,6 +44,7 @@ async function browserFixture(page: Page, authenticated = false, withHistory = f
   const values = {
     enabled: true,
     domain: '',
+    publicOrigin: configuredOrigin ? 'https://work.example.com' : '',
     path: 'web-fixture',
     idleMinutes: 120,
     proxyEnabled: false,
@@ -45,7 +52,6 @@ async function browserFixture(page: Page, authenticated = false, withHistory = f
     totpEnabled: true,
     passkeyAvailable: false,
     passkeys: [],
-    currentSessionId: sessionId,
     sessions: [
       {
         id: sessionId,
@@ -55,8 +61,7 @@ async function browserFixture(page: Page, authenticated = false, withHistory = f
         expiresAt: new Date(Date.now() + 7200000).toISOString(),
       },
     ],
-    selfSigned: true,
-    url: 'https://work.example.com/web-fixture/',
+    url: configuredOrigin ? 'https://work.example.com/web-fixture/' : undefined,
   };
   await page.route('**/web-fixture/**', async (route) => {
     const url = new URL(route.request().url());
@@ -75,7 +80,6 @@ async function browserFixture(page: Page, authenticated = false, withHistory = f
           authenticated: loggedIn,
           totpEnabled: true,
           passkeyAvailable: false,
-          selfSigned: true,
           ...(loggedIn ? { session: values.sessions[0] } : {}),
         },
       });
@@ -96,7 +100,7 @@ async function browserFixture(page: Page, authenticated = false, withHistory = f
             connectionId: randomUUID(),
             adapter: 'claude-code',
             sessions,
-            browser: { sessionId, serverDeviceId, selfSigned: true },
+            browser: { sessionId, serverDeviceId },
           }),
         );
         socket.send(
@@ -137,9 +141,17 @@ async function browserFixture(page: Page, authenticated = false, withHistory = f
           );
         if (command.type === 'web.settings.update') {
           Object.assign(values, command.values);
-          values.url = `${new URL(page.url()).origin}/${values.path ? `${values.path}/` : ''}`;
+          values.url = configuredOrigin
+            ? `${new URL(page.url()).origin}/${values.path ? `${values.path}/` : ''}`
+            : undefined;
         }
-        if (command.type === 'web.settings.get' || command.type === 'web.settings.update')
+        if (command.type === 'web.sessions.revoke')
+          values.sessions = values.sessions.filter((session) => session.id !== command.sessionId);
+        if (
+          command.type === 'web.settings.get' ||
+          command.type === 'web.settings.update' ||
+          command.type === 'web.sessions.revoke'
+        )
           socket.send(
             JSON.stringify({ type: 'web.settings.state', requestId: command.requestId, values }),
           );
@@ -147,10 +159,11 @@ async function browserFixture(page: Page, authenticated = false, withHistory = f
       }
     });
   });
-  await page.goto('/web-fixture/');
+  await page.goto(`${entryOrigin}/web-fixture/`);
   return {
     commands,
     sockets,
+    values,
     expire: () => {
       loggedIn = false;
     },
@@ -164,7 +177,8 @@ test('production browser logs in with TOTP, sends no desktop identity, and expos
   page,
 }) => {
   const fixture = await browserFixture(page);
-  await expect(page.getByRole('note')).toContainText('自签名证书');
+  expect(await page.evaluate(() => window.isSecureContext)).toBe(true);
+  await expect(page.locator('.web-context-warning')).toHaveCount(0);
   await page.getByLabel('服务凭据', { exact: true }).fill('test-password');
   await page.getByLabel('验证器动态码', { exact: true }).fill('000000');
   await page.getByRole('button', { name: '登录', exact: true }).click();
@@ -172,7 +186,8 @@ test('production browser logs in with TOTP, sends no desktop identity, and expos
   await page.getByLabel('验证器动态码', { exact: true }).fill('123456');
   await page.getByRole('button', { name: '登录', exact: true }).click();
   await expect(page.locator('.shell')).toBeVisible();
-  await expect(page.getByRole('note')).toContainText('正规证书');
+  await expect(page.locator('.web-context-warning')).toHaveCount(0);
+  await expect(page.locator('.shell')).not.toHaveClass(/web-insecure-context/);
   await expect(page.getByRole('button', { name: '定时任务', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '添加项目', exact: true })).toHaveCount(0);
   await page.locator('.sidebar').getByRole('button', { name: '新建会话', exact: true }).click();
@@ -198,7 +213,7 @@ test('production browser logs in with TOTP, sends no desktop identity, and expos
     .getByRole('button', { name: '设置', exact: true })
     .click();
   await expect(page.getByLabel('服务端访问路径', { exact: false })).toBeVisible();
-  await expect(page.getByLabel('访问域名', { exact: false })).toHaveCount(0);
+  await expect(page.getByLabel('Web 对外地址', { exact: true })).toHaveCount(0);
   await expect(page.getByLabel('登录空闲有效期（分钟）')).toHaveCount(0);
   await page.getByRole('button', { name: '取消', exact: true }).click();
   await page.screenshot({
@@ -210,6 +225,86 @@ test('production browser logs in with TOTP, sends no desktop identity, and expos
     path: resolve(webScreenshots, 'browser-settings-mobile.png'),
   });
 });
+
+test('browser revocation uses its connection session and only proves another browser logout', async ({
+  page,
+}) => {
+  const fixture = await browserFixture(page, true);
+  const own = fixture.values.sessions[0];
+  const other = { ...own, id: randomUUID(), name: '另一浏览器' };
+  fixture.values.sessions.push(other);
+  await expect(page.locator('.shell')).toBeVisible();
+  await page.getByRole('button', { name: '设置与账号', exact: true }).click();
+  await page.getByRole('menuitem', { name: '设置', exact: true }).click();
+  await page.locator('.web-sessions > summary').filter({ hasText: '已登录浏览器' }).click();
+  await expect(page.getByText('本次测试（当前浏览器）', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '退出 本次测试', exact: true }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText('退出当前浏览器的登录？');
+  await expect(dialog.getByLabel('服务凭据', { exact: true })).toHaveCount(0);
+  await expect(dialog.getByLabel('当前验证器动态码', { exact: true })).toHaveCount(0);
+  await dialog.getByRole('button', { name: '取消', exact: true }).click();
+  await page.getByRole('button', { name: '退出 另一浏览器', exact: true }).click();
+  await dialog.getByLabel('服务凭据', { exact: true }).fill('test-password');
+  await dialog.getByLabel('当前验证器动态码', { exact: true }).fill('123456');
+  await dialog.getByRole('button', { name: '确认', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(fixture.commands.filter((command) => command.type === 'web.sessions.revoke')).toEqual([
+    expect.objectContaining({
+      sessionId: other.id,
+      proof: { password: 'test-password', code: '123456' },
+    }),
+  ]);
+  await page.getByRole('button', { name: '退出 本次测试', exact: true }).click();
+  await dialog.getByRole('button', { name: '确认', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const request = fixture.commands
+    .filter((command) => command.type === 'web.sessions.revoke')
+    .at(-1);
+  expect(request?.sessionId).toBe(own.id);
+  expect(request).not.toHaveProperty('proof');
+});
+
+for (const secure of [true, false])
+  test(`browser warning follows the actual security context on login and workbench (secure ${secure})`, async ({
+    page,
+  }) => {
+    const origin = `${secure ? 'https' : 'http'}://web.example.test`;
+    await browserFixture(page, false, false, true, origin);
+    expect(await page.evaluate(() => window.isSecureContext)).toBe(secure);
+    const warning = page.locator('.web-context-warning');
+    const label = secure ? 'secure' : 'insecure';
+    async function checkWarning() {
+      if (secure) await expect(warning).toHaveCount(0);
+      else await expect(warning).toHaveText('当前页面未处于安全上下文，通行密钥等功能可能受限。');
+      await expect(page.getByText(/服务端直连使用自签名证书/)).toHaveCount(0);
+    }
+    async function capture(stage: string) {
+      for (const [device, viewport] of [
+        ['desktop', { width: 1280, height: 900 }],
+        ['mobile', { width: 390, height: 844 }],
+      ] as const) {
+        await page.setViewportSize(viewport);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+          true,
+        );
+        await page.screenshot({
+          path: resolve(webScreenshots, `security-context-${label}-${stage}-${device}.png`),
+        });
+      }
+    }
+    await expect(page.getByLabel('服务凭据', { exact: true })).toBeVisible();
+    await checkWarning();
+    await capture('login');
+    await page.getByLabel('服务凭据', { exact: true }).fill('test-password');
+    await page.getByLabel('验证器动态码', { exact: true }).fill('123456');
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page.locator('.shell')).toBeVisible();
+    if (secure) await expect(page.locator('.shell')).not.toHaveClass(/web-insecure-context/);
+    else await expect(page.locator('.shell')).toHaveClass(/web-insecure-context/);
+    await checkWarning();
+    await capture('workbench');
+  });
 
 test('browser retries an offline connection but returns to login after an expired cookie on reconnect', async ({
   page,
@@ -255,8 +350,7 @@ test('mainline themes and browser access settings coexist and retain the chosen 
     'background-color',
     'rgb(30, 31, 35)',
   );
-  await expect(page.getByRole('note')).toHaveCSS('background-color', 'rgb(42, 44, 49)');
-  await expect(page.getByRole('note')).toHaveCSS('color', 'rgb(228, 230, 234)');
+  await expect(page.locator('.web-context-warning')).toHaveCount(0);
   await page
     .locator('.setting-row')
     .filter({ hasText: '访问设置' })
@@ -301,6 +395,7 @@ async function settingsFixture(
   browser = false,
   totp = false,
   passkeys = false,
+  publicOrigin = 'https://web.example.com',
 ) {
   await page.route('**/__settings-fixture', (route) =>
     route.fulfill({
@@ -317,7 +412,7 @@ async function settingsFixture(
   await page.goto('/__settings-fixture');
   await page.waitForFunction(() => '__vite_plugin_react_preamble_installed__' in window);
   await page.evaluate(
-    async ({ enabled, custom, browser, totp, passkeys }) => {
+    async ({ enabled, custom, browser, totp, passkeys, publicOrigin }) => {
       const reactPath = '/node_modules/.vite/deps/react.js';
       const domPath = '/node_modules/.vite/deps/react-dom_client.js';
       const componentPath = '/src/WebAccessSettings.tsx';
@@ -331,6 +426,7 @@ async function settingsFixture(
       let settings = {
         enabled,
         domain: 'web.example.com',
+        publicOrigin,
         path: 'entry',
         idleMinutes: 120,
         proxyEnabled: false,
@@ -349,8 +445,7 @@ async function settingsFixture(
             ]
           : [],
         sessions: [],
-        selfSigned: true,
-        url: 'https://web.example.com/entry/',
+        url: publicOrigin ? `${publicOrigin}/entry/` : undefined,
       };
       let certificate = { mode: custom ? 'custom' : 'default', selfSigned: !custom };
       const calls: Record<string, unknown>[] = [];
@@ -384,8 +479,14 @@ async function settingsFixture(
         }
         if (command.type === 'web.certificate.set')
           return (certificate = { mode: 'custom', selfSigned: false });
-        if (command.type === 'web.settings.update')
+        if (command.type === 'web.settings.update') {
           settings = { ...settings, ...(command.values as object) };
+          if (Object.hasOwn(command.values as object, 'publicOrigin'))
+            settings.domain = settings.publicOrigin ? new URL(settings.publicOrigin).hostname : '';
+          settings.url = settings.publicOrigin
+            ? `${settings.publicOrigin}/${settings.path ? `${settings.path}/` : ''}`
+            : undefined;
+        }
         if (command.type === 'web.totp.setup') {
           await setupReady;
           if (failSetup) {
@@ -470,7 +571,7 @@ async function settingsFixture(
         },
       });
     },
-    { enabled, custom, browser, totp, passkeys },
+    { enabled, custom, browser, totp, passkeys, publicOrigin },
   );
   if (browser)
     await expect(
@@ -484,7 +585,9 @@ test('disabled Web keeps only custom-certificate recovery, confirms reset, and r
 }) => {
   await settingsFixture(page, false, true);
   await expect(page.getByRole('button', { name: '导入证书' })).toHaveCount(0);
+  await expect(page.getByText('服务端直连证书', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: '恢复默认证书' }).click();
+  await expect(page.getByRole('dialog')).toContainText('直连');
   await page.getByRole('button', { name: '取消', exact: true }).click();
   await expect(page.getByRole('button', { name: '恢复默认证书' })).toBeVisible();
   await page.evaluate(() =>
@@ -499,10 +602,11 @@ test('disabled Web keeps only custom-certificate recovery, confirms reset, and r
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByRole('button', { name: '恢复默认证书' })).toHaveCount(0);
   await page.getByRole('switch', { name: '启用 Web 访问' }).click();
+  await expect(page.getByText('默认自签名证书', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '导入证书' })).toBeVisible();
 });
 
-test('certificate binding locks domain, and disconnect destroys certificate secrets and pending dialogs', async ({
+test('certificate binding explains hostname protection without blocking port edits, and disconnect clears secrets', async ({
   page,
 }) => {
   await settingsFixture(page);
@@ -511,8 +615,16 @@ test('certificate binding locks domain, and disconnect destroys certificate secr
     .filter({ hasText: '访问设置' })
     .getByRole('button', { name: '设置', exact: true })
     .click();
-  await expect(page.getByLabel('访问域名', { exact: false })).toBeDisabled();
-  await page.getByRole('button', { name: '取消', exact: true }).click();
+  await expect(page.getByLabel('Web 对外地址', { exact: true })).toBeEnabled();
+  await expect(page.getByRole('dialog')).toContainText('端口可修改');
+  await expect(page.getByRole('dialog')).toContainText('请先恢复默认证书');
+  await page.getByLabel('Web 对外地址', { exact: true }).fill('web.example.com:1443');
+  await page.getByRole('button', { name: '确认', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('.web-access-address')).toHaveAttribute(
+    'title',
+    'https://web.example.com:1443/entry/',
+  );
   await page.getByRole('button', { name: '导入证书' }).click();
   await page.getByRole('textbox', { name: '私钥 PEM' }).fill('TEST PRIVATE KEY');
   await page.evaluate(() =>
@@ -736,33 +848,34 @@ test('desktop TOTP setup retries errors and discards a pending result on disconn
   expect(calls).toBe(4);
 });
 
-test('browser path changes submit only the path with fresh proof and navigate only after the reply', async ({
-  page,
-}) => {
-  const fixture = await browserFixture(page, true);
-  await expect(page.locator('.shell')).toBeVisible();
-  await page.getByRole('button', { name: '设置与账号', exact: true }).click();
-  await page.getByRole('menuitem', { name: '设置', exact: true }).click();
-  await page
-    .locator('.setting-row')
-    .filter({ hasText: '访问设置' })
-    .getByRole('button', { name: '设置', exact: true })
-    .click();
-  await page.getByLabel('服务端访问路径', { exact: false }).fill('changed-entry');
-  await page.getByLabel('服务凭据', { exact: true }).fill('test-password');
-  await page.getByLabel('当前验证器动态码').fill('123456');
-  await page.route('**/changed-entry/', (route) =>
-    route.fulfill({ contentType: 'text/html', body: '<h1>新入口</h1>' }),
-  );
-  await page.getByRole('button', { name: '确认', exact: true }).click();
-  await expect(page).toHaveURL(/\/changed-entry\/$/);
-  expect(
-    fixture.commands.find((command) => command.type === 'web.settings.update')?.values,
-  ).toEqual({ path: 'changed-entry' });
-  expect(fixture.commands.filter((command) => command.type === 'web.settings.update')).toHaveLength(
-    1,
-  );
-});
+for (const configuredOrigin of [false, true])
+  test(`browser path changes submit only the path and navigate after the reply (public origin ${configuredOrigin})`, async ({
+    page,
+  }) => {
+    const fixture = await browserFixture(page, true, false, configuredOrigin);
+    await expect(page.locator('.shell')).toBeVisible();
+    await page.getByRole('button', { name: '设置与账号', exact: true }).click();
+    await page.getByRole('menuitem', { name: '设置', exact: true }).click();
+    await page
+      .locator('.setting-row')
+      .filter({ hasText: '访问设置' })
+      .getByRole('button', { name: '设置', exact: true })
+      .click();
+    await page.getByLabel('服务端访问路径', { exact: false }).fill('changed-entry');
+    await page.getByLabel('服务凭据', { exact: true }).fill('test-password');
+    await page.getByLabel('当前验证器动态码').fill('123456');
+    await page.route('**/changed-entry/', (route) =>
+      route.fulfill({ contentType: 'text/html', body: '<h1>新入口</h1>' }),
+    );
+    await page.getByRole('button', { name: '确认', exact: true }).click();
+    await expect(page).toHaveURL(/\/changed-entry\/$/);
+    expect(
+      fixture.commands.find((command) => command.type === 'web.settings.update')?.values,
+    ).toEqual({ path: 'changed-entry' });
+    expect(
+      fixture.commands.filter((command) => command.type === 'web.settings.update'),
+    ).toHaveLength(1);
+  });
 
 for (const totp of [false, true])
   test(`desktop access settings save without credentials or dynamic codes (TOTP ${totp})`, async ({
@@ -799,8 +912,10 @@ test('reverse proxy help stays folded, copies verified TLS configuration, and ne
     .filter({ hasText: '访问设置' })
     .getByRole('button', { name: '设置', exact: true })
     .click();
-  await expect(page.locator('.web-proxy-help')).toHaveCount(0);
+  await expect(page.locator('.web-proxy-help')).not.toHaveAttribute('open', '');
+  await expect(page.getByLabel('反向代理 IP', { exact: false })).toHaveCount(0);
   await page.getByRole('switch', { name: '信任反向代理' }).click();
+  await expect(page.getByLabel('反向代理 IP', { exact: false })).toBeVisible();
   await expect(page.locator('.web-proxy-help')).not.toHaveAttribute('open', '');
   await page.getByText('反向代理配置示例', { exact: true }).click();
   await expect(page.getByLabel('上游地址', { exact: false })).toHaveValue(
@@ -854,12 +969,148 @@ test('reverse proxy help stays folded, copies verified TLS configuration, and ne
       ).settingsFixture.calls.find((call) => call.type === 'web.settings.update')?.values,
   );
   expect(sent).toEqual({
-    domain: 'web.example.com',
     path: 'entry',
     idleMinutes: 120,
     proxyEnabled: true,
     trustedProxies: ['127.0.0.1'],
   });
+});
+
+for (const scenario of [
+  {
+    name: 'non-standard port and custom path',
+    input: 'web.example.com:1443',
+    origin: 'https://web.example.com:1443',
+    path: 'long-entry',
+    display: 'https://web.example.com:1443/long-…',
+  },
+  {
+    name: 'standard port and root',
+    input: 'WEB.EXAMPLE.COM:443',
+    origin: 'https://web.example.com',
+    path: '',
+    display: 'https://web.example.com/',
+  },
+  { name: 'empty origin', input: '', origin: '', path: '', display: '' },
+])
+  test(`Web public origin saves independently of desktop connection: ${scenario.name}`, async ({
+    page,
+  }) => {
+    await settingsFixture(page, true, false);
+    await page
+      .locator('.setting-row')
+      .filter({ hasText: '访问设置' })
+      .getByRole('button', { name: '设置', exact: true })
+      .click();
+    await expect(page.getByLabel('Web 对外地址', { exact: true })).toHaveValue('web.example.com');
+    await expect(page.locator('.web-origin-input > span')).toHaveText('https://');
+    await expect(page.getByRole('dialog')).toContainText('与桌面连接地址无关');
+    await expect(page.getByRole('dialog')).toContainText('修改对外地址或路径后');
+    await page.getByLabel('Web 对外地址', { exact: true }).fill(scenario.input);
+    await page.getByLabel('服务端访问路径', { exact: false }).fill(scenario.path);
+    if (scenario.name === 'non-standard port and custom path') {
+      await page.screenshot({ path: resolve(webScreenshots, 'public-origin-desktop.png') });
+      await page.setViewportSize({ width: 390, height: 844 });
+      expect(
+        await page.evaluate(() => {
+          const dialog = document.querySelector('dialog')!;
+          return dialog.scrollWidth <= dialog.clientWidth;
+        }),
+      ).toBe(true);
+      await page.screenshot({ path: resolve(webScreenshots, 'public-origin-mobile.png') });
+    }
+    await page.getByRole('button', { name: '确认', exact: true }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    const sent = await page.evaluate(
+      () =>
+        (
+          window as unknown as { settingsFixture: { calls: { type: string; values: object }[] } }
+        ).settingsFixture.calls.find((call) => call.type === 'web.settings.update')?.values,
+    );
+    expect(sent).toMatchObject({ publicOrigin: scenario.origin, path: scenario.path });
+    expect(sent).not.toHaveProperty('domain');
+    if (scenario.origin) {
+      const full = `${scenario.origin}/${scenario.path ? `${scenario.path}/` : ''}`;
+      await expect(page.locator('.web-access-address')).toHaveText(scenario.display);
+      await expect(page.locator('.web-access-address')).toHaveAttribute('title', full);
+      await page.evaluate(() => {
+        Object.defineProperty(window, 'desktop', {
+          configurable: true,
+          value: {
+            copyText: async (value: string) => Object.assign(window, { copiedWebAddress: value }),
+            openWeb: async (value: string) => Object.assign(window, { openedWebAddress: value }),
+          },
+        });
+      });
+      await page.getByRole('button', { name: '复制服务端访问地址', exact: true }).click();
+      await page.getByRole('button', { name: '打开服务端访问地址', exact: true }).click();
+      expect(await page.evaluate('window.copiedWebAddress')).toBe(full);
+      expect(await page.evaluate('window.openedWebAddress')).toBe(full);
+    } else {
+      await expect(page.locator('.web-access-address')).toHaveCount(0);
+      await expect(
+        page.getByRole('button', { name: '打开服务端访问地址', exact: true }),
+      ).toHaveCount(0);
+      await expect(
+        page.getByText('请在访问设置中填写 Web 对外地址', { exact: true }),
+      ).toBeVisible();
+    }
+  });
+
+test('Web public origin rejects protocols, paths, credentials and invalid ports before saving', async ({
+  page,
+}) => {
+  await settingsFixture(page, true, false);
+  await page
+    .locator('.setting-row')
+    .filter({ hasText: '访问设置' })
+    .getByRole('button', { name: '设置', exact: true })
+    .click();
+  for (const input of [
+    'https://web.example.com:1443',
+    'web.example.com/path',
+    'web.example.com?token=secret',
+    'web.example.com#fragment',
+    'user:secret@web.example.com',
+    'web.example.com:65536',
+  ]) {
+    await page.getByLabel('Web 对外地址', { exact: true }).fill(input);
+    await page.getByRole('button', { name: '确认', exact: true }).click();
+    await expect(page.getByRole('alert')).toContainText('不要包含协议、路径或参数');
+  }
+  expect(
+    await page.evaluate(
+      () =>
+        (
+          window as unknown as { settingsFixture: { calls: { type: string }[] } }
+        ).settingsFixture.calls.filter((call) => call.type === 'web.settings.update').length,
+    ),
+  ).toBe(0);
+});
+
+test('an unrelated setting preserves an existing domain restriction until the public origin is edited', async ({
+  page,
+}) => {
+  await settingsFixture(page, true, true, false, false, false, '');
+  await page
+    .locator('.setting-row')
+    .filter({ hasText: '访问设置' })
+    .getByRole('button', { name: '设置', exact: true })
+    .click();
+  await expect(page.getByLabel('Web 对外地址', { exact: true })).toHaveValue('');
+  await expect(page.getByRole('dialog')).toContainText('当前仍限制域名 web.example.com');
+  await page.getByLabel('登录空闲有效期（分钟）').fill('60');
+  await page.getByRole('button', { name: '确认', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  const sent = await page.evaluate(
+    () =>
+      (
+        window as unknown as { settingsFixture: { calls: { type: string; values: object }[] } }
+      ).settingsFixture.calls.find((call) => call.type === 'web.settings.update')?.values,
+  );
+  expect(sent).toMatchObject({ idleMinutes: 60 });
+  expect(sent).not.toHaveProperty('publicOrigin');
+  expect(sent).not.toHaveProperty('domain');
 });
 
 test('reverse proxy HTTP upstream hides TLS inputs and switching back restores required certificate validation', async ({

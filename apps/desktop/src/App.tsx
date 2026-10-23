@@ -40,7 +40,7 @@ import type {
   SessionEvent,
 } from '@cc-desk-tunnel/protocol';
 import { browserSession, browserSocket, watchActivity } from './browser-api.ts';
-import { CertificateWarning } from './WebGate.tsx';
+import SecureContextWarning from './SecureContextWarning.tsx';
 import { hostCapabilities } from './host-capabilities.ts';
 import AccountPanel from './AccountPanel.tsx';
 import { ProxyClient, RequestInterruptedError } from './client.ts';
@@ -117,7 +117,7 @@ function savedProjects(value: unknown = shared('projects')): string[] {
 // Owns the connection, the selection and every request; the components below render and report user intent.
 export function App({
   browser,
-}: { browser?: { selfSigned: boolean; expired: () => void; logout: () => Promise<void> } } = {}) {
+}: { browser?: { expired: () => void; logout: () => Promise<void> } } = {}) {
   const host = hostCapabilities(!!browser);
   const [client] = useState(() => new ProxyClient());
   useEffect(() => {
@@ -211,7 +211,7 @@ export function App({
 
   const nativeMode = state.adapter === 'claude-code';
   const connected = state.status === 'connected';
-  const selfSigned = !!browser && (state.browser?.selfSigned ?? browser.selfSigned);
+  const insecureContext = !!browser && !window.isSecureContext;
   const othersBusy = useShared('busy');
   const selected = state.sessions.find((session) => session.id === state.selectedId);
   // What is listed and managed here is what is on this computer. Sessions on the user's other computers are
@@ -378,7 +378,6 @@ export function App({
     });
   };
 
-  // A check or an upgrade of the service that failed says why.
   const update = state.update;
   useEffect(() => {
     if (update?.state === 'failed' && update.detail) setError(update.detail);
@@ -1256,7 +1255,7 @@ export function App({
       <main className="web-login">
         <section className="web-login-body">
           <h1>连接服务端工作台</h1>
-          {browser.selfSigned && <CertificateWarning />}
+          {insecureContext && <SecureContextWarning />}
           <p role="status">{currentError ?? '正在连接…'}</p>
           {state.status === 'disconnected' && (
             <button
@@ -1386,9 +1385,9 @@ export function App({
   };
   return (
     <div
-      className={`shell ${sideOpen ? '' : 'side-closed'} ${selfSigned ? 'web-self-signed' : ''}`}
+      className={`shell ${sideOpen ? '' : 'side-closed'} ${insecureContext ? 'web-insecure-context' : ''}`}
     >
-      {selfSigned && <CertificateWarning />}
+      {insecureContext && <SecureContextWarning />}
       <TitleBar
         title={
           place.page === 'chat'

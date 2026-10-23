@@ -746,7 +746,7 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
     // The newest Windows installer the service holds, for clients that want to upgrade themselves.
     client: installerSchema.optional(),
     sessions: z.array(sessionSchema),
-    browser: z.object({ sessionId: id, serverDeviceId: id, selfSigned: z.boolean() }).optional(),
+    browser: z.object({ sessionId: id, serverDeviceId: id }).optional(),
   }),
   z.object({
     type: z.literal('response'),

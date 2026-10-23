@@ -31,23 +31,21 @@ async function fixture(t: TestContext, proxy?: 'http' | 'https') {
   const context = {
     desktop: true,
     address: '127.0.0.1',
-    origin,
     connectionId: randomUUID(),
-    proxied: !proxy,
   };
+  let proxied = !proxy;
   const execute = (command: Omit<WebCommand, 'requestId'> | object, next = context) =>
     web.execute({ requestId: randomUUID(), ...command } as WebCommand, next);
   const prefix = proxy ? '/private' : '';
   execute({
     type: 'web.settings.update',
-    values: { enabled: true, domain: 'web.example.test', path: prefix.slice(1) },
+    values: { enabled: true, path: prefix.slice(1) },
   });
   const handle = (req: IncomingMessage, res: ServerResponse) => {
     if (proxy) {
       // Match the server's connection context using the actual upstream request, not a test boolean.
-      context.origin = `https://${req.headers.host}`;
       context.address = web.address(req);
-      context.proxied = web.proxied(req);
+      proxied = web.proxied(req);
     }
     void web.handle(req, res).then((handled) => {
       if (!handled) res.writeHead(404).end();
@@ -90,7 +88,7 @@ async function fixture(t: TestContext, proxy?: 'http' | 'https') {
     publicPort = address.port;
   }
   const entryOrigin = proxy ? `${origin}:${publicPort}` : origin;
-  context.origin = entryOrigin;
+  execute({ type: 'web.settings.update', values: { publicOrigin: entryOrigin } });
   t.after(async () => {
     web.close();
     if (gateway) {
@@ -209,6 +207,7 @@ async function fixture(t: TestContext, proxy?: 'http' | 'https') {
     web: () => web,
     execute,
     context,
+    proxied: () => proxied,
     origin: entryOrigin,
     prefix,
     api,
@@ -229,15 +228,15 @@ test('Passkey registration/login/proof uses browser cookies and deleting a key p
   const { device, id } = await f.register();
   const signedIn = await f.login(device);
   assert.equal(signedIn.data.authenticated, true);
-  assert.equal(signedIn.data.session.passkeyId, id);
   const credentialLogin = await f.http('/api/login', { password: token });
   assert.equal(credentialLogin.status, 200);
   assert.notEqual(credentialLogin.cookie, signedIn.cookie);
-  const sessions = f.web().state(origin, true).sessions;
+  const sessions = f.web().state().sessions;
   assert.equal(sessions.length, 2);
   const stored = f.database
-    .prepare('SELECT secret_hash FROM web_sessions WHERE id = ?')
+    .prepare('SELECT secret_hash, passkey_id FROM web_sessions WHERE id = ?')
     .get(signedIn.data.session.id)!;
+  assert.equal(stored.passkey_id, id);
   assert.notEqual(stored.secret_hash, signedIn.cookie!.split('=')[1]);
   assert.equal(JSON.stringify(sessions).includes(token), false);
 
@@ -261,7 +260,7 @@ test('Passkey registration/login/proof uses browser cookies and deleting a key p
     },
     context,
   );
-  assert.equal(f.web().state(origin, true).passkeys[0].name, '已改名');
+  assert.equal(f.web().state().passkeys[0].name, '已改名');
   assert.throws(() =>
     f.execute(
       {
@@ -275,7 +274,7 @@ test('Passkey registration/login/proof uses browser cookies and deleting a key p
   );
   assert.throws(() => f.execute({ type: 'web.passkeys.remove', passkeyId: id }, context));
   f.execute({ type: 'web.passkeys.remove', passkeyId: id });
-  assert.equal(f.web().state(origin, true).sessions.length, 1);
+  assert.equal(f.web().state().sessions.length, 1);
   assert.equal(
     (await f.http('/api/session', undefined, signedIn.cookie)).data.authenticated,
     false,
@@ -293,12 +292,12 @@ test('Web disable closes browser access but keeps Passkey management available t
   f.execute({ type: 'web.settings.update', values: { enabled: false } });
   assert.equal((await f.api('login/options')).status, 404);
   assert.equal(f.web().active(signedIn.data.session.id), false);
-  assert.equal(f.web().state(origin, true).passkeys.length, 1);
-  assert.equal(f.web().state(origin, true).passkeyAvailable, false);
+  assert.equal(f.web().state().passkeys.length, 1);
+  assert.equal(f.web().state().passkeyAvailable, false);
   f.execute({ type: 'web.passkeys.rename', passkeyId: id, name: '关闭后管理' });
-  assert.equal(f.web().state(origin, true).passkeys[0].name, '关闭后管理');
+  assert.equal(f.web().state().passkeys[0].name, '关闭后管理');
   f.execute({ type: 'web.settings.update', values: { enabled: true } });
-  assert.equal(f.web().state(origin, true).passkeyAvailable, true);
+  assert.equal(f.web().state().passkeyAvailable, true);
 });
 
 test('path changes keep keys but end browser sessions; domain changes revoke key sessions; token rotation removes keys', async (t) => {
@@ -309,17 +308,50 @@ test('path changes keep keys but end browser sessions; domain changes revoke key
   assert.equal(pending.type, 'web.passkey.registration');
   f.execute({ type: 'web.settings.update', values: { path: 'entry' } });
   assert.equal(f.web().active(signedIn.data.session.id), false);
-  assert.equal(f.web().state(origin, true).passkeys[0].available, true);
+  assert.equal(f.web().state().passkeys[0].available, true);
   assert.equal(
     f.web().passkeys.status(pending.registrationId, f.context.connectionId).status,
     'expired',
   );
   const moved = await f.login(device, '/entry');
-  f.execute({ type: 'web.settings.update', values: { domain: 'other.example.test' } });
+  f.execute({
+    type: 'web.settings.update',
+    values: { publicOrigin: 'https://other.example.test' },
+  });
   assert.equal(f.web().active(moved.data.session.id), false);
-  assert.equal(f.web().state(origin, true).passkeys[0].available, false);
+  assert.equal(f.web().state().passkeys[0].available, false);
   f.rotate();
-  assert.equal(f.web().state(origin, true).passkeys.length, 0);
+  assert.equal(f.web().state().passkeys.length, 0);
+});
+
+test('changing only the public port revokes sessions and ceremonies while preserving keys for the same RP', async (t) => {
+  const f = await fixture(t);
+  const { device } = await f.register();
+  const signedIn = await f.login(device);
+  const credential = await f.http('/api/login', { password: token });
+  const pending = f.execute({ type: 'web.passkeys.start', name: '旧端口注册' });
+  assert.equal(pending.type, 'web.passkey.registration');
+  const options = await f.api('login/options');
+  f.execute({ type: 'web.settings.update', values: { publicOrigin: origin + ':1443' } });
+  assert.equal(f.web().active(signedIn.data.session.id), false);
+  assert.equal(f.web().active(credential.data.session.id), false);
+  assert.equal(
+    f.web().passkeys.status(pending.registrationId, f.context.connectionId).status,
+    'expired',
+  );
+  assert.equal(f.web().state().passkeys[0].available, true);
+  assert.equal((await f.api('login/options')).status, 404);
+  const stale = await f.http(
+    '/api/passkey/login/verify',
+    {
+      challengeId: options.data.challengeId,
+      response: device.authenticate(options.data.options.challenge),
+    },
+    undefined,
+    { Host: 'web.example.test:1443', Origin: origin + ':1443' },
+  );
+  assert.equal(stale.status, 400);
+  assert.equal(stale.data.code, 'passkey_expired');
 });
 
 test('ceremonies reject foreign origins and IP Host, and registration requires an owner', async (t) => {
@@ -336,13 +368,11 @@ test('ceremonies reject foreign origins and IP Host, and registration requires a
     (await f.http('/api/passkey/login/options', {}, undefined, { Host: '127.0.0.1' })).status,
     404,
   );
-  assert.equal(f.web().state('https://127.0.0.1', true).passkeyAvailable, false);
+  assert.equal(f.web().state().passkeyAvailable, true);
   assert.throws(() =>
     f.execute({ type: 'web.passkeys.start', name: '缺少所有者' }, {
       desktop: true,
       address: '127.0.0.1',
-      origin,
-      proxied: true,
     } as typeof f.context),
   );
 });
@@ -362,22 +392,25 @@ for (const upstream of ['http', 'https'] as const) {
         values: { proxyEnabled: true, trustedProxies: ['192.0.2.10'] },
       });
       const untrusted = await f.http(f.prefix + '/api/session', undefined, undefined, forged, true);
-      assert.equal(untrusted.data.selfSigned, true);
+      assert.equal(Object.hasOwn(untrusted.data, 'selfSigned'), false);
       assert.equal(untrusted.data.passkeyAvailable, false);
-      assert.equal(f.context.proxied, false);
+      assert.equal(f.proxied(), false);
       assert.equal(f.context.address, '127.0.0.1', 'X-Real-IP cannot impersonate a trusted source');
-      const denied = await f.api('login/options');
-      assert.equal(denied.status, 400);
-      assert.equal(denied.data.code, 'passkey_unavailable');
-      assert.throws(() => f.execute({ type: 'web.passkeys.start', name: '未受信任的转发' }));
+      const started = f.execute({ type: 'web.passkeys.start', name: '独立公开入口' });
+      assert.equal(started.type, 'web.passkey.registration');
+      assert.equal(new URL(started.url!).origin, f.origin);
+      const options = await f.api('register/options', {
+        grant: new URL(started.url!).hash.split('=')[1],
+      });
+      assert.equal(options.status, 200);
       f.execute({
         type: 'web.settings.update',
         values: { trustedProxies: ['127.0.0.1'] },
       });
     }
     const session = await f.http(f.prefix + '/api/session');
-    assert.equal(session.data.selfSigned, false, 'the browser receives the gateway certificate');
-    assert.equal(f.context.proxied, true, 'trust is derived from the real upstream socket');
+    assert.equal(Object.hasOwn(session.data, 'selfSigned'), false);
+    assert.equal(f.proxied(), true, 'trust is derived from the real upstream socket');
     const { device, id, url } = await f.register();
     assert.equal(new URL(url).origin, f.origin);
     assert.equal(new URL(url).pathname, '/private/');
@@ -401,8 +434,8 @@ for (const upstream of ['http', 'https'] as const) {
     );
     assert.equal(
       (await f.http(endpoint, {}, undefined, { Host: 'web.example.test' })).status,
-      403,
-      'dropping the external port changes the origin',
+      404,
+      'dropping the external port changes the configured origin',
     );
     assert.equal((await f.http('/api/passkey/login/options', {})).status, 404);
 
@@ -429,7 +462,7 @@ test('changing the entry while an HTTP body is arriving prevents a challenge und
   );
   assert.equal(response.status, 400);
   assert.equal(response.data.code, 'passkey_expired');
-  assert.equal(f.web().state(origin, true).sessions.length, 0);
+  assert.equal(f.web().state().sessions.length, 0);
 });
 
 test('serial issuance is throttled without blocking an issued verification or browser logout', async (t) => {
@@ -448,5 +481,5 @@ test('serial issuance is throttled without blocking an issued verification or br
   });
   assert.equal(signedIn.status, 200);
   assert.equal((await f.http('/api/logout', {}, signedIn.cookie)).status, 200);
-  assert.equal(f.web().state(origin, true).sessions.length, 0);
+  assert.equal(f.web().state().sessions.length, 0);
 });

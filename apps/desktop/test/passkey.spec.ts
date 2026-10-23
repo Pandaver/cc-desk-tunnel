@@ -59,7 +59,6 @@ async function passkeyFixture(page: Page) {
     authenticated,
     passkeyAvailable: !!credential,
     totpEnabled: true,
-    selfSigned: false,
     ...(authenticated ? { session } : {}),
   });
   const requests: string[] = [];
@@ -176,7 +175,7 @@ async function passkeyFixture(page: Page) {
             connectionId: randomUUID(),
             adapter: 'claude-code',
             sessions: [],
-            browser: { sessionId, serverDeviceId, selfSigned: false },
+            browser: { sessionId, serverDeviceId },
           }),
         );
       else if (command.type === 'web.settings.get' || command.type === 'web.passkeys.rename') {
@@ -191,18 +190,17 @@ async function passkeyFixture(page: Page) {
             values: {
               enabled: true,
               domain: rpID,
+              publicOrigin: new URL(entry).origin,
               path: 'entry',
               idleMinutes: 120,
               proxyEnabled: false,
               trustedProxies: [],
-              selfSigned: false,
               totpEnabled: true,
               passkeyAvailable: true,
               passkeys: [
                 { id: passkeyId, name: keyName, rpId: rpID, available: true, createdAt: now },
               ],
               sessions: [session],
-              currentSessionId: sessionId,
               url: entry,
             },
           }),

@@ -13,7 +13,13 @@ import type { WebProof } from '@cc-desk-tunnel/protocol';
 import { z } from 'zod';
 import { browserRequest } from './browser-api.ts';
 
-export const supportsPasskeys = () => window.isSecureContext && browserSupportsWebAuthn();
+// This checks API availability, not the browser's certificate trust decision.
+export function passkeySupportError() {
+  if (!window.isSecureContext) return '当前页面未处于安全上下文，请使用可信 HTTPS 地址。';
+  if (!browserSupportsWebAuthn()) return '当前浏览器不支持通行密钥，请更换支持 WebAuthn 的浏览器。';
+  return undefined;
+}
+export const supportsPasskeys = () => !passkeySupportError();
 export const cancelPasskey = () => WebAuthnAbortService.cancelCeremony();
 export function passkeyError(error: unknown) {
   if (error instanceof Error && ['NotAllowedError', 'AbortError'].includes(error.name))
@@ -43,7 +49,8 @@ const registrationOptions = z.object({
   name: z.string(),
 });
 async function authenticate(kind: 'login' | 'proof', signal?: AbortSignal) {
-  if (!supportsPasskeys()) throw new Error('请使用支持通行密钥的浏览器和可信 HTTPS 地址。');
+  const unsupported = passkeySupportError();
+  if (unsupported) throw new Error(unsupported);
   const result = authenticationOptions.parse(
     await browserRequest(`passkey/${kind}/options`, {}, signal),
   );
@@ -65,7 +72,8 @@ export async function resolveWebProof(proof: WebProof, signal?: AbortSignal): Pr
   return { passkey: result.proof };
 }
 export async function registerPasskey(grant: string, signal?: AbortSignal) {
-  if (!supportsPasskeys()) throw new Error('请使用支持通行密钥的浏览器和可信 HTTPS 地址。');
+  const unsupported = passkeySupportError();
+  if (unsupported) throw new Error(unsupported);
   const result = registrationOptions.parse(
     await browserRequest('passkey/register/options', { grant }, signal),
   );

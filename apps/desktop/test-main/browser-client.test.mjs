@@ -32,7 +32,7 @@ function fixture(t) {
   client.connectBrowser(browserSocket(), () => expired++);
   const socket = Socket.current;
   socket.onopen();
-  const browser = { sessionId: randomUUID(), serverDeviceId: randomUUID(), selfSigned: true };
+  const browser = { sessionId: randomUUID(), serverDeviceId: randomUUID() };
   socket.message({
     type: 'ready',
     protocolVersion: PROTOCOL_VERSION,
@@ -69,6 +69,7 @@ test('revocation ends browser reconnect and reports expiry; settings data remain
   const values = {
     enabled: true,
     domain: '',
+    publicOrigin: '',
     path: 'entry',
     idleMinutes: 120,
     proxyEnabled: false,
@@ -77,7 +78,6 @@ test('revocation ends browser reconnect and reports expiry; settings data remain
     sessions: [],
     passkeys: [],
     passkeyAvailable: false,
-    selfSigned: true,
   };
   socket.message({ type: 'web.settings.state', requestId: request.requestId, values });
   socket.message({ type: 'response', requestId: request.requestId, ok: true });

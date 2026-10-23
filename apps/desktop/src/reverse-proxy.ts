@@ -1,8 +1,8 @@
-import { webDomainSchema, webPathSchema } from '@cc-desk-tunnel/protocol';
+import { webDomainSchema, webPathSchema, webPublicOriginSchema } from '@cc-desk-tunnel/protocol';
 import type { WebCertificateState } from '@cc-desk-tunnel/protocol';
 
 export type ProxyConfiguration = {
-  domain: string;
+  publicOrigin: string;
   path: string;
   upstream: string;
   serverName: string;
@@ -37,8 +37,12 @@ export function proxyCertificateName(
 }
 
 export function proxyConfiguration(kind: 'nginx' | 'caddy', values: ProxyConfiguration) {
-  const domain = webDomainSchema.safeParse(values.domain);
-  if (!domain.success || !domain.data) throw new Error('请先填写访问域名，再生成反代配置。');
+  const publicOrigin = webPublicOriginSchema.safeParse(values.publicOrigin);
+  if (!publicOrigin.success || !publicOrigin.data)
+    throw new Error('请先填写有效的 Web 对外地址，再生成反代配置。');
+  const publicUrl = new URL(publicOrigin.data);
+  const domain = webDomainSchema.safeParse(publicUrl.hostname);
+  if (!domain.success || !domain.data) throw new Error('域名反代示例需要使用域名的 Web 对外地址。');
   const path = webPathSchema.safeParse(values.path);
   if (!path.success) throw new Error('请先修正服务端访问路径。');
   // Reject configuration metacharacters before URL normalization can remove them.
@@ -64,7 +68,7 @@ export function proxyConfiguration(kind: 'nginx' | 'caddy', values: ProxyConfigu
     throw new Error('请填写反代机器上的 PEM 绝对路径，仅使用字母、数字、点、横线和下划线。');
   const prefix = path.data ? `/${path.data}/` : '/';
   if (kind === 'caddy')
-    return `${domain.data} {
+    return `https://${publicUrl.host} {
 ${path.data ? `    redir /${path.data} /${path.data}/?{query} 308\n` : ''}    @web path ${path.data ? `/${path.data}/* /ws /client/installer` : '/*'}
     handle @web {
         reverse_proxy ${upstream.origin} {
@@ -92,7 +96,7 @@ map $http_upgrade $cc_web_connection {
 }
 
 server {
-    listen 443 ssl;
+    listen ${publicUrl.port || '443'} ssl;
     server_name ${domain.data};
     # Replace these with the public domain's certificate and private key.
     ssl_certificate /etc/nginx/tls/fullchain.pem;

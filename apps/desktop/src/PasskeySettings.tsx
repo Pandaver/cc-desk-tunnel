@@ -114,7 +114,7 @@ export function PasskeyDialog({
       if (browser) {
         const url = new URL(value.url);
         if (url.origin !== location.origin)
-          throw new Error('访问域名已变化，请从新的服务端地址重新登录。');
+          throw new Error('Web 对外地址已变化，请从新的服务端地址重新登录。');
         const grant = new URLSearchParams(url.hash.slice(1)).get('passkey-register');
         if (!grant) throw new Error('注册授权不完整，请重新设置。');
         await registerPasskey(grant, signal);

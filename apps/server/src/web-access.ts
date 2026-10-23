@@ -10,6 +10,7 @@ import {
   webCommandSchema,
   webLoginSchema,
   webStoredSettingsSchema,
+  webDomainSchema,
 } from '@cc-desk-tunnel/protocol';
 import type {
   ServerMessage,
@@ -31,6 +32,7 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const defaults = {
   enabled: false,
   domain: '',
+  publicOrigin: '',
   path: '',
   idleMinutes: 120,
   proxyEnabled: false,
@@ -81,9 +83,7 @@ export type WebContext = {
   desktop: boolean;
   address: string;
   sessionId?: string;
-  origin?: string;
   connectionId?: string;
-  proxied?: boolean;
 };
 const ip = (address: string) =>
   address.startsWith('::ffff:') && isIP(address.slice(7)) === 4
@@ -121,8 +121,6 @@ export class WebAccess {
   private closed = false;
   private accessRevision = 0;
   private index?: Buffer;
-  // The last address that sent X-Real-IP without being trusted to.
-  private forwardedBy?: string;
   readonly serverDeviceId: string;
   // Browser sign-ins are counted apart from desktops: mistakes typed in a browser never lock out a desktop
   // that shares its address.
@@ -190,7 +188,6 @@ export class WebAccess {
       createdAt: new Date(row.created).toISOString(),
       lastActiveAt: new Date(row.active).toISOString(),
       expiresAt: new Date(row.expires).toISOString(),
-      ...(row.passkey_id ? { passkeyId: row.passkey_id } : {}),
     };
   }
   private getSession(id: string) {
@@ -207,7 +204,7 @@ export class WebAccess {
     );
   }
   private disconnect(id: string) {
-    for (const socket of this.sockets.get(id) ?? []) socket.close(4001, 'Login session ended');
+    for (const socket of this.sockets.get(id) ?? []) socket.close(4001, 'Browser session ended');
     this.sockets.delete(id);
   }
   private revoke(id: string, afterReply = false) {
@@ -226,7 +223,7 @@ export class WebAccess {
   private schedule() {
     clearTimeout(this.timer);
     this.timer = undefined;
-    if (!this.sockets.size) return;
+    if (!this.enabled || !this.sockets.size) return;
     let next = Infinity;
     for (const id of this.sockets.keys()) {
       const row = this.getSession(id);
@@ -279,10 +276,7 @@ export class WebAccess {
 
   // Whether the request came through the deployment's proxy or one the user named.
   proxied(request: IncomingMessage) {
-    return this.trustedProxy(request.socket.remoteAddress);
-  }
-  trustedProxy(address: string | undefined) {
-    const remote = ip(address ?? '');
+    const remote = ip(request.socket.remoteAddress ?? '');
     return (
       !!this.options.reverseProxy ||
       (this.settings.proxyEnabled && this.settings.trustedProxies.includes(remote))
@@ -304,6 +298,7 @@ export class WebAccess {
     const protocol = this.https ? 'https:' : 'http:';
     try {
       const url = new URL(`${protocol}//${host}`);
+      if (this.settings.publicOrigin && url.origin !== this.settings.publicOrigin) return undefined;
       if (this.settings.domain && url.hostname !== this.settings.domain) return undefined;
       if (
         protocol === 'http:' &&
@@ -360,29 +355,10 @@ export class WebAccess {
     const age = Math.max(0, Math.floor((expiry - this.now()) / 1000));
     return `${this.cookieName}=${secret}; Path=${this.prefix}/; HttpOnly; SameSite=Strict; Max-Age=${age}${this.https ? '; Secure' : ''}`;
   }
-  private url(origin?: string) {
-    if (!origin) return undefined;
-    try {
-      const url = new URL(origin);
-      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password)
-        return undefined;
-      if (this.settings.domain) url.hostname = this.settings.domain;
-      url.pathname = `${this.prefix}/`;
-      url.search = '';
-      url.hash = '';
-      return url.toString();
-    } catch {
-      return undefined;
-    }
+  private url() {
+    return this.settings.publicOrigin ? `${this.settings.publicOrigin}${this.prefix}/` : undefined;
   }
-  // Whether the certificate a browser at this origin gets is self-signed. Behind a proxy it gets the proxy's.
-  selfSigned(origin?: string, proxied = false) {
-    return (
-      !proxied &&
-      this.certificates.selfSigned(origin ? new URL(origin).hostname : this.settings.domain)
-    );
-  }
-  state(origin?: string, proxied = false): WebSettingsState {
+  state(): WebSettingsState {
     this.sweep();
     return {
       ...this.settings,
@@ -392,26 +368,20 @@ export class WebAccess {
           .prepare('SELECT * FROM web_sessions ORDER BY created DESC')
           .all() as StoredSession[]
       ).map((row) => this.publicSession(row)),
-      url: this.url(origin),
-      selfSigned: this.selfSigned(this.url(origin), proxied),
+      url: this.url(),
       passkeys: this.passkeys.list(this.settings.domain),
-      passkeyAvailable: !this.passkeyUnavailable(origin, proxied),
-      ...(this.passkeyUnavailable(origin, proxied)
-        ? { passkeyUnavailableReason: this.passkeyUnavailable(origin, proxied) }
-        : {}),
-      ...(this.forwardedBy ? { forwardedBy: this.forwardedBy } : {}),
+      passkeyAvailable: !this.passkeyUnavailable(),
+      ...(this.passkeyUnavailable() ? { passkeyUnavailableReason: this.passkeyUnavailable() } : {}),
     };
   }
-  private loginState(request: IncomingMessage, row?: StoredSession): WebLoginState {
-    const origin = this.requestOrigin(request);
+  private loginState(row?: StoredSession): WebLoginState {
     return {
       authenticated: !!row,
       ...(row ? { session: this.publicSession(row) } : {}),
       totpEnabled: !!this.record().totp_secret,
-      selfSigned: this.selfSigned(origin, this.proxied(request)),
-      url: this.url(origin),
+      url: this.url(),
       passkeyAvailable:
-        !this.passkeyUnavailable(origin, this.proxied(request)) &&
+        !this.passkeyUnavailable() &&
         this.passkeys.list(this.settings.domain).some((key) => key.available),
     };
   }
@@ -450,28 +420,18 @@ export class WebAccess {
     this.proof(proof, context.address);
   }
 
-  private passkeyUnavailable(origin?: string, proxied = false) {
+  private passkeyUnavailable() {
     if (!this.enabled) return '请先启用 Web 访问。';
-    if (!this.settings.domain) return '请先设置固定的访问域名。';
-    if (!origin || !this.https) return '通行密钥需要 HTTPS 访问地址。';
-    try {
-      const actual = new URL(origin);
-      if (actual.protocol !== 'https:' || actual.hostname !== this.settings.domain)
-        return '请通过配置的访问域名连接服务器，再设置通行密钥。';
-    } catch {
-      return '通行密钥访问地址无效。';
-    }
-    if (this.selfSigned(this.url(origin), proxied))
-      return '请为访问域名配置浏览器信任的 HTTPS 证书。';
+    if (!this.settings.publicOrigin) return '请先设置 Web 对外地址。';
+    if (!this.settings.domain) return '通行密钥需要使用域名的 Web 对外地址。';
+    // This is the configured destination, not evidence that its certificate is trusted. The browser
+    // enforces its actual secure context; WebAuthn verifies the exact configured origin and RP ID.
     return undefined;
   }
-  private passkeyEntry(origin?: string, proxied = false): PasskeyEntry {
-    const reason = this.passkeyUnavailable(origin, proxied);
+  private passkeyEntry(): PasskeyEntry {
+    const reason = this.passkeyUnavailable();
     if (reason) fail('passkey_unavailable', reason);
-    const url = new URL(this.url(origin)!);
-    if (url.protocol !== 'https:' || url.hostname !== this.settings.domain)
-      fail('passkey_unavailable', '通行密钥访问地址无效。');
-    return { rpId: this.settings.domain, origin: url.origin, url: url.toString() };
+    return { rpId: this.settings.domain, origin: this.settings.publicOrigin, url: this.url()! };
   }
   private registrationOwner(context: WebContext) {
     return (
@@ -500,8 +460,7 @@ export class WebAccess {
           ...this.passkeys.start(
             command.name,
             this.registrationOwner(context),
-            this.passkeyEntry(context.origin, context.proxied),
-            context.sessionId,
+            this.passkeyEntry(),
             this.registrationExpiry(context),
           ),
         };
@@ -567,30 +526,31 @@ export class WebAccess {
         }
         return { type: 'web.certificate.state', requestId, ...this.certificates.state() };
     }
-    return {
-      type: 'web.settings.state',
-      requestId,
-      values: {
-        ...this.state(context.origin, context.proxied),
-        ...(context.sessionId ? { currentSessionId: context.sessionId } : {}),
-      },
-    };
+    return { type: 'web.settings.state', requestId, values: this.state() };
   }
   private update(values: Partial<Settings>, proof: WebProof | undefined, context: WebContext) {
     if (!context.desktop && Object.keys(values).some((key) => key !== 'path'))
       fail('web_desktop_only', '此设置需要在桌面客户端修改。');
     this.reauthenticate(proof, context);
     const next = { ...this.settings, ...values };
+    if (values.publicOrigin !== undefined) {
+      const hostname = next.publicOrigin ? new URL(next.publicOrigin).hostname : '';
+      next.domain = webDomainSchema.safeParse(hostname).success ? hostname : '';
+    }
     this.certificates.validateDomain(next.domain);
     const proxies = next.trustedProxies.map(ip);
     if (proxies.some((value) => !isIP(value)) || (next.proxyEnabled && !proxies.length))
       fail('web_invalid_settings', '请填写可信反向代理的 IP 地址。');
     if (next.enabled && !this.https && !loopback(this.options.host ?? '127.0.0.1'))
       fail('web_https_required', '公网 Web 访问需要 HTTPS。');
-    if (next.domain && !this.https) fail('web_https_required', '域名访问需要 HTTPS。');
+    if ((next.domain || next.publicOrigin) && !this.https)
+      fail('web_https_required', 'Web 对外地址需要 HTTPS。');
     next.trustedProxies = [...new Set(proxies)];
     const domainChanged = next.domain !== this.settings.domain;
-    const moved = domainChanged || next.path !== this.settings.path;
+    const moved =
+      domainChanged ||
+      next.publicOrigin !== this.settings.publicOrigin ||
+      next.path !== this.settings.path;
     const trustChanged =
       next.proxyEnabled !== this.settings.proxyEnabled ||
       JSON.stringify(next.trustedProxies) !== JSON.stringify(this.settings.trustedProxies);
@@ -708,9 +668,6 @@ export class WebAccess {
   // Answers the requests of the Web entry; false leaves the request to the caller.
   async handle(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
     if (!this.enabled) return false;
-    // Where a proxy connects from is not always what one expects; the desktop settings show it.
-    if (request.headers['x-real-ip'] !== undefined && !this.proxied(request))
-      this.forwardedBy = ip(request.socket.remoteAddress ?? '');
     this.headers(response);
     if (!this.requestOrigin(request)) return this.empty(response, 404);
     const pathname = (request.url ?? '').split('?')[0];
@@ -728,7 +685,7 @@ export class WebAccess {
   private api(route: string, request: IncomingMessage, response: ServerResponse) {
     if (!this.trusted(request, request.method !== 'GET')) return this.empty(response, 403);
     if (route === '/api/session' && request.method === 'GET')
-      return this.json(response, 200, this.loginState(request, this.cookieSession(request)));
+      return this.json(response, 200, this.loginState(this.cookieSession(request)));
     if (route === '/api/logout' && request.method === 'POST') {
       const row = this.cookieSession(request);
       if (row) this.revoke(row.id);
@@ -741,6 +698,7 @@ export class WebAccess {
     return this.empty(response, 404);
   }
   private async login(request: IncomingMessage, response: ServerResponse) {
+    const revision = this.accessRevision;
     const address = this.address(request);
     const wait = this.throttle.blocked(address, this.now());
     if (wait || !this.throttle.enter(address)) {
@@ -750,6 +708,13 @@ export class WebAccess {
     try {
       const body = webLoginSchema.safeParse(await this.body(request));
       if (!body.success) fail('web_bad_request', '登录请求格式无效。');
+      if (
+        !this.enabled ||
+        revision !== this.accessRevision ||
+        !this.trusted(request) ||
+        this.route(request) !== '/api/login'
+      )
+        fail('web_access_changed', '访问设置已更改，请重新打开登录页。');
       this.proof(body.data, address);
       return this.signIn(request, response);
     } catch (error) {
@@ -799,7 +764,7 @@ export class WebAccess {
       );
     if (previous) this.revoke(previous.id);
     response.setHeader('Set-Cookie', this.cookie(secret, row.expires));
-    return this.json(response, 200, this.loginState(request, row));
+    return this.json(response, 200, this.loginState(row));
   }
   private async passkeyApi(route: string, request: IncomingMessage, response: ServerResponse) {
     const address = this.address(request);
@@ -810,7 +775,7 @@ export class WebAccess {
     }
     try {
       const revision = this.accessRevision;
-      const entry = this.passkeyEntry(this.requestOrigin(request), this.proxied(request));
+      const entry = this.passkeyEntry();
       if (route.endsWith('/options')) {
         const wait = this.passkeys.issue(address);
         if (wait) {
@@ -825,7 +790,7 @@ export class WebAccess {
           this.route(request) !== `/api/passkey/${route}`
         )
           fail('passkey_expired', '访问设置已更改，请重新开始验证。');
-        const current = this.passkeyEntry(this.requestOrigin(request), this.proxied(request));
+        const current = this.passkeyEntry();
         if (current.url !== entry.url) fail('passkey_expired', '访问地址已更改，请重新开始验证。');
       };
       const input: unknown = await this.body(request, 64 * 1024);

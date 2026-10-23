@@ -7,12 +7,12 @@ import { proxyCertificateName, proxyConfiguration, proxyUpstream } from './rever
 
 export default function ReverseProxyHelp({
   connectionUrl,
-  domain,
+  publicOrigin,
   path,
   certificate,
 }: {
   connectionUrl: string;
-  domain: string;
+  publicOrigin: string;
   path: string;
   certificate: WebCertificateState | null;
 }) {
@@ -27,7 +27,7 @@ export default function ReverseProxyHelp({
   let config = '';
   let error = '';
   try {
-    config = proxyConfiguration(kind, { domain, path, upstream, serverName, trustFile });
+    config = proxyConfiguration(kind, { publicOrigin, path, upstream, serverName, trustFile });
   } catch (reason) {
     error = reason instanceof Error ? reason.message : '请检查配置。';
   }
@@ -46,8 +46,7 @@ export default function ReverseProxyHelp({
       </summary>
       <div className="web-proxy-fields">
         <p className="muted">
-          先保存访问域名、路径和反向代理
-          IP，再在反代机器部署配置。以下字段仅用于生成示例，不修改服务端。
+          先保存 Web 对外地址与路径，再在反代机器部署配置。以下字段仅用于生成示例，不修改服务端。
         </p>
         <label>
           上游地址
@@ -58,7 +57,8 @@ export default function ReverseProxyHelp({
             spellCheck={false}
           />
           <small className="muted">
-            已按当前连接填写；请核对反代机器可达的后端地址，避免填写新域名造成循环转发。
+            仅按桌面连接提供示例，请改为反代机器可达的后端地址。此处不是 Web
+            对外地址，避免填入反代入口造成循环。
           </small>
         </label>
         {!httpUpstream && (

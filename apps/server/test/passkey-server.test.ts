@@ -47,9 +47,12 @@ async function serverFixture(t: TestContext, selfSigned = false) {
     });
     clients.push(socket);
     const messages: ServerMessage[] = [];
-    socket.on('message', (data) =>
-      messages.push(serverMessageSchema.parse(JSON.parse(data.toString()))),
-    );
+    let browserMetadata: object | undefined;
+    socket.on('message', (data) => {
+      const message = JSON.parse(data.toString());
+      if (message.type === 'ready') browserMetadata = message.browser;
+      messages.push(serverMessageSchema.parse(message));
+    });
     const wait = async (predicate: (message: ServerMessage) => boolean) => {
       const deadline = Date.now() + 3000;
       while (Date.now() < deadline) {
@@ -73,6 +76,7 @@ async function serverFixture(t: TestContext, selfSigned = false) {
     return {
       socket,
       first,
+      browserMetadata,
       request: async (command: object) => {
         const requestId = randomUUID();
         socket.send(JSON.stringify({ ...command, requestId }));
@@ -121,7 +125,7 @@ async function serverFixture(t: TestContext, selfSigned = false) {
   assert.equal(admin.first.type, 'ready');
   await admin.request({
     type: 'web.settings.update',
-    values: { enabled: true, domain: 'web.example.test' },
+    values: { enabled: true, publicOrigin: origin },
   });
   return { admin, client, http, api, origin };
 }
@@ -156,51 +160,52 @@ async function fixture(t: TestContext) {
   };
 }
 
-test('proxy trust changes take effect immediately on an existing desktop WebSocket without trusting forwarded client addresses', async (t) => {
+test('the configured public origin remains independent of desktop TLS and proxy trust', async (t) => {
   const f = await serverFixture(t, true);
   const peer = await f.client(
     { type: 'auth', token },
-    { 'X-Real-IP': '192.0.2.10', 'X-Forwarded-For': '192.0.2.10' },
+    { Host: '192.0.2.100:8787', 'X-Real-IP': '192.0.2.10', 'X-Forwarded-For': '192.0.2.10' },
   );
   assert.equal(peer.first.type, 'ready');
-  async function trust(values: object, available: boolean) {
+  async function trust(values: object) {
     const reply = await peer.request({ type: 'web.settings.update', values });
     assert.equal(reply.type, 'web.settings.state');
     assert.equal(
       reply.values.passkeyAvailable,
-      available,
-      'the update reply uses the new trust state',
+      true,
+      'the configured public entry does not depend on how the desktop connected',
     );
-    assert.equal(reply.values.selfSigned, !available);
+    assert.equal(Object.hasOwn(reply.values, 'selfSigned'), false);
+    const certificate = await peer.request({ type: 'web.certificate.get' });
+    assert.equal(certificate.type, 'web.certificate.state');
+    assert.equal(certificate.selfSigned, true);
     const state = await peer.request({ type: 'web.settings.get' });
     assert.equal(state.type, 'web.settings.state');
-    assert.equal(state.values.passkeyAvailable, available);
+    assert.equal(state.values.passkeyAvailable, true);
+    assert.equal(state.values.url, f.origin + '/');
     const registration = await peer.request({ type: 'web.passkeys.start', name: '动态代理信任' });
-    if (available) {
-      assert.equal(registration.type, 'web.passkey.registration');
-      assert.equal(new URL(registration.url!).origin, f.origin);
-    } else {
-      assert.equal(registration.type, 'response');
-      assert.equal(registration.ok, false);
-      assert.equal(registration.code, 'passkey_unavailable');
-    }
+    assert.equal(registration.type, 'web.passkey.registration');
+    assert.equal(new URL(registration.url!).origin, f.origin);
     assert.equal(peer.socket.readyState, WebSocket.OPEN);
   }
-  await trust({ proxyEnabled: true, trustedProxies: ['192.0.2.10'] }, false);
-  await trust({ trustedProxies: ['127.0.0.1'] }, true);
-  await trust({ proxyEnabled: false }, false);
-  await trust({ proxyEnabled: true }, true);
-  await trust({ trustedProxies: ['192.0.2.10'] }, false);
+  await trust({ proxyEnabled: true, trustedProxies: ['192.0.2.10'] });
+  await trust({ trustedProxies: ['127.0.0.1'] });
+  await trust({ proxyEnabled: false });
+  await trust({ proxyEnabled: true });
+  await trust({ trustedProxies: ['192.0.2.10'] });
 });
 
 test('a service-credential desktop manages Web Passkeys and revoking one closes only its browser connection', async (t) => {
   const f = await fixture(t);
   const browser = await f.client({ type: 'web.auth' }, { Cookie: f.cookie }, true);
   assert.equal(browser.first.type, 'ready');
+  assert.deepEqual(browser.browserMetadata, {
+    sessionId: f.sessionId,
+    serverDeviceId: browser.first.browser?.serverDeviceId,
+  });
   const state = await browser.request({ type: 'web.settings.get' });
   assert.equal(state.type, 'web.settings.state');
-  assert.equal(state.values.currentSessionId, f.sessionId);
-  assert.equal(state.values.sessions[0].passkeyId, f.passkeyId);
+  assert.equal(state.values.sessions[0].id, f.sessionId);
   const denied = await browser.request({
     type: 'web.passkeys.rename',
     passkeyId: f.passkeyId,

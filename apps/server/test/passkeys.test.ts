@@ -215,10 +215,10 @@ test('in-flight signature checks cannot outlive cancellation, expiry, key remova
 
 test('registration lifetime never exceeds its granting browser session and revocation invalidates its grant', async (t) => {
   const f = fixture(t);
-  const pending = f.keys.start('即将到期', 'browser', entry, 'browser', f.now() + 1000);
+  const pending = f.keys.start('即将到期', 'browser', entry, f.now() + 1000);
   f.keys.revokeOwner('browser');
   assert.equal(f.keys.status(pending.registrationId, 'browser').status, 'expired');
-  const expiring = f.keys.start('到期', 'browser', entry, 'browser', f.now() + 1000);
+  const expiring = f.keys.start('到期', 'browser', entry, f.now() + 1000);
   f.advance(1001);
   assert.equal(f.keys.status(expiring.registrationId, 'browser').status, 'expired');
 });

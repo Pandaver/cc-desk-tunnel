@@ -3604,7 +3604,7 @@ dialog {
   width: 100%;
   min-width: 0;
 }
-.web-trust-warning {
+.web-context-warning {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -3615,26 +3615,26 @@ dialog {
   border-bottom: 1px solid var(--line);
   font-size: 12px;
 }
-.web-trust-warning svg {
+.web-context-warning svg {
   flex-shrink: 0;
   width: 17px;
   height: 17px;
   color: var(--warn);
 }
-.shell.web-self-signed {
+.shell.web-insecure-context {
   grid-template-rows: var(--bar) auto minmax(0, 1fr);
 }
-.shell > .web-trust-warning {
+.shell > .web-context-warning {
   grid-column: 1 / -1;
   grid-row: 2;
   margin: 0;
 }
-.web-self-signed > .titlebar {
+.web-insecure-context > .titlebar {
   grid-row: 1;
 }
-.web-self-signed > .rail,
-.web-self-signed > .sidebar,
-.web-self-signed > .workspace {
+.web-insecure-context > .rail,
+.web-insecure-context > .sidebar,
+.web-insecure-context > .workspace {
   grid-row: 3;
 }
 .web-row-actions {
@@ -3741,10 +3741,14 @@ dialog:has(.web-settings-form) {
 .web-settings-form .dialog-actions {
   margin-top: 24px;
 }
-.web-path-input {
+.web-path-input,
+.web-origin-input {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+.web-origin-input > span {
+  flex: none;
 }
 .web-totp-setup {
   display: grid;
@@ -3798,10 +3802,10 @@ dialog:has(.web-settings-form) {
     flex-wrap: wrap;
     gap: 12px;
   }
-  .web-self-signed > .sidebar {
+  .web-insecure-context > .sidebar {
     top: calc(var(--bar) + var(--web-warning-height, 56px));
   }
-  .web-trust-warning {
+  .web-context-warning {
     min-height: 56px;
   }
 }
