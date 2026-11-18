@@ -150,8 +150,12 @@ function setup(t: TestContext) {
 
 // Max keeps a weekly window for Fable alone: a session on Opus is told that one, under its model's name.
 test('the weekly quota of one model is the one for the session’s model, or else the fullest the plan keeps', (t) => {
-  const { session, status, facts, last } = setup(t);
-  const window = (name: string, utilization: number) => ({ name, utilization, resetsAt: null });
+  const { session, pushes, status, facts, last } = setup(t);
+  const window = (name: string, utilization: number) => ({
+    name,
+    utilization,
+    resetsAt: name === 'seven_day:Fable' ? '2026-11-23T20:00:00Z' : null,
+  });
   facts.metrics = {
     type: 'native.metrics',
     context: { model: 'claude-opus-5-5' },
@@ -167,11 +171,14 @@ test('the weekly quota of one model is the one for the session’s model, or els
     },
   } as unknown as NativeMetrics;
   session.push = 'always';
+  pushes.update({ timeZone: 'Asia/Shanghai' });
   status('completed');
   assert.deepEqual(
     [last().model, last().quota5h, last().quotaWeek, last().quotaModel, last().quotaModelName],
     ['Opus 5.5', '32%', '58%', '71%', 'Fable'],
   );
+  // Where the user is, with the day: the week resets on another one.
+  assert.deepEqual([last().quotaModelReset, last().quotaWeekReset], ['11-24 04:00', undefined]);
 });
 
 test('an approval of a session not subscribed to is pushed after the delay, unless answered first', (t) => {

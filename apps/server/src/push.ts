@@ -272,13 +272,18 @@ function readings(metrics: NativeMetrics | null | undefined, timeZone: string) {
   const own =
     perModel.find((window) => family && modelWindow(window.name)!.toLowerCase() === family) ??
     perModel[0];
+  const week = read.find((window) => window.name === 'seven_day');
+  const reset = (window?: (typeof read)[number]) =>
+    window?.resetsAt ? when(window.resetsAt, timeZone) : undefined;
   return {
     model: model ? modelName(model) : undefined,
     quota5h: used(hour),
-    quota5hReset: hour?.resetsAt ? when(hour.resetsAt, timeZone) : undefined,
-    quotaWeek: used(read.find((window) => window.name === 'seven_day')),
+    quota5hReset: reset(hour),
+    quotaWeek: used(week),
+    quotaWeekReset: reset(week),
     quotaModel: used(own),
     quotaModelName: own && modelWindow(own.name),
+    quotaModelReset: reset(own),
   };
 }
 
