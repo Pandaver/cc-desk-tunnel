@@ -593,8 +593,6 @@ export function createProxyServer(options: ServerOptions) {
     record(run.sessionId, run.id, open);
   }
   function emit(run: Run, payload: EventPayload) {
-    const before =
-      payload.type === 'run.status' ? store.get(run.sessionId).session.activeRun : null;
     // A background task's word of itself is for whoever is watching now.
     if (payload.type === 'native.progress') {
       broadcast(
@@ -624,7 +622,7 @@ export function createProxyServer(options: ServerOptions) {
     if (payload.type === 'native.compact') store.compacted(run.sessionId);
     // The service's own compactions of idle sessions are nobody's turn. A `once` subscription the turn ends goes
     // with the session's update below.
-    if (run.connectionId !== serverDevice.id) pushes.observe(run.sessionId, payload, before);
+    if (run.connectionId !== serverDevice.id) pushes.observe(run.sessionId, payload);
     if (payload.type === 'run.status') updated(run.sessionId);
   }
   // The CLI reports its model requests a moment after the turn ends. Wait for as many as the turn made, then

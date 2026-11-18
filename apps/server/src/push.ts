@@ -249,28 +249,28 @@ export class Pushes {
     if (failure) throw new DomainError('push_failed', `发送失败：${failure}`);
   }
 
-  // Each payload a chat run emits, once it is recorded; `before` is the session's run as it was before it.
-  observe(sessionId: string, payload: EventPayload, before: Session['activeRun']) {
+  // Each payload a chat run emits, once it is recorded. Unlike the window's own notices, a run is not done while
+  // only background tasks go on: Claude mostly waits there for a build or tests and goes on by itself once they end,
+  // and a `once` subscription spent on that pause would miss the end it was for. A run held open by a task that never
+  // ends, such as a server kept in a background shell, is not pushed as done; its approvals and questions still are.
+  observe(sessionId: string, payload: EventPayload) {
     if (payload.type === 'run.error') this.errors.set(sessionId, payload.message);
     if (payload.type === 'approval.resolved') this.unwait(sessionId);
     if (payload.type !== 'run.status') return;
     this.unwait(sessionId);
     const session = this.hooks.session(sessionId);
     if (!session) return;
-    const terminal = payload.status !== 'running' && payload.status !== 'awaiting_approval';
-    // Claude's turn is over once only background tasks go on; their ending without another turn is no news.
-    const background = before?.waiting === 'background';
-    const ended = (terminal && !background) || (payload.waiting === 'background' && !background);
+    const ended = payload.status !== 'running' && payload.status !== 'awaiting_approval';
     const kind: PushKind | undefined =
       payload.status === 'awaiting_approval'
         ? payload.waiting === 'question'
           ? 'question'
           : 'approval'
-        : !ended || payload.status === 'cancelled'
-          ? undefined
+        : payload.status === 'completed'
+          ? 'done'
           : payload.status === 'failed'
             ? 'failed'
-            : 'done';
+            : undefined;
     if (kind && session.push) this.push(session, kind);
     else if ((kind === 'approval' || kind === 'question') && this.settings.fallback) {
       if (!this.settings.delayMinutes) this.push(session, kind);
@@ -284,7 +284,7 @@ export class Pushes {
         this.waits.set(sessionId, wait);
       }
     }
-    if (terminal) this.errors.delete(sessionId);
+    if (ended) this.errors.delete(sessionId);
     if (ended && session.push === 'once') this.hooks.ended(sessionId);
   }
   close() {

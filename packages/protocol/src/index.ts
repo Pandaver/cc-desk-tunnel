@@ -149,7 +149,7 @@ export type IdleCompaction = z.infer<typeof idleCompactionSchema>;
 // they go; what a channel is given to send there is never read back, by the desktop or a browser.
 export const pushKindSchema = z.enum(['approval', 'question', 'done', 'failed']);
 export type PushKind = z.infer<typeof pushKindSchema>;
-// `once` lasts until the session's turn now going, or the next one, ends.
+// `once` lasts until the session's run now going, or the next one, ends; background tasks it waits on are part of it.
 export const pushModeSchema = z.enum(['off', 'once', 'always']);
 export type PushMode = z.infer<typeof pushModeSchema>;
 const pushUrl = z.url({ protocol: /^https?$/ }).max(2048);
