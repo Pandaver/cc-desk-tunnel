@@ -64,6 +64,24 @@ test('each channel sends its own template: a webhook its JSON, a card its button
     ),
   );
   assert.equal(telegram.text.split('\n')[1], '<i>&quot;引号&quot; &lt;b&gt;</i>');
+
+  // PushPlus shows the title itself; its page escapes the values, and no channel is its own default.
+  const pushplus = {
+    kind: 'pushplus',
+    token: 'a'.repeat(32),
+    ...pushDefaults('pushplus'),
+  } as never;
+  const page = body(pushRequest(pushplus, values));
+  assert.deepEqual(
+    [page.template, page.title, 'channel' in page],
+    ['html', '【任务完成】"引号" <b>', false],
+  );
+  assert.ok(page.content.includes('&quot;引号&quot; &lt;b&gt;'));
+  assert.equal(page.content.includes('⚠️'), false);
+  assert.equal(
+    body(pushRequest({ ...(pushplus as object), format: 'text' } as never, values)).template,
+    'txt',
+  );
 });
 
 test('a channel is changed without what it sends with, which is kept unless taken away and never read back', (t) => {

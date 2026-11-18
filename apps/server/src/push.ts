@@ -102,7 +102,8 @@ export function pushRequest(
     const body = fillPush(config.body, values, (value) => JSON.stringify(value).slice(1, -1));
     return { url, init: { method: 'POST', headers: { 'content-type': 'application/json' }, body } };
   }
-  const escaped = config.kind === 'telegram' && config.format === 'html';
+  const escaped =
+    (config.kind === 'telegram' || config.kind === 'pushplus') && config.format === 'html';
   const title =
     renderPush(config.title, values).split('\n')[0] || `【${values.event}】${values.session}`;
   const body = renderPush(config.body, values, escaped ? html : undefined);
@@ -165,6 +166,15 @@ export function pushRequest(
           ? { parse_mode: 'HTML', text: [`<b>${html(title)}</b>`, body].filter(Boolean).join('\n') }
           : { text: plain }),
       });
+    case 'pushplus':
+      return json('https://www.pushplus.plus/send', {
+        token: config.token,
+        title,
+        content: body,
+        template: config.format === 'text' ? 'txt' : config.format,
+        ...(config.channel ? { channel: config.channel } : {}),
+        ...(config.topic ? { topic: config.topic } : {}),
+      });
     case 'bark': {
       const click = address(config.clickUrl, values);
       return json(config.url, {
@@ -177,7 +187,7 @@ export function pushRequest(
   }
 }
 
-// The robots answer a refused message with HTTP 200 and a code of their own in the body.
+// The robots, and PushPlus, answer a refused message with HTTP 200 and a code of their own in the body.
 async function deliver(config: PushChannelConfig, values: PushValues) {
   const { url, init } = pushRequest(config, values);
   let response: Response;
@@ -198,7 +208,9 @@ async function deliver(config: PushChannelConfig, values: PushValues) {
   const refused =
     config.kind === 'dingtalk' || config.kind === 'wecom'
       ? reply?.errcode !== 0
-      : config.kind === 'feishu' && reply?.code !== 0;
+      : config.kind === 'feishu'
+        ? reply?.code !== 0
+        : config.kind === 'pushplus' && reply?.code !== 200;
   if (!response.ok || refused)
     throw new Error(
       `${response.ok ? '' : `HTTP ${response.status} `}${reply?.errmsg ?? reply?.msg ?? body.slice(0, 200)}`.trim(),

@@ -124,7 +124,7 @@ export const sections: {
     name: '外部推送',
     group: '服务端',
     icon: BellRing,
-    words: '通知 订阅 钉钉 飞书 企业微信 Telegram Bark Webhook 机器人 手机',
+    words: '通知 订阅 钉钉 飞书 企业微信 Telegram PushPlus Bark Webhook 机器人 手机 模板',
   },
   {
     id: 'web',

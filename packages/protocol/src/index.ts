@@ -158,6 +158,7 @@ export const pushChannelKindSchema = z.enum([
   'wecom',
   'telegram',
   'bark',
+  'pushplus',
   'webhook',
 ]);
 export type PushChannelKind = z.infer<typeof pushChannelKindSchema>;
@@ -227,6 +228,22 @@ export const pushChannelConfigSchema = z.discriminatedUnion('kind', [
       clickUrl: pushLink,
     })
     .strict(),
+  // PushPlus sends where its account says (`channel` empty: its WeChat account), to a group of its users with `topic`.
+  // Its own page shows the title, so the text does not repeat it.
+  z
+    .object({
+      kind: z.literal('pushplus'),
+      token: z
+        .string()
+        .trim()
+        .regex(/^[\w-]{16,64}$/),
+      channel: z.enum(['', 'cp', 'mail', 'extension', 'app']),
+      topic: z.string().trim().max(64),
+      format: z.enum(['html', 'markdown', 'text']),
+      title: pushTitle,
+      body: pushBody,
+    })
+    .strict(),
   // Any other service: the body, JSON with the variables in it, is posted; without one the address is fetched with
   // them filled into it.
   z.object({ kind: z.literal('webhook'), url: pushUrl, body: pushBody }).strict(),
@@ -240,6 +257,7 @@ export const pushSecrets: Record<PushChannelKind, readonly string[]> = {
   wecom: ['url'],
   telegram: ['token'],
   bark: ['url'],
+  pushplus: ['token'],
   webhook: ['url'],
 };
 // A channel as a window gives it: a field of `pushSecrets` left out or empty keeps what it was, and null takes an
@@ -343,8 +361,37 @@ export const pushFormats: Record<PushChannelKind, readonly { value: string; labe
     { value: 'text', label: '纯文本' },
   ],
   bark: [],
+  pushplus: [
+    { value: 'html', label: 'HTML' },
+    { value: 'markdown', label: 'Markdown' },
+    { value: 'text', label: '纯文本' },
+  ],
   webhook: [],
 };
+// A page for a channel that shows HTML. Each line is one element whole, so that a line of variables that have no
+// value, as the error of a turn that did not fail, goes without leaving a tag open; a bar is as wide as its figure.
+const pushPage = [
+  `<div style="max-width:480px;margin:0 auto;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden">`,
+  `<div style="background:linear-gradient(135deg,#2563eb,#7c3aed);color:#fff;padding:18px 20px"><div style="font-size:13px;opacity:.85">{event}</div><div style="font-size:18px;font-weight:600;margin-top:4px">{session}</div></div>`,
+  `<div style="padding:14px 20px 4px;font-size:14px;color:#374151;line-height:2">`,
+  `<div>🖥️ 设备：{device}</div>`,
+  `<div>📁 项目：{project}</div>`,
+  `<div>🤖 模型：{model}</div>`,
+  `<div>⏱️ 用时：{duration}</div>`,
+  `<div style="margin:6px 0;padding:8px 12px;background:#fef2f2;border-left:3px solid #dc2626;color:#b91c1c;border-radius:4px;line-height:1.6">⚠️ {error}</div>`,
+  `</div>`,
+  `<div style="padding:4px 20px 14px;font-size:12px;color:#6b7280">`,
+  `<div style="display:flex;justify-content:space-between;margin-top:8px"><span>5 小时额度 · {quota5hReset} 重置</span><b style="color:#374151">{quota5h}</b></div>`,
+  `<div style="height:6px;background:#e5e7eb;border-radius:3px;margin-top:4px"><div style="width:{quota5h};height:6px;background:#2563eb;border-radius:3px"></div></div>`,
+  `<div style="display:flex;justify-content:space-between;margin-top:10px"><span>每周额度</span><b style="color:#374151">{quotaWeek}</b></div>`,
+  `<div style="height:6px;background:#e5e7eb;border-radius:3px;margin-top:4px"><div style="width:{quotaWeek};height:6px;background:#7c3aed;border-radius:3px"></div></div>`,
+  `<div style="display:flex;justify-content:space-between;margin-top:10px"><span>当前模型每周额度</span><b style="color:#374151">{quotaModel}</b></div>`,
+  `<div style="height:6px;background:#e5e7eb;border-radius:3px;margin-top:4px"><div style="width:{quotaModel};height:6px;background:#0891b2;border-radius:3px"></div></div>`,
+  `</div>`,
+  `<div style="padding:0 20px 18px"><a href="{url}" style="display:block;text-align:center;background:#2563eb;color:#fff;text-decoration:none;padding:11px;border-radius:8px;font-size:15px">打开会话</a></div>`,
+  `<div style="padding:10px 20px;background:#f9fafb;color:#9ca3af;font-size:12px;border-top:1px solid #f3f4f6">CC Desk Tunnel · {time}</div>`,
+  `</div>`,
+].join('\n');
 // What a channel of `kind` says when the user has not written it: in `format`, or its first.
 export function pushDefaults(
   kind: PushChannelKind,
@@ -365,6 +412,14 @@ export function pushDefaults(
   if (kind === 'webhook')
     return { body: '{"title": "【{event}】{session}", "text": "设备：{device}", "url": "{url}"}' };
   if (kind === 'bark') return { title, body, clickUrl: '{url}' };
+  if (kind === 'pushplus')
+    return {
+      format: format!,
+      title,
+      body: format === 'html' ? pushPage : body + link,
+      channel: '',
+      topic: '',
+    };
   return {
     format: format!,
     title,
