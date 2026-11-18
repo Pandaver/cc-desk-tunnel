@@ -152,6 +152,9 @@ export class SessionStore {
           connectionId,
           reason: '服务重启，运行未重放。',
         });
+        // The turn a `once` subscription was for ended here, out of the service's sight (see push.ts).
+        if (session.push === 'once' && session.activeRun.surface !== 'terminal')
+          this.setPush(session.id, 'off');
       }
     } catch (error) {
       this.database.close();

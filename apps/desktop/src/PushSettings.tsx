@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Pencil, Plus, Trash2 } from 'lucide-react';
 import {
+  escapeHtml,
   fillPush,
   pushDefaults,
   pushFormats,
@@ -69,12 +70,6 @@ const events: { key: keyof PushOptions['events']; title: string; detail: string 
   { key: 'done', title: '任务完成', detail: 'Claude Code 做完了一次运行' },
   { key: 'failed', title: '任务失败', detail: '运行因错误而结束' },
 ];
-const escapeHtml = (text: string) =>
-  text
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;');
 // Times in a push read as where the user is; every change from a window says where that is.
 const timeZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
@@ -355,9 +350,10 @@ function ChannelDialog({
   }
   const samples = Object.fromEntries(pushVariables.map(({ name, sample }) => [name, sample]));
   // A page PushPlus shows is shown as one, in a frame that runs nothing of it.
+  // Nor does it load what the template points at: no address, only its own styles and inline pictures.
   const page =
     kind === 'pushplus' && fields.format === 'html'
-      ? renderPush(fields.body ?? '', samples, escapeHtml)
+      ? `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">${renderPush(fields.body ?? '', samples, escapeHtml)}`
       : null;
   const preview =
     kind === 'webhook'
@@ -414,7 +410,11 @@ function ChannelDialog({
             value={fields[key] ?? ''}
             placeholder={has(key) ? '已设置，留空不修改' : placeholder}
             autoComplete="off"
-            onChange={({ target }) => set(key, target.value)}
+            onChange={({ target }) => {
+              set(key, target.value);
+              // Written anew after it was taken away: what is written is what is kept.
+              setCleared((current) => current.filter((item) => item !== key));
+            }}
           />
           {optional && has(key) && (
             <button

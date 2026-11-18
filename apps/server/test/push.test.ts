@@ -12,7 +12,7 @@ import type { PushValues } from '../src/push.ts';
 
 const values: PushValues = {
   event: '任务完成',
-  session: '"引号" <b>',
+  session: `"引号" <b> '单'`,
   device: 'A',
   error: undefined,
   url: 'https://h/#session=1',
@@ -63,7 +63,7 @@ test('each channel sends its own template: a webhook its JSON, a card its button
       values,
     ),
   );
-  assert.equal(telegram.text.split('\n')[1], '<i>&quot;引号&quot; &lt;b&gt;</i>');
+  assert.equal(telegram.text.split('\n')[1], '<i>&quot;引号&quot; &lt;b&gt; &#39;单&#39;</i>');
 
   // PushPlus shows the title itself; its page escapes the values, and no channel is its own default.
   const pushplus = {
@@ -74,9 +74,9 @@ test('each channel sends its own template: a webhook its JSON, a card its button
   const page = body(pushRequest(pushplus, values));
   assert.deepEqual(
     [page.template, page.title, 'channel' in page],
-    ['html', '「任务完成」"引号" <b>', false],
+    ['html', `「任务完成」"引号" <b> '单'`, false],
   );
-  assert.ok(page.content.includes('&quot;引号&quot; &lt;b&gt;'));
+  assert.ok(page.content.includes('&quot;引号&quot; &lt;b&gt; &#39;单&#39;'));
   assert.equal(page.content.includes('⚠️'), false);
   assert.equal(
     body(pushRequest({ ...(pushplus as object), format: 'text' } as never, values)).template,
@@ -194,6 +194,15 @@ test('an approval of a session not subscribed to is pushed after the delay, unle
     status('awaiting_approval');
   };
 
+  // Answered in time: the run goes on.
+  waiting();
+  t.mock.timers.tick(4 * 60_000);
+  session.activeRun = null;
+  status('running');
+  t.mock.timers.tick(5 * 60_000);
+  assert.deepEqual(sent, []);
+
+  // One of two approvals answered: the other still waits.
   waiting();
   t.mock.timers.tick(4 * 60_000);
   pushes.observe(session.id, {
@@ -201,12 +210,14 @@ test('an approval of a session not subscribed to is pushed after the delay, unle
     approvalId: randomUUID(),
     allowed: true,
   });
-  t.mock.timers.tick(5 * 60_000);
-  assert.deepEqual(sent, []);
-
-  waiting();
-  t.mock.timers.tick(5 * 60_000);
+  t.mock.timers.tick(60_000);
   assert.deepEqual(sent, ['「等待审批」会话']);
+
+  // The setting switched off while it waits.
+  waiting();
+  pushes.update({ fallback: false });
+  t.mock.timers.tick(5 * 60_000);
+  assert.equal(sent.length, 1);
 });
 
 // Claude waits there for a build or tests and goes on once they end: a push for one turn is kept for the run's end.

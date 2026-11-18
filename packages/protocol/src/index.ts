@@ -437,6 +437,14 @@ export function pushDefaults(
     ...(kind === 'dingtalk' ? { button: '打开会话', buttonUrl: '{url}' } : {}),
   };
 }
+// A value written into HTML, inside an element or an attribute in either quotes.
+export const escapeHtml = (text: string) =>
+  text
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 // Fills in the {name}s that `values` has, as `encode` writes them; any other text in braces is left as it is.
 export const fillPush = (
   template: string,

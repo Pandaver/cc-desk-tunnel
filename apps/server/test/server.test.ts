@@ -701,11 +701,14 @@ test('restart recovery closes interrupted tools and does not replay side effects
     status: 'awaiting_approval',
     connectionId,
   });
+  store.setPush(session.id, 'once');
   store.close();
   const restarted = new SessionStore(directory);
   const recovered = restarted.snapshot(session.id);
   restarted.close();
   assert.equal(recovered.session.activeRun, null);
+  // The turn a subscription for one turn was for is over.
+  assert.equal(recovered.session.push, undefined);
   assert.ok(
     recovered.events.some(
       (event) => event.payload.type === 'tool.result' && event.payload.status === 'cancelled',
@@ -1168,7 +1171,8 @@ test('a session subscribed for one turn pushes its approval and its end, then no
     message.event.payload.status === 'completed';
   await client.wait(completed);
   assert.equal(f.server.store.get(sessionId).session.push, undefined);
-  while (pushed.length < 2) await new Promise((resolve) => setTimeout(resolve, 5));
+  for (const deadline = Date.now() + 3000; pushed.length < 2 && Date.now() < deadline;)
+    await new Promise((resolve) => setTimeout(resolve, 5));
   assert.deepEqual(
     pushed.map((message) => message.t),
     ['「等待审批」中文会话', '「任务完成」中文会话'],

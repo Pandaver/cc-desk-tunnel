@@ -2,6 +2,7 @@ import { createHmac, randomUUID } from 'node:crypto';
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  escapeHtml,
   fillPush,
   pushChannelConfigSchema,
   pushSecrets,
@@ -70,12 +71,6 @@ const headings: Record<PushKind, string> = {
   done: '任务完成',
   failed: '任务失败',
 };
-const html = (text: string) =>
-  text
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;');
 const json = (url: string, body: unknown) => ({
   url,
   init: {
@@ -114,7 +109,7 @@ export function pushRequest(
     (config.kind === 'telegram' || config.kind === 'pushplus') && config.format === 'html';
   const title =
     renderPush(config.title, values).split('\n')[0] || `「${values.event}」${values.session}`;
-  const body = renderPush(config.body, values, escaped ? html : undefined);
+  const body = renderPush(config.body, values, escaped ? escapeHtml : undefined);
   const plain = [title, body].filter(Boolean).join('\n');
   switch (config.kind) {
     case 'dingtalk': {
@@ -171,7 +166,10 @@ export function pushRequest(
       return json(`https://api.telegram.org/bot${config.token}/sendMessage`, {
         chat_id: config.chatId,
         ...(escaped
-          ? { parse_mode: 'HTML', text: [`<b>${html(title)}</b>`, body].filter(Boolean).join('\n') }
+          ? {
+              parse_mode: 'HTML',
+              text: [`<b>${escapeHtml(title)}</b>`, body].filter(Boolean).join('\n'),
+            }
           : { text: plain }),
       });
     case 'pushplus':
@@ -219,9 +217,16 @@ async function deliver(config: PushChannelConfig, values: PushValues) {
       : config.kind === 'feishu'
         ? reply?.code !== 0
         : config.kind === 'pushplus' && reply?.code !== 200;
+  // What the service said of it, and no more: a body read back as it came could be any page the address leads to,
+  // or repeat what the request was sent with.
   if (!response.ok || refused)
     throw new Error(
-      `${response.ok ? '' : `HTTP ${response.status} `}${reply?.errmsg ?? reply?.msg ?? body.slice(0, 200)}`.trim(),
+      [
+        response.ok ? '' : `HTTP ${response.status}`,
+        String(reply?.errmsg ?? reply?.msg ?? '').slice(0, 200),
+      ]
+        .filter(Boolean)
+        .join(' ') || '渠道没有接受这条消息',
     );
 }
 
@@ -413,7 +418,7 @@ export class Pushes {
   // ends, such as a server kept in a background shell, is not pushed as done; its approvals and questions still are.
   observe(sessionId: string, payload: EventPayload) {
     if (payload.type === 'run.error') this.errors.set(sessionId, payload.message);
-    if (payload.type === 'approval.resolved') this.unwait(sessionId);
+    // An answer ends the wait only once none is left to answer, which the run says with its status.
     if (payload.type !== 'run.status') return;
     this.unwait(sessionId);
     const session = this.hooks.session(sessionId);
@@ -436,7 +441,9 @@ export class Pushes {
         const wait = setTimeout(() => {
           this.waits.delete(sessionId);
           const now = this.hooks.session(sessionId);
-          if (now?.activeRun?.status === 'awaiting_approval') this.push(now, kind);
+          // The setting may have been switched off meanwhile.
+          if (this.settings.fallback && now?.activeRun?.status === 'awaiting_approval')
+            this.push(now, kind);
         }, this.settings.delayMinutes * 60_000);
         wait.unref();
         this.waits.set(sessionId, wait);
