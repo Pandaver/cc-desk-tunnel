@@ -277,6 +277,10 @@ button.chip:hover:not(:disabled) {
 .chip.quiet {
   background: var(--surface-2);
 }
+.chip.subscribed,
+button.chip.subscribed:hover:not(:disabled) {
+  color: var(--accent);
+}
 /* The approval mode that asks about nothing must not look like the others. */
 .chip.danger,
 button.chip.danger:hover:not(:disabled) {
@@ -893,6 +897,12 @@ dialog:has(.release-notes) {
   flex: none;
   color: var(--faint);
   font-size: 12px;
+}
+.session-select > .push-mark {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  color: var(--accent);
 }
 .project-group > h2 > .pin-mark {
   width: 12px;
@@ -4175,6 +4185,18 @@ dialog {
 .web-settings-form textarea {
   width: 100%;
   min-width: 0;
+}
+.web-settings-form select,
+.web-settings-form textarea {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  background: var(--surface);
+  color: inherit;
+}
+.push-empty {
+  margin: 0;
+  padding: 14px 20px;
 }
 .web-trust-warning {
   display: flex;

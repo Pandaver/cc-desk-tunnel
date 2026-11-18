@@ -14,6 +14,7 @@ const every = [
   '通知',
   '快捷键',
   '上下文与缓存',
+  '外部推送',
   '浏览器访问',
   '账号与额度',
   'CLI 设置',
@@ -143,6 +144,19 @@ async function serve(page: Page, url: string, shells?: string[], chosen: unknown
             sessions: [],
             selfSigned: false,
             url: 'https://work.example.com/desk/',
+          },
+        });
+      if (message.type === 'push.get')
+        send({
+          type: 'push.state',
+          requestId,
+          values: {
+            enabled: true,
+            events: { approval: true, question: true, done: true, failed: true },
+            defaultMode: 'off',
+            fallback: true,
+            delayMinutes: 5,
+            channels: [{ id: randomUUID(), name: '钉钉群', kind: 'dingtalk', enabled: true }],
           },
         });
       if (message.type === 'web.certificate.get')
