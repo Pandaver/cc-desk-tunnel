@@ -22,10 +22,14 @@ export const browserCommands = new Set<Command['type']>([
   'quota.watch',
   'account.status',
   'compaction.get',
-  // Never what a channel sends with: that is only given, from the desktop.
+  // Push channels as the desktop sets them: what one sends with is read back by no window, and whoever holds a
+  // browser's login can run commands on the user's computers already.
   'push.get',
   'push.update',
+  'push.channel.add',
+  'push.channel.update',
   'push.channel.enable',
+  'push.channel.delete',
   'push.test',
   'session.push',
   'web.settings.get',
@@ -50,7 +54,10 @@ export const browserActivity = new Set<Command['type']>([
   'run.task.background',
   'approval.reply',
   'push.update',
+  'push.channel.add',
+  'push.channel.update',
   'push.channel.enable',
+  'push.channel.delete',
   'push.test',
   'session.push',
   'web.settings.update',

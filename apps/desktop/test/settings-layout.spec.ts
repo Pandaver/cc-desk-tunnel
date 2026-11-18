@@ -156,7 +156,24 @@ async function serve(page: Page, url: string, shells?: string[], chosen: unknown
             defaultMode: 'off',
             fallback: true,
             delayMinutes: 5,
-            channels: [{ id: randomUUID(), name: '钉钉群', kind: 'dingtalk', enabled: true }],
+            timeZone: 'Asia/Shanghai',
+            channels: [
+              {
+                id: randomUUID(),
+                name: '钉钉群',
+                kind: 'dingtalk',
+                enabled: true,
+                config: {
+                  kind: 'dingtalk',
+                  format: 'actionCard',
+                  title: '{session}',
+                  body: '',
+                  button: '打开会话',
+                  buttonUrl: '{url}',
+                },
+                secrets: ['url', 'secret'],
+              },
+            ],
           },
         });
       if (message.type === 'web.certificate.get')

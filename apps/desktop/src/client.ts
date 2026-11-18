@@ -64,6 +64,7 @@ type Replies = {
   'push.get': 'push.state';
   'push.update': 'push.state';
   'push.channel.add': 'push.state';
+  'push.channel.update': 'push.state';
   'push.channel.enable': 'push.state';
   'push.channel.delete': 'push.state';
   'instructions.get': 'instructions.state';

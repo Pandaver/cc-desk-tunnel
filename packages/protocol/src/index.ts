@@ -145,20 +145,65 @@ export const idleCompactionSchema = z.object({
 });
 export type IdleCompaction = z.infer<typeof idleCompactionSchema>;
 // The service's own pushes to a chat robot or a phone app, for a user away from every window, as in a browser: what a
-// session subscribed to says, and if asked, the approvals and questions of the others. Only a desktop sets up where
-// they go; what a channel is given to send there is never read back, by the desktop or a browser.
+// session subscribed to says, and if asked, the approvals and questions of the others. What a channel sends with — its
+// address, which holds the robot's key, and its secret — is only ever given, never read back by any window.
 export const pushKindSchema = z.enum(['approval', 'question', 'done', 'failed']);
 export type PushKind = z.infer<typeof pushKindSchema>;
 // `once` lasts until the session's run now going, or the next one, ends; background tasks it waits on are part of it.
 export const pushModeSchema = z.enum(['off', 'once', 'always']);
 export type PushMode = z.infer<typeof pushModeSchema>;
+export const pushChannelKindSchema = z.enum([
+  'dingtalk',
+  'feishu',
+  'wecom',
+  'telegram',
+  'bark',
+  'webhook',
+]);
+export type PushChannelKind = z.infer<typeof pushChannelKindSchema>;
 const pushUrl = z.url({ protocol: /^https?$/ }).max(2048);
 const pushSecret = z.string().trim().min(1).max(512);
+// What a channel says, with the variables of `pushVariables` in it. A format without a title of its own begins its
+// text with the title.
+const pushTitle = z.string().max(200);
+const pushBody = z.string().max(4000);
+// Where a push leads: {url} as it is, any other variable written into it as a part of an address.
+const pushLink = z.string().max(2048);
 export const pushChannelConfigSchema = z.discriminatedUnion('kind', [
-  // The robots' optional signing secrets; without one the robot must allow the request by keyword or address.
-  z.object({ kind: z.literal('dingtalk'), url: pushUrl, secret: pushSecret.optional() }).strict(),
-  z.object({ kind: z.literal('feishu'), url: pushUrl, secret: pushSecret.optional() }).strict(),
-  z.object({ kind: z.literal('wecom'), url: pushUrl }).strict(),
+  // The robots' optional signing secrets; without one the robot must allow the request by keyword or address. An
+  // actionCard is a card with one button; with no address for it, it is sent as markdown.
+  z
+    .object({
+      kind: z.literal('dingtalk'),
+      url: pushUrl,
+      secret: pushSecret.optional(),
+      format: z.enum(['actionCard', 'markdown', 'text']),
+      title: pushTitle,
+      body: pushBody,
+      button: z.string().max(40),
+      buttonUrl: pushLink,
+    })
+    .strict(),
+  // Markdown goes in a card, whose header is the title.
+  z
+    .object({
+      kind: z.literal('feishu'),
+      url: pushUrl,
+      secret: pushSecret.optional(),
+      format: z.enum(['markdown', 'text']),
+      title: pushTitle,
+      body: pushBody,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('wecom'),
+      url: pushUrl,
+      format: z.enum(['markdown', 'text']),
+      title: pushTitle,
+      body: pushBody,
+    })
+    .strict(),
   z
     .object({
       kind: z.literal('telegram'),
@@ -167,15 +212,41 @@ export const pushChannelConfigSchema = z.discriminatedUnion('kind', [
         .trim()
         .regex(/^\d+:[\w-]+$/),
       chatId: z.string().trim().min(1).max(64),
+      format: z.enum(['html', 'text']),
+      title: pushTitle,
+      body: pushBody,
     })
     .strict(),
   // The app's address with the device key, as the Bark app shows it: https://api.day.app/<key>.
-  z.object({ kind: z.literal('bark'), url: pushUrl }).strict(),
-  // Any other service: the body, JSON with {{title}}, {{text}} and {{url}} in it, is posted; without one the URL is
-  // fetched with them filled into it.
-  z.object({ kind: z.literal('webhook'), url: pushUrl, body: z.string().max(4000) }).strict(),
+  z
+    .object({
+      kind: z.literal('bark'),
+      url: pushUrl,
+      title: pushTitle,
+      body: pushBody,
+      clickUrl: pushLink,
+    })
+    .strict(),
+  // Any other service: the body, JSON with the variables in it, is posted; without one the address is fetched with
+  // them filled into it.
+  z.object({ kind: z.literal('webhook'), url: pushUrl, body: pushBody }).strict(),
 ]);
 export type PushChannelConfig = z.infer<typeof pushChannelConfigSchema>;
+// The fields that hold what a channel sends with: never told to a window, and kept as they are when a change leaves
+// them out.
+export const pushSecrets: Record<PushChannelKind, readonly string[]> = {
+  dingtalk: ['url', 'secret'],
+  feishu: ['url', 'secret'],
+  wecom: ['url'],
+  telegram: ['token'],
+  bark: ['url'],
+  webhook: ['url'],
+};
+// A channel as a window gives it: a field of `pushSecrets` left out or empty keeps what it was, and null takes an
+// optional one away. The service checks the whole once it is put together.
+export const pushChannelInputSchema = z
+  .object({ kind: pushChannelKindSchema })
+  .catchall(z.string().max(4000).nullable());
 export const pushChannelSchema = z.object({
   id,
   name: z.string().trim().min(1).max(40),
@@ -197,26 +268,135 @@ export const pushOptionsSchema = z.object({
   // if no window answered them by then; 0 pushes at once.
   fallback: z.boolean(),
   delayMinutes: z.number().int().min(0).max(60),
+  // Where the user is, so that times read as theirs: the service's own clock is often UTC. A window sends its own
+  // with every change it makes.
+  timeZone: z
+    .string()
+    .max(64)
+    .refine((zone) => {
+      try {
+        new Intl.DateTimeFormat('en', { timeZone: zone });
+        return true;
+      } catch {
+        return false;
+      }
+    }),
 });
 export type PushOptions = z.infer<typeof pushOptionsSchema>;
 export const pushSettingsSchema = pushOptionsSchema.extend({
   channels: z.array(pushChannelSchema).max(20),
 });
 export type PushSettings = z.infer<typeof pushSettingsSchema>;
-// What every window is told: the channels without what they send with, and the last failure of each since the
-// service started.
+// What every window is told: each channel's config without the fields of `pushSecrets`, which `secrets` names where
+// they are set, and its last failure since the service started.
 export const pushStateSchema = pushOptionsSchema.extend({
   channels: z.array(
     z.object({
       id,
       name: z.string(),
-      kind: z.enum(['dingtalk', 'feishu', 'wecom', 'telegram', 'bark', 'webhook']),
+      kind: pushChannelKindSchema,
       enabled: z.boolean(),
+      config: z.record(z.string(), z.string()),
+      secrets: z.array(z.string()),
       failure: z.object({ at: timestamp, message: z.string() }).optional(),
     }),
   ),
 });
 export type PushState = z.infer<typeof pushStateSchema>;
+// What a push may say of itself, nothing of the conversation: each with what a sample push fills in.
+export const pushVariables = [
+  { name: 'event', label: '事件', sample: '任务失败' },
+  { name: 'session', label: '会话标题', sample: '修复登录页样式' },
+  { name: 'device', label: '设备', sample: 'Office-PC' },
+  { name: 'project', label: '项目文件夹', sample: 'cc-desk-tunnel' },
+  { name: 'model', label: '模型', sample: 'Opus 5.5' },
+  { name: 'duration', label: '这次运行的用时', sample: '12 分 30 秒' },
+  { name: 'time', label: '时间', sample: '11-18 21:30' },
+  { name: 'error', label: '失败原因，只在失败时有', sample: '原生进程适配失败' },
+  { name: 'quota5h', label: '5 小时额度已用', sample: '32%' },
+  { name: 'quota5hReset', label: '5 小时额度重置时间', sample: '11-19 02:00' },
+  { name: 'quotaWeek', label: '每周额度已用', sample: '58%' },
+  { name: 'quotaModel', label: '当前模型的每周额度已用', sample: '71%' },
+  {
+    name: 'url',
+    label: '会话页面，开启浏览器访问时才有',
+    sample: 'https://example.com/#session=…',
+  },
+] as const;
+// The formats each kind of channel offers, the first being what a new one starts with.
+export const pushFormats: Record<PushChannelKind, readonly { value: string; label: string }[]> = {
+  dingtalk: [
+    { value: 'actionCard', label: '卡片（带按钮）' },
+    { value: 'markdown', label: 'Markdown' },
+    { value: 'text', label: '纯文本' },
+  ],
+  feishu: [
+    { value: 'markdown', label: '卡片（Markdown）' },
+    { value: 'text', label: '纯文本' },
+  ],
+  wecom: [
+    { value: 'markdown', label: 'Markdown' },
+    { value: 'text', label: '纯文本' },
+  ],
+  telegram: [
+    { value: 'html', label: 'HTML' },
+    { value: 'text', label: '纯文本' },
+  ],
+  bark: [],
+  webhook: [],
+};
+// What a channel of `kind` says when the user has not written it: in `format`, or its first.
+export function pushDefaults(
+  kind: PushChannelKind,
+  format = pushFormats[kind][0]?.value,
+): Record<string, string> {
+  const title = '【{event}】{session}';
+  const body = [
+    '设备：{device} · 项目：{project}',
+    '错误：{error}',
+    '5 小时额度：{quota5h}（{quota5hReset} 重置） · 每周：{quotaWeek}',
+  ].join('\n');
+  const link =
+    format === 'markdown'
+      ? '\n[打开会话]({url})'
+      : format === 'html'
+        ? '\n<a href="{url}">打开会话</a>'
+        : '';
+  if (kind === 'webhook')
+    return { body: '{"title": "【{event}】{session}", "text": "设备：{device}", "url": "{url}"}' };
+  if (kind === 'bark') return { title, body, clickUrl: '{url}' };
+  return {
+    format: format!,
+    title,
+    body: body + link,
+    ...(kind === 'dingtalk' ? { button: '打开会话', buttonUrl: '{url}' } : {}),
+  };
+}
+// Fills in the {name}s that `values` has, as `encode` writes them; any other text in braces is left as it is.
+export const fillPush = (
+  template: string,
+  values: Record<string, string | undefined>,
+  encode = (value: string) => value,
+) =>
+  template.replace(/\{(\w+)\}/g, (whole, name: string) =>
+    name in values ? encode(values[name] ?? '') : whole,
+  );
+// A push's text: a line whose variables all have no value, as the error of a turn that did not fail or the link where
+// the service serves no browser, is left out.
+export const renderPush = (
+  template: string,
+  values: Record<string, string | undefined>,
+  encode?: (value: string) => string,
+) =>
+  template
+    .split('\n')
+    .filter((line) => {
+      const used = [...line.matchAll(/\{(\w+)\}/g)].filter(([, name]) => name in values);
+      return !used.length || used.some(([, name]) => values[name]);
+    })
+    .map((line) => fillPush(line, values, encode))
+    .join('\n')
+    .trim();
 export const contextUsageSchema = z.object({
   model: z.string(),
   usedTokens: z.number().nonnegative(),
@@ -704,13 +884,22 @@ export const commandSchema = z.discriminatedUnion('type', [
       values: pushOptionsSchema.partial().strict(),
     })
     .strict(),
-  // A channel's config is only ever given, never changed or read back: to change it, it is removed and added anew.
+  // A channel's config is given whole when it is added; a change may leave out what it sends with (`pushSecrets`).
   z
     .object({
       type: z.literal('push.channel.add'),
       ...request,
       name: pushChannelSchema.shape.name,
-      config: pushChannelConfigSchema,
+      config: pushChannelInputSchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('push.channel.update'),
+      ...request,
+      channelId: id,
+      name: pushChannelSchema.shape.name,
+      config: pushChannelInputSchema,
     })
     .strict(),
   z

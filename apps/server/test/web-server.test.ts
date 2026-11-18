@@ -337,13 +337,6 @@ test('browser controls an existing device session but cannot claim a device or i
     { type: 'account.token', token: 'test-only-token' },
     { type: 'web.certificate.get' },
     { type: 'service.update.check' },
-    // What a push channel sends with is only given from the desktop.
-    {
-      type: 'push.channel.add',
-      name: 'forbidden',
-      config: { kind: 'bark', url: 'https://api.day.app/k' },
-    },
-    { type: 'push.channel.delete', channelId: randomUUID() },
   ])
     assert.equal((await client.request(command)).code, 'web_forbidden', command.type);
   const closed = once(client.socket, 'close');

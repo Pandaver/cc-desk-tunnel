@@ -1038,7 +1038,7 @@ export default function SettingsPage({
             title="外部推送"
             intro={`${everyDevice}不在电脑前时，把会话的通知推送到聊天机器人或手机应用；在输入框旁的铃铛里订阅会话。`}
           >
-            <PushSettings client={client} browser={browser} />
+            <PushSettings client={client} />
           </Page>
         ) : section === 'web' ? (
           <Page title="浏览器访问" intro={everyDevice}>

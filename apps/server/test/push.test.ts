@@ -5,41 +5,87 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
+import { pushDefaults } from '@cc-desk-tunnel/protocol';
 import type { Session } from '@cc-desk-tunnel/protocol';
 import { Pushes, pushRequest } from '../src/push.ts';
-import type { PushMessage } from '../src/push.ts';
+import type { PushValues } from '../src/push.ts';
 
-const message: PushMessage = {
-  title: '【任务完成】"引号"',
-  text: '设备：A\n错误：x',
+const values: PushValues = {
+  event: '任务完成',
+  session: '"引号" <b>',
+  device: 'A',
+  error: undefined,
   url: 'https://h/#session=1',
 };
+const body = (request: { init: RequestInit }) => JSON.parse(String(request.init.body));
 
-test('a webhook gets its body filled in as JSON, or its URL without one; DingTalk is signed', () => {
-  const posted = pushRequest(
-    { kind: 'webhook', url: 'https://h/a', body: '{"title":"{{title}}","text":"{{text}}"}' },
-    message,
+test('each channel sends its own template: a webhook its JSON, a card its button, HTML with the values escaped', () => {
+  const webhook = pushRequest(
+    { kind: 'webhook', url: 'https://h/a', body: '{"title":"{session}","error":"{error}"}' },
+    values,
   );
-  assert.deepEqual(JSON.parse(String(posted.init.body)), {
-    title: message.title,
-    text: message.text,
-  });
-  const fetched = pushRequest({ kind: 'webhook', url: 'https://h/{{title}}', body: '' }, message);
-  assert.equal(fetched.url, `https://h/${encodeURIComponent(message.title)}`);
-  assert.equal(fetched.init.method, 'GET');
+  assert.deepEqual(body(webhook), { title: values.session, error: '' });
+  const fetched = pushRequest({ kind: 'webhook', url: 'https://h/{session}', body: '' }, values);
+  assert.equal(fetched.url, `https://h/${encodeURIComponent(values.session!)}`);
 
-  const signed = new URL(
-    pushRequest(
-      { kind: 'dingtalk', url: 'https://oapi.dingtalk.com/robot/send?access_token=k', secret: 's' },
-      message,
-      1000,
-    ).url,
-  );
-  assert.equal(signed.searchParams.get('timestamp'), '1000');
+  const dingtalk = {
+    kind: 'dingtalk' as const,
+    url: 'https://oapi.dingtalk.com/robot/send?access_token=k',
+    secret: 's',
+    ...(pushDefaults('dingtalk') as {
+      format: 'actionCard';
+      title: string;
+      body: string;
+      button: string;
+      buttonUrl: string;
+    }),
+  };
+  const card = pushRequest(dingtalk, values, 1000);
+  assert.equal(body(card).actionCard.singleURL, values.url);
   assert.equal(
-    signed.searchParams.get('sign'),
+    new URL(card.url).searchParams.get('sign'),
     createHmac('sha256', 's').update('1000\ns').digest('base64'),
   );
+  // No page to go to: the card has no button to offer, and its text goes as markdown; the line of the error is left out.
+  const markdown = body(pushRequest(dingtalk, { ...values, url: undefined }));
+  assert.equal(markdown.msgtype, 'markdown');
+  assert.equal(markdown.markdown.text.includes('错误'), false);
+
+  const telegram = body(
+    pushRequest(
+      {
+        kind: 'telegram',
+        token: '1:a',
+        chatId: '2',
+        ...(pushDefaults('telegram') as { format: 'html'; title: string; body: string }),
+        body: '<i>{session}</i>',
+      },
+      values,
+    ),
+  );
+  assert.equal(telegram.text.split('\n')[1], '<i>&quot;引号&quot; &lt;b&gt;</i>');
+});
+
+test('a channel is changed without what it sends with, which is kept unless taken away and never read back', (t) => {
+  const { pushes } = setup(t);
+  const [bark] = pushes.state().channels;
+  assert.deepEqual(bark.secrets, ['url']);
+  assert.equal(JSON.stringify(pushes.state()).includes('api.day.app'), false);
+  pushes.put(bark.id, '改名', { kind: 'bark', ...pushDefaults('bark'), title: '{session}' });
+  const changed = pushes.settings.channels[0];
+  assert.deepEqual(
+    [changed.name, changed.config.kind === 'bark' && changed.config.url],
+    ['改名', 'https://api.day.app/k'],
+  );
+  const dingtalk = {
+    kind: 'dingtalk',
+    url: 'https://oapi.dingtalk.com/robot/send?access_token=k',
+    ...pushDefaults('dingtalk'),
+  };
+  const { id } = pushes.put(undefined, '钉钉', { ...dingtalk, secret: 's' }).channels[1];
+  pushes.put(id, '钉钉', { ...dingtalk, url: '', secret: null });
+  assert.deepEqual(pushes.state().channels[1].secrets, ['url']);
+  assert.throws(() => pushes.put(undefined, '缺地址', { kind: 'wecom', ...pushDefaults('wecom') }));
 });
 
 // A session pushed to one Bark channel; what it sends is the titles in `sent`.
@@ -49,19 +95,25 @@ function setup(t: TestContext) {
   const session = {
     id: randomUUID(),
     title: '会话',
+    projectPath: 'D:\\工作\\项目',
     device: { id: randomUUID(), name: 'A' },
     activeRun: null,
   } as unknown as Session;
   const sent: string[] = [];
   const pushes = new Pushes(directory, {
     session: () => session,
-    link: () => undefined,
+    facts: () => ({}),
+    page: () => undefined,
     ended: () => delete session.push,
     changed: () => {},
-    deliver: async (_config, { title }) => void sent.push(title),
+    deliver: async (_config, { event, session }) => void sent.push(`【${event}】${session}`),
   });
   t.after(() => pushes.close());
-  pushes.add('A', { kind: 'bark', url: 'https://api.day.app/k' });
+  pushes.put(undefined, 'Bark', {
+    kind: 'bark',
+    url: 'https://api.day.app/k',
+    ...pushDefaults('bark'),
+  });
   pushes.update({ enabled: true });
   const status = (status: 'running' | 'awaiting_approval' | 'completed', waiting?: 'background') =>
     pushes.observe(session.id, {

@@ -1,9 +1,17 @@
 import { createHmac, randomUUID } from 'node:crypto';
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { pushSettingsSchema } from '@cc-desk-tunnel/protocol';
+import {
+  fillPush,
+  pushChannelConfigSchema,
+  pushSecrets,
+  pushSettingsSchema,
+  pushVariables,
+  renderPush,
+} from '@cc-desk-tunnel/protocol';
 import type {
   EventPayload,
+  NativeMetrics,
   PushChannel,
   PushChannelConfig,
   PushKind,
@@ -20,6 +28,7 @@ export const PUSH: PushSettings = {
   defaultMode: 'off',
   fallback: false,
   delayMinutes: 0,
+  timeZone: 'UTC',
   channels: [],
 };
 
@@ -44,7 +53,8 @@ function writePush(directory: string, settings: PushSettings) {
   return next;
 }
 
-export type PushMessage = { title: string; text: string; url?: string };
+// The variables of a push (`pushVariables`), each there even without a value, so that a line of one is left out.
+export type PushValues = Record<string, string | undefined>;
 
 const headings: Record<PushKind, string> = {
   approval: '等待审批',
@@ -52,8 +62,6 @@ const headings: Record<PushKind, string> = {
   done: '任务完成',
   failed: '任务失败',
 };
-const markdown = ({ title, text, url }: PushMessage) =>
-  [`**${title}**`, ...text.split('\n'), ...(url ? [`[打开会话](${url})`] : [])].join('\n\n');
 const html = (text: string) =>
   text
     .replaceAll('&', '&amp;')
@@ -68,15 +76,37 @@ const json = (url: string, body: unknown) => ({
     body: JSON.stringify(body),
   },
 });
+// Where a push leads: {url} as it is, the other variables as parts of an address. Nothing where it comes to nothing.
+const address = (template: string, values: PushValues) =>
+  fillPush(
+    template,
+    Object.fromEntries(
+      Object.entries(values).map(([name, value]) => [
+        name,
+        name === 'url' || !value ? value : encodeURIComponent(value),
+      ]),
+    ),
+  ).trim();
 
-// The request each service takes, as its documentation has it. The link to the session is the text 打开会话 where
-// the service shows links, and never its address written out.
+// The request each service takes for the channel's format, as its documentation has it. A format with no title of its
+// own begins with the title; DingTalk's markdown keeps a line a paragraph, as a single line break does not show there.
 export function pushRequest(
   config: PushChannelConfig,
-  message: PushMessage,
+  values: PushValues,
   now = Date.now(),
 ): { url: string; init: RequestInit } {
-  const { title, text, url: link } = message;
+  if (config.kind === 'webhook') {
+    const url = fillPush(config.url, values, encodeURIComponent);
+    if (!config.body.trim()) return { url, init: { method: 'GET' } };
+    // Filled in as JSON strings are written, so that the body stays the JSON it was.
+    const body = fillPush(config.body, values, (value) => JSON.stringify(value).slice(1, -1));
+    return { url, init: { method: 'POST', headers: { 'content-type': 'application/json' }, body } };
+  }
+  const escaped = config.kind === 'telegram' && config.format === 'html';
+  const title =
+    renderPush(config.title, values).split('\n')[0] || `【${values.event}】${values.session}`;
+  const body = renderPush(config.body, values, escaped ? html : undefined);
+  const plain = [title, body].filter(Boolean).join('\n');
   switch (config.kind) {
     case 'dingtalk': {
       const url = new URL(config.url);
@@ -87,10 +117,16 @@ export function pushRequest(
           createHmac('sha256', config.secret).update(`${now}\n${config.secret}`).digest('base64'),
         );
       }
-      return json(url.toString(), {
-        msgtype: 'markdown',
-        markdown: { title, text: markdown(message) },
-      });
+      const text = [`**${title}**`, ...body.split('\n')].join('\n\n');
+      const button = address(config.buttonUrl, values);
+      if (config.format === 'text')
+        return json(url.toString(), { msgtype: 'text', text: { content: plain } });
+      if (config.format === 'actionCard' && button)
+        return json(url.toString(), {
+          msgtype: 'actionCard',
+          actionCard: { title, text, singleTitle: config.button || '打开', singleURL: button },
+        });
+      return json(url.toString(), { msgtype: 'markdown', markdown: { title, text } });
     }
     case 'feishu': {
       // Feishu signs with the timestamp and secret as the key, over nothing.
@@ -101,55 +137,49 @@ export function pushRequest(
             sign: createHmac('sha256', `${timestamp}\n${config.secret}`).digest('base64'),
           }
         : {};
-      const content = [
-        ...text.split('\n').map((line) => [{ tag: 'text', text: line }]),
-        ...(link ? [[{ tag: 'a', text: '打开会话', href: link }]] : []),
-      ];
-      return json(config.url, {
-        ...sign,
-        msg_type: 'post',
-        content: { post: { zh_cn: { title, content } } },
-      });
+      return json(
+        config.url,
+        config.format === 'text'
+          ? { ...sign, msg_type: 'text', content: { text: plain } }
+          : {
+              ...sign,
+              msg_type: 'interactive',
+              card: {
+                header: { title: { tag: 'plain_text', content: title } },
+                elements: [{ tag: 'markdown', content: body }],
+              },
+            },
+      );
     }
     case 'wecom':
-      return json(config.url, { msgtype: 'markdown', markdown: { content: markdown(message) } });
+      return json(
+        config.url,
+        config.format === 'text'
+          ? { msgtype: 'text', text: { content: plain } }
+          : { msgtype: 'markdown', markdown: { content: `**${title}**\n${body}` } },
+      );
     case 'telegram':
       return json(`https://api.telegram.org/bot${config.token}/sendMessage`, {
         chat_id: config.chatId,
-        parse_mode: 'HTML',
-        text: [
-          `<b>${html(title)}</b>`,
-          html(text),
-          ...(link ? [`<a href="${html(link)}">打开会话</a>`] : []),
-        ].join('\n'),
+        ...(escaped
+          ? { parse_mode: 'HTML', text: [`<b>${html(title)}</b>`, body].filter(Boolean).join('\n') }
+          : { text: plain }),
       });
-    case 'bark':
+    case 'bark': {
+      const click = address(config.clickUrl, values);
       return json(config.url, {
         title,
-        body: text,
+        body,
         group: 'CC Desk Tunnel',
-        ...(link ? { url: link } : {}),
+        ...(click ? { url: click } : {}),
       });
-    case 'webhook': {
-      const fill = (template: string, encode: (value: string) => string) =>
-        template.replace(/\{\{(title|text|url)\}\}/g, (_, key: keyof PushMessage) =>
-          encode(message[key] ?? ''),
-        );
-      const url = fill(config.url, encodeURIComponent);
-      if (!config.body.trim()) return { url, init: { method: 'GET' } };
-      // Filled in as JSON strings are written, so that the body stays the JSON it was.
-      const body = fill(config.body, (value) => JSON.stringify(value).slice(1, -1));
-      return {
-        url,
-        init: { method: 'POST', headers: { 'content-type': 'application/json' }, body },
-      };
     }
   }
 }
 
 // The robots answer a refused message with HTTP 200 and a code of their own in the body.
-async function deliver(config: PushChannelConfig, message: PushMessage) {
-  const { url, init } = pushRequest(config, message);
+async function deliver(config: PushChannelConfig, values: PushValues) {
+  const { url, init } = pushRequest(config, values);
   let response: Response;
   try {
     response = await fetch(url, { ...init, signal: AbortSignal.timeout(10_000) });
@@ -175,19 +205,77 @@ async function deliver(config: PushChannelConfig, message: PushMessage) {
     );
 }
 
+// Month, day and time where the user is.
+function when(at: string | number, timeZone: string) {
+  const part = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    })
+      .formatToParts(new Date(at))
+      .map(({ type, value }) => [type, value]),
+  );
+  return `${part.month}-${part.day} ${part.hour}:${part.minute}`;
+}
+function lasted(ms: number) {
+  const seconds = Math.round(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 1) return `${seconds} 秒`;
+  if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`;
+  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
+}
+// claude-opus-5-5 is Opus 5.5; a name of another form is shown as it is.
+function modelName(model: string) {
+  const parts = /^claude-([a-z]+)-(\d+)-(\d+)/.exec(model);
+  return parts ? `${parts[1][0].toUpperCase()}${parts[1].slice(1)} ${parts[2]}.${parts[3]}` : model;
+}
+// What the session's last reading says of its model and the plan quota. A model's own weekly window is named after
+// it (`seven_day_opus`, or `seven_day:Fable` as the plan reports it); without one the figure is left out.
+function readings(metrics: NativeMetrics | null | undefined, timeZone: string) {
+  const model = metrics?.context?.model;
+  const read = metrics?.rateLimits?.available
+    ? metrics.rateLimits.windows.filter((window) => window.utilization !== null)
+    : [];
+  const used = (window?: (typeof read)[number]) =>
+    window ? `${Math.round(window.utilization!)}%` : undefined;
+  const hour = read.find((window) => window.name === 'five_hour');
+  const family = model && /^claude-([a-z]+)/.exec(model)?.[1];
+  return {
+    model: model ? modelName(model) : undefined,
+    quota5h: used(hour),
+    quota5hReset: hour?.resetsAt ? when(hour.resetsAt, timeZone) : undefined,
+    quotaWeek: used(read.find((window) => window.name === 'seven_day')),
+    quotaModel: used(
+      family
+        ? read.find(
+            (window) =>
+              window.name.startsWith('seven_day') && window.name.toLowerCase().includes(family),
+          )
+        : undefined,
+    ),
+  };
+}
+
 type Hooks = {
   session: (sessionId: string) => Session | undefined;
-  // Where a browser opens the session, while the service serves browsers.
-  link: (sessionId: string) => string | undefined;
+  // When the session's run began, and its last reading of the model and the quota.
+  facts: (sessionId: string) => { startedAt?: number; metrics?: NativeMetrics | null };
+  // The page a browser opens, while the service serves browsers; a session is a place on it.
+  page: () => string | undefined;
   // A turn ended that a `once` subscription was for; the session is sent on with its run's status.
   ended: (sessionId: string) => void;
   changed: (state: PushState) => void;
   deliver?: typeof deliver;
 };
 
-// Watches the runs of the chat for what a user away from every window would want to know — a turn ended, or it waits for
-// an answer — and sends it to every channel switched on: for a session subscribed to, at once; for the others, only
-// approvals and questions, if the setting asks, and after the delay it sets if no window answered them by then.
+// Watches the runs of the chat for what a user away from every window would want to know — a run ended, or it waits
+// for an answer — and sends it to every channel switched on, each as its own template says: for a session subscribed
+// to, at once; for the others, only approvals and questions, if the setting asks, and after the delay it sets if no
+// window answered them by then.
 export class Pushes {
   settings: PushSettings;
   private failures = new Map<string, { at: string; message: string }>();
@@ -202,26 +290,58 @@ export class Pushes {
     this.settings = readPush(directory);
   }
 
+  // Every window, a browser's too, is told each channel's config without what it sends with.
   state(): PushState {
     const { channels, ...options } = this.settings;
     return {
       ...options,
-      channels: channels.map(({ id, name, enabled, config }) => ({
-        id,
-        name,
-        kind: config.kind,
-        enabled,
-        ...(this.failures.has(id) ? { failure: this.failures.get(id) } : {}),
-      })),
+      channels: channels.map(({ id, name, enabled, config }) => {
+        const secret = pushSecrets[config.kind];
+        const entries = Object.entries(config) as [string, string][];
+        return {
+          id,
+          name,
+          kind: config.kind,
+          enabled,
+          config: Object.fromEntries(entries.filter(([key]) => !secret.includes(key))),
+          secrets: entries.filter(([key]) => secret.includes(key)).map(([key]) => key),
+          ...(this.failures.has(id) ? { failure: this.failures.get(id) } : {}),
+        };
+      }),
     };
   }
   update(values: Partial<PushOptions>) {
     return this.save({ ...this.settings, ...values });
   }
-  add(name: string, config: PushChannelConfig) {
+  // Adds a channel, or changes one: a field it sends with that the change leaves out or empty is kept, and null takes
+  // an optional one away. A channel that becomes another kind is given anew.
+  put(channelId: string | undefined, name: string, input: Record<string, string | null>) {
+    const existing = channelId ? this.channel(channelId) : undefined;
+    const kept: Record<string, unknown> =
+      existing?.config.kind === input.kind ? existing.config : {};
+    const config: Record<string, unknown> = { ...input };
+    for (const key of pushSecrets[input.kind as PushChannelConfig['kind']] ?? []) {
+      if (config[key] === null) delete config[key];
+      else if (!config[key]) {
+        if (kept[key] === undefined) delete config[key];
+        else config[key] = kept[key];
+      }
+    }
+    const parsed = pushChannelConfigSchema.safeParse(config);
+    if (!parsed.success)
+      throw new DomainError(
+        'push_channel_invalid',
+        `渠道设置不完整或有误：${[...new Set(parsed.error.issues.map((issue) => issue.path.join('.')))].join('、')}`,
+      );
+    const channel = existing
+      ? { ...existing, name, config: parsed.data }
+      : { id: randomUUID(), name, enabled: true, config: parsed.data };
+    if (existing) this.failures.delete(existing.id);
     return this.save({
       ...this.settings,
-      channels: [...this.settings.channels, { id: randomUUID(), name, enabled: true, config }],
+      channels: existing
+        ? this.settings.channels.map((item) => (item.id === existing.id ? channel : item))
+        : [...this.settings.channels, channel],
     });
   }
   enable(channelId: string, enabled: boolean) {
@@ -240,12 +360,15 @@ export class Pushes {
       channels: this.settings.channels.filter((channel) => channel.id !== channelId),
     });
   }
-  // Sends whether or not pushes or the channel are switched on, and says why it failed.
+  // Sends whether or not pushes or the channel are switched on, and says why it failed: the channel's own template,
+  // filled with the samples the settings page shows, and the page a browser opens for its link.
   async test(channelId: string) {
-    const failure = await this.send(this.channel(channelId), {
-      title: '【测试推送】CC Desk Tunnel',
-      text: '推送渠道工作正常。',
-    });
+    const values: PushValues = Object.fromEntries(
+      pushVariables.map(({ name, sample }) => [name, sample]),
+    );
+    values.event = '测试推送';
+    values.url = this.hooks.page();
+    const failure = await this.send(this.channel(channelId), values);
     if (failure) throw new DomainError('push_failed', `发送失败：${failure}`);
   }
 
@@ -294,22 +417,27 @@ export class Pushes {
 
   private push(session: Session, kind: PushKind) {
     if (!this.settings.enabled || !this.settings.events[kind]) return;
-    const error = kind === 'failed' ? this.errors.get(session.id) : undefined;
-    const message: PushMessage = {
-      title: `【${headings[kind]}】${session.title}`,
-      text: [
-        `设备：${session.device?.name ?? '未知设备'}`,
-        ...(error ? [`错误：${error}`] : []),
-      ].join('\n'),
-      url: this.hooks.link(session.id),
+    const { timeZone } = this.settings;
+    const { startedAt, metrics } = this.hooks.facts(session.id);
+    const page = this.hooks.page();
+    const values: PushValues = {
+      event: headings[kind],
+      session: session.title,
+      device: session.device?.name,
+      project: session.projectPath.split(/[\\/]/).filter(Boolean).at(-1),
+      duration: startedAt === undefined ? undefined : lasted(Date.now() - startedAt),
+      time: when(Date.now(), timeZone),
+      error: kind === 'failed' ? this.errors.get(session.id) : undefined,
+      ...readings(metrics, timeZone),
+      url: page && `${page}#session=${session.id}`,
     };
     for (const channel of this.settings.channels)
-      if (channel.enabled) void this.send(channel, message);
+      if (channel.enabled) void this.send(channel, values);
   }
   // The reason it failed, or nothing once it was sent. Only a change of the failures is told to the windows.
-  private async send(channel: PushChannel, message: PushMessage) {
+  private async send(channel: PushChannel, values: PushValues) {
     try {
-      await (this.hooks.deliver ?? deliver)(channel.config, message);
+      await (this.hooks.deliver ?? deliver)(channel.config, values);
       if (this.failures.delete(channel.id)) this.hooks.changed(this.state());
       return undefined;
     } catch (error) {

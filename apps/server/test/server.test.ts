@@ -1137,7 +1137,11 @@ test('a session subscribed for one turn pushes its approval and its end, then no
   await client.request({
     type: 'push.channel.add',
     name: '测试',
-    config: { kind: 'webhook', url: hookUrl, body: '{"t":"{{title}}","x":"{{text}}"}' },
+    config: {
+      kind: 'webhook',
+      url: hookUrl,
+      body: '{"t":"【{event}】{session}","x":"设备：{device}"}',
+    },
   });
   const state = await client.wait(
     (message) => message.type === 'push.state' && message.values.channels.length > 0,

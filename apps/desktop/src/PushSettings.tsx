@@ -1,37 +1,43 @@
 import { useEffect, useState } from 'react';
-import { Plus, Trash2 } from 'lucide-react';
-import { pushChannelConfigSchema } from '@cc-desk-tunnel/protocol';
-import type { PushOptions, PushState } from '@cc-desk-tunnel/protocol';
+import { Pencil, Plus, Trash2 } from 'lucide-react';
+import {
+  fillPush,
+  pushDefaults,
+  pushFormats,
+  pushSecrets,
+  pushVariables,
+  renderPush,
+} from '@cc-desk-tunnel/protocol';
+import type { PushChannelKind, PushOptions, PushState } from '@cc-desk-tunnel/protocol';
 import type { ProxyClient } from './client.ts';
 import { DialogForm, IconButton, Row, Switch } from './ui.tsx';
 
-type Kind = PushState['channels'][number]['kind'];
-type Field = {
-  key: string;
-  label: string;
-  placeholder?: string;
-  optional?: boolean;
-  long?: boolean;
-};
-const url = (placeholder: string): Field => ({ key: 'url', label: 'Webhook 地址', placeholder });
-const kinds: Record<Kind, { name: string; fields: Field[] }> = {
+type Channel = PushState['channels'][number];
+type Field = { key: string; label: string; placeholder?: string; optional?: boolean };
+const webhookUrl = (placeholder: string): Field => ({
+  key: 'url',
+  label: 'Webhook 地址',
+  placeholder,
+});
+// Where each kind of channel sends: the fields of `pushSecrets` are not shown again once given.
+const kinds: Record<PushChannelKind, { name: string; fields: Field[] }> = {
   dingtalk: {
     name: '钉钉机器人',
     fields: [
-      url('https://oapi.dingtalk.com/robot/send?access_token=…'),
-      { key: 'secret', label: '加签密钥（可选）', placeholder: 'SEC…', optional: true },
+      webhookUrl('https://oapi.dingtalk.com/robot/send?access_token=…'),
+      { key: 'secret', label: '加签密钥', placeholder: 'SEC…', optional: true },
     ],
   },
   feishu: {
     name: '飞书机器人',
     fields: [
-      url('https://open.feishu.cn/open-apis/bot/v2/hook/…'),
-      { key: 'secret', label: '签名校验密钥（可选）', optional: true },
+      webhookUrl('https://open.feishu.cn/open-apis/bot/v2/hook/…'),
+      { key: 'secret', label: '签名校验密钥', optional: true },
     ],
   },
   wecom: {
     name: '企业微信群机器人',
-    fields: [url('https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…')],
+    fields: [webhookUrl('https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…')],
   },
   telegram: {
     name: 'Telegram Bot',
@@ -46,40 +52,26 @@ const kinds: Record<Kind, { name: string; fields: Field[] }> = {
   },
   webhook: {
     name: '通用 Webhook',
-    fields: [
-      { key: 'url', label: '地址', placeholder: 'https://…' },
-      {
-        key: 'body',
-        label: '请求体（可选）',
-        placeholder: '{"title": "{{title}}", "text": "{{text}}"}',
-        optional: true,
-        long: true,
-      },
-    ],
+    fields: [{ key: 'url', label: '地址', placeholder: 'https://…' }],
   },
 };
 const delays = [0, 1, 2, 5, 10, 15, 30, 60];
 const events: { key: keyof PushOptions['events']; title: string; detail: string }[] = [
   { key: 'approval', title: '等待审批', detail: '有操作需要你允许或拒绝' },
   { key: 'question', title: 'Claude 提问', detail: 'Claude 需要你回答问题才能继续' },
-  { key: 'done', title: '任务完成', detail: 'Claude Code 做完了一轮任务' },
-  { key: 'failed', title: '任务失败', detail: '一轮任务因错误而结束' },
+  { key: 'done', title: '任务完成', detail: 'Claude Code 做完了一次运行' },
+  { key: 'failed', title: '任务失败', detail: '运行因错误而结束' },
 ];
+// Times in a push read as where the user is; every change from a window says where that is.
+const timeZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-// The service's pushes to a chat robot or a phone app, for when no window is in front of the user. A browser changes
-// what is pushed and switches channels on and off; only the desktop adds or removes them, and what they send with is
-// never shown again.
-export default function PushSettings({
-  client,
-  browser,
-}: {
-  client: ProxyClient;
-  browser: boolean;
-}) {
+// The service's pushes to a chat robot or a phone app, for when no window is in front of the user. A browser sets
+// them as the desktop does: what a channel sends with is never shown again, in either.
+export default function PushSettings({ client }: { client: ProxyClient }) {
   const [values, setValues] = useState<PushState | null>(client.state.push);
   const [failure, setFailure] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<Channel | 'new' | null>(null);
   const [tested, setTested] = useState<string | null>(null);
   useEffect(() => {
     let current = true;
@@ -106,7 +98,7 @@ export default function PushSettings({
     }
   }
   const save = (change: Partial<PushOptions>) =>
-    run(() => client.fetch({ type: 'push.update', values: change }));
+    run(() => client.fetch({ type: 'push.update', values: { ...change, timeZone: timeZone() } }));
   if (!values)
     return failure ? (
       <p className="error-text" role="alert">
@@ -194,11 +186,7 @@ export default function PushSettings({
 
       <h2 className="page-heading">推送渠道</h2>
       <div className="card">
-        {values.channels.length === 0 && (
-          <p className="muted push-empty">
-            {browser ? '还没有推送渠道，请在桌面客户端里添加。' : '还没有推送渠道。'}
-          </p>
-        )}
+        {values.channels.length === 0 && <p className="muted push-empty">还没有推送渠道。</p>}
         {values.channels.map((channel) => (
           <Row
             key={channel.id}
@@ -212,7 +200,13 @@ export default function PushSettings({
               ) : tested === channel.id ? (
                 '测试推送已发出'
               ) : (
-                kinds[channel.kind].name
+                [
+                  kinds[channel.kind].name,
+                  pushFormats[channel.kind].find((item) => item.value === channel.config.format)
+                    ?.label,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')
               )
             }
           >
@@ -231,19 +225,24 @@ export default function PushSettings({
               >
                 测试
               </button>
-              {!browser && (
-                <IconButton
-                  title={`删除 ${channel.name}`}
-                  disabled={saving}
-                  onClick={() =>
-                    void run(() =>
-                      client.fetch({ type: 'push.channel.delete', channelId: channel.id }),
-                    )
-                  }
-                >
-                  <Trash2 />
-                </IconButton>
-              )}
+              <IconButton
+                title={`编辑 ${channel.name}`}
+                disabled={saving}
+                onClick={() => setEditing(channel)}
+              >
+                <Pencil />
+              </IconButton>
+              <IconButton
+                title={`删除 ${channel.name}`}
+                disabled={saving}
+                onClick={() =>
+                  void run(() =>
+                    client.fetch({ type: 'push.channel.delete', channelId: channel.id }),
+                  )
+                }
+              >
+                <Trash2 />
+              </IconButton>
               <Switch
                 label={`启用 ${channel.name}`}
                 checked={channel.enabled}
@@ -258,81 +257,129 @@ export default function PushSettings({
           </Row>
         ))}
       </div>
-      {!browser && (
-        <button type="button" className="button" disabled={saving} onClick={() => setAdding(true)}>
-          <Plus />
-          添加渠道
-        </button>
-      )}
-      {adding && (
-        <AddChannel
-          add={async (name, config) => {
-            await client.fetch({ type: 'push.channel.add', name, config });
-            setAdding(false);
+      <button type="button" className="button" disabled={saving} onClick={() => setEditing('new')}>
+        <Plus />
+        添加渠道
+      </button>
+      {editing && (
+        <ChannelDialog
+          channel={editing === 'new' ? null : editing}
+          save={async (name, config) => {
+            if (editing === 'new') await client.fetch({ type: 'push.channel.add', name, config });
+            else
+              await client.fetch({
+                type: 'push.channel.update',
+                channelId: editing.id,
+                name,
+                config,
+              });
+            setEditing(null);
           }}
-          close={() => setAdding(false)}
+          close={() => setEditing(null)}
         />
       )}
     </>
   );
 }
 
-function AddChannel({
-  add,
+// Adds a channel, or changes one. What it sends with starts empty when it is changed, and is kept if left so; an
+// optional one can be taken away. Its content is written in its format, with the variables of a push.
+function ChannelDialog({
+  channel,
+  save,
   close,
 }: {
-  add: (name: string, config: ReturnType<typeof pushChannelConfigSchema.parse>) => Promise<void>;
+  channel: Channel | null;
+  save: (
+    name: string,
+    config: { kind: PushChannelKind } & Record<string, string | null>,
+  ) => Promise<void>;
   close: () => void;
 }) {
-  const [kind, setKind] = useState<Kind>('dingtalk');
-  const [name, setName] = useState('');
-  const [fields, setFields] = useState<Record<string, string>>({});
+  const [kind, setKind] = useState<PushChannelKind>(channel?.kind ?? 'dingtalk');
+  const [name, setName] = useState(channel?.name ?? '');
+  const [fields, setFields] = useState<Record<string, string>>(
+    channel ? channel.config : pushDefaults('dingtalk'),
+  );
+  const [cleared, setCleared] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  async function submit() {
-    // The service refuses what does not fit; it is checked here first to say so in the dialog.
-    const config = pushChannelConfigSchema.safeParse({
-      kind,
+  const secrets = pushSecrets[kind];
+  const set = (key: string, value: string) =>
+    setFields((current) => ({ ...current, [key]: value }));
+  const has = (key: string) => !!channel?.secrets.includes(key) && !cleared.includes(key);
+  // A content left as the old format had it becomes the new one's; what the user wrote stays.
+  function format(next: string) {
+    const before = pushDefaults(kind, fields.format);
+    const after = pushDefaults(kind, next);
+    setFields((current) => ({
+      ...current,
       ...Object.fromEntries(
-        kinds[kind].fields
-          .map(({ key }) => [key, (fields[key] ?? '').trim()])
-          .filter(([key, value]) => value || key === 'body'),
+        Object.entries(after).filter(
+          ([key]) => current[key] === undefined || current[key] === before[key],
+        ),
       ),
-    });
-    if (!config.success) return setError('请检查填写的内容：地址需以 https:// 或 http:// 开头。');
+      format: next,
+    }));
+  }
+  async function submit() {
+    const missing = kinds[kind].fields.filter(
+      ({ key, optional }) => !optional && !fields[key]?.trim() && !has(key),
+    );
+    if (missing.length) return setError(`请填写：${missing.map(({ label }) => label).join('、')}`);
     setBusy(true);
     setError('');
     try {
-      await add(name.trim() || kinds[kind].name, config.data);
+      const config: { kind: PushChannelKind } & Record<string, string | null> = { kind };
+      for (const [key, value] of Object.entries(fields))
+        if (!secrets.includes(key) || value.trim()) config[key] = value;
+      for (const key of cleared) config[key] = null;
+      await save(name.trim() || kinds[kind].name, config);
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : '添加失败。');
+      setError(failure instanceof Error ? failure.message : '保存失败。');
       setBusy(false);
     }
   }
+  const samples = Object.fromEntries(pushVariables.map(({ name, sample }) => [name, sample]));
+  const preview =
+    kind === 'webhook'
+      ? fillPush(fields.body ?? '', samples)
+      : [
+          renderPush(fields.title ?? '', samples),
+          renderPush(fields.body ?? '', samples),
+          ...(kind === 'dingtalk' && fields.format === 'actionCard'
+            ? [`［${fields.button || '打开'}］→ ${fillPush(fields.buttonUrl ?? '', samples)}`]
+            : []),
+        ]
+          .filter(Boolean)
+          .join('\n');
   return (
     <DialogForm
-      title="添加推送渠道"
+      title={channel ? `编辑 ${channel.name}` : '添加推送渠道'}
       busy={busy}
       error={error}
       close={close}
       submit={() => void submit()}
     >
-      <label>
-        类型
-        <select
-          value={kind}
-          onChange={({ target }) => {
-            setKind(target.value as Kind);
-            setFields({});
-          }}
-        >
-          {Object.entries(kinds).map(([value, { name }]) => (
-            <option key={value} value={value}>
-              {name}
-            </option>
-          ))}
-        </select>
-      </label>
+      {!channel && (
+        <label>
+          类型
+          <select
+            value={kind}
+            onChange={({ target }) => {
+              const next = target.value as PushChannelKind;
+              setKind(next);
+              setFields(pushDefaults(next));
+            }}
+          >
+            {Object.entries(kinds).map(([value, { name }]) => (
+              <option key={value} value={value}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <label>
         名称
         <input
@@ -342,35 +389,102 @@ function AddChannel({
           onChange={({ target }) => setName(target.value)}
         />
       </label>
-      {kinds[kind].fields.map(({ key, label, placeholder, optional, long }) => (
+      {kinds[kind].fields.map(({ key, label, placeholder, optional }) => (
         <label key={`${kind}-${key}`}>
-          {label}
-          {long ? (
-            <textarea
-              rows={4}
-              value={fields[key] ?? ''}
-              placeholder={placeholder}
-              onChange={({ target }) => setFields({ ...fields, [key]: target.value })}
-            />
-          ) : (
-            <input
-              value={fields[key] ?? ''}
-              required={!optional}
-              placeholder={placeholder}
-              autoComplete="off"
-              onChange={({ target }) => setFields({ ...fields, [key]: target.value })}
-            />
+          {optional ? `${label}（可选）` : label}
+          <input
+            value={fields[key] ?? ''}
+            placeholder={has(key) ? '已设置，留空不修改' : placeholder}
+            autoComplete="off"
+            onChange={({ target }) => set(key, target.value)}
+          />
+          {optional && has(key) && (
+            <button
+              type="button"
+              className="button"
+              onClick={() => setCleared((current) => [...current, key])}
+            >
+              清除{label}
+            </button>
           )}
         </label>
       ))}
-      {kind === 'webhook' && (
-        <small className="muted">
-          {
-            '{{title}}、{{text}}、{{url}} 换成标题、内容和会话链接。有请求体时以 JSON 发送 POST，没有时对地址发 GET。'
-          }
-        </small>
+      {pushFormats[kind].length > 0 && (
+        <label>
+          消息格式
+          <select value={fields.format} onChange={({ target }) => format(target.value)}>
+            {pushFormats[kind].map(({ value, label }) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
       )}
-      <small className="muted">保存后不再显示这些内容；要修改，删除后重新添加。</small>
+      {kind !== 'webhook' && (
+        <label>
+          标题
+          <input
+            value={fields.title ?? ''}
+            maxLength={200}
+            onChange={({ target }) => set('title', target.value)}
+          />
+        </label>
+      )}
+      <label>
+        {kind === 'webhook' ? '请求体（JSON，留空则对地址发 GET）' : '正文'}
+        <textarea
+          rows={6}
+          value={fields.body ?? ''}
+          onChange={({ target }) => set('body', target.value)}
+        />
+      </label>
+      {kind === 'dingtalk' && fields.format === 'actionCard' && (
+        <>
+          <label>
+            按钮文字
+            <input
+              value={fields.button ?? ''}
+              maxLength={40}
+              onChange={({ target }) => set('button', target.value)}
+            />
+          </label>
+          <label>
+            按钮地址
+            <input
+              value={fields.buttonUrl ?? ''}
+              onChange={({ target }) => set('buttonUrl', target.value)}
+            />
+          </label>
+        </>
+      )}
+      {kind === 'bark' && (
+        <label>
+          点击后打开
+          <input
+            value={fields.clickUrl ?? ''}
+            onChange={({ target }) => set('clickUrl', target.value)}
+          />
+        </label>
+      )}
+      <details className="push-variables">
+        <summary>可用的变量</summary>
+        <ul>
+          {pushVariables.map(({ name, label }) => (
+            <li key={name}>
+              <code>{`{${name}}`}</code> {label}
+            </li>
+          ))}
+        </ul>
+        <small className="muted">
+          一行里的变量都没有值时，这一行不发送。没有标题栏的格式把标题作为第一行。按钮地址里
+          {' {url} '}原样使用，其他变量按网址编码。
+        </small>
+      </details>
+      <label>
+        预览（示例值）
+        <pre className="push-preview">{preview}</pre>
+      </label>
     </DialogForm>
   );
 }

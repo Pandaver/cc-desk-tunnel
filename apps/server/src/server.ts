@@ -141,6 +141,7 @@ export function upgradeHeld(sessions: Session[], mutating: boolean, signingIn: b
 export type Run = {
   id: string;
   sessionId: string;
+  startedAt: number;
   device: string;
   connectionId: string;
   controller: AbortController;
@@ -322,10 +323,11 @@ export function createProxyServer(options: ServerOptions) {
         return undefined;
       }
     },
-    link: (sessionId) => {
-      const page = web.enabled ? web.url(pageOrigin) : undefined;
-      return page && `${page}#session=${sessionId}`;
-    },
+    facts: (sessionId) => ({
+      startedAt: runs.get(sessionId)?.startedAt,
+      metrics: store.lastMetrics(sessionId),
+    }),
+    page: () => (web.enabled ? web.url(pageOrigin) : undefined),
     ended: (sessionId) => store.setPush(sessionId, 'off'),
     changed: (values) => broadcast({ type: 'push.state', values }),
   });
@@ -1438,6 +1440,7 @@ export function createProxyServer(options: ServerOptions) {
     const run: Run = {
       id: randomUUID(),
       sessionId: command.sessionId,
+      startedAt: Date.now(),
       device,
       connectionId: peer?.id ?? serverDevice.id,
       controller: new AbortController(),
@@ -1625,13 +1628,18 @@ export function createProxyServer(options: ServerOptions) {
         return undefined;
       case 'push.update':
       case 'push.channel.add':
+      case 'push.channel.update':
       case 'push.channel.enable':
       case 'push.channel.delete': {
         const values =
           command.type === 'push.update'
             ? pushes.update(command.values)
-            : command.type === 'push.channel.add'
-              ? pushes.add(command.name, command.config)
+            : command.type === 'push.channel.add' || command.type === 'push.channel.update'
+              ? pushes.put(
+                  command.type === 'push.channel.update' ? command.channelId : undefined,
+                  command.name,
+                  command.config,
+                )
               : command.type === 'push.channel.enable'
                 ? pushes.enable(command.channelId, command.enabled)
                 : pushes.remove(command.channelId);

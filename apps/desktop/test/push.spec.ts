@@ -34,6 +34,16 @@ test('a session is subscribed to pushes from beside the input box once a channel
   await expect(panel.getByRole('switch', { name: '启用 Bark', exact: true })).toBeChecked();
   await expect(panel).not.toContainText('ui-test-key');
   await page.screenshot({ path: resolve(shots, 'settings.png') });
+  // Changed without the address it sends to, which is not shown again and is kept.
+  await panel.getByRole('button', { name: '编辑 Bark', exact: true }).click();
+  await expect(dialog.getByLabel('Bark 地址')).toHaveValue('');
+  await expect(dialog.getByLabel('Bark 地址')).toHaveAttribute('placeholder', '已设置，留空不修改');
+  await dialog.getByLabel('标题').fill('{session}');
+  await expect(dialog.locator('.push-preview')).toContainText('修复登录页样式');
+  await page.screenshot({ path: resolve(shots, 'edit.png') });
+  await dialog.getByRole('button', { name: '确认', exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(panel).not.toContainText('ui-test-key');
 
   await page.getByRole('button', { name: '会话', exact: true }).click();
   await expect(page.locator('.session-row.selected strong')).toHaveText(title);
