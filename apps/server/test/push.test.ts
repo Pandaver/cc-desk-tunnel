@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import { pushDefaults } from '@cc-desk-tunnel/protocol';
-import type { Session } from '@cc-desk-tunnel/protocol';
+import type { NativeMetrics, Session } from '@cc-desk-tunnel/protocol';
 import { Pushes, pushRequest } from '../src/push.ts';
 import type { PushValues } from '../src/push.ts';
 
@@ -118,13 +118,18 @@ function setup(t: TestContext) {
     activeRun: null,
   } as unknown as Session;
   const sent: string[] = [];
+  const facts: { metrics?: NativeMetrics } = {};
+  let last: PushValues = {};
   const pushes = new Pushes(directory, {
     session: () => session,
-    facts: () => ({}),
+    facts: () => facts,
     page: () => undefined,
     ended: () => delete session.push,
     changed: () => {},
-    deliver: async (_config, { event, session }) => void sent.push(`【${event}】${session}`),
+    deliver: async (_config, values) => {
+      last = values;
+      sent.push(`【${values.event}】${values.session}`);
+    },
   });
   t.after(() => pushes.close());
   pushes.put(undefined, 'Bark', {
@@ -140,8 +145,34 @@ function setup(t: TestContext) {
       connectionId: randomUUID(),
       ...(waiting ? { waiting } : {}),
     });
-  return { session, sent, pushes, status };
+  return { session, sent, pushes, status, facts, last: () => last };
 }
+
+// Max keeps a weekly window for Fable alone: a session on Opus is told that one, under its model's name.
+test('the weekly quota of one model is the one for the session’s model, or else the fullest the plan keeps', (t) => {
+  const { session, status, facts, last } = setup(t);
+  const window = (name: string, utilization: number) => ({ name, utilization, resetsAt: null });
+  facts.metrics = {
+    type: 'native.metrics',
+    context: { model: 'claude-opus-5-5' },
+    usage: null,
+    rateLimits: {
+      available: true,
+      windows: [
+        window('five_hour', 32),
+        window('seven_day', 58),
+        window('seven_day:Fable', 71),
+        window('seven_day_oauth_apps', 90),
+      ],
+    },
+  } as unknown as NativeMetrics;
+  session.push = 'always';
+  status('completed');
+  assert.deepEqual(
+    [last().model, last().quota5h, last().quotaWeek, last().quotaModel, last().quotaModelName],
+    ['Opus 5.5', '32%', '58%', '71%', 'Fable'],
+  );
+});
 
 test('an approval of a session not subscribed to is pushed after the delay, unless answered first', (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });

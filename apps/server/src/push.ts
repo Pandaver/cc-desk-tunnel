@@ -245,8 +245,18 @@ function modelName(model: string) {
   const parts = /^claude-([a-z]+)-(\d+)-(\d+)/.exec(model);
   return parts ? `${parts[1][0].toUpperCase()}${parts[1].slice(1)} ${parts[2]}.${parts[3]}` : model;
 }
-// What the session's last reading says of its model and the plan quota. A model's own weekly window is named after
-// it (`seven_day_opus`, or `seven_day:Fable` as the plan reports it); without one the figure is left out.
+// The weekly windows a plan keeps for one model, and the model each is for: `seven_day_opus`, `seven_day:Fable` as
+// the plan names it, or one a long-lived token's replies leave unnamed.
+function modelWindow(name: string) {
+  if (name.startsWith('seven_day:')) return name.slice(10);
+  if (name === 'seven_day_opus') return 'Opus';
+  if (name === 'seven_day_sonnet') return 'Sonnet';
+  if (name === 'seven_day_overage_included') return '按模型';
+  return undefined;
+}
+// What the session's last reading says of its model and the plan quota. Of the windows a plan keeps for one model,
+// the one for the session's model if it has one, or else the fullest: a plan may keep one for a model the session
+// does not use, as Fable on Max, which is still the one worth a glance.
 function readings(metrics: NativeMetrics | null | undefined, timeZone: string) {
   const model = metrics?.context?.model;
   const read = metrics?.rateLimits?.available
@@ -256,19 +266,19 @@ function readings(metrics: NativeMetrics | null | undefined, timeZone: string) {
     window ? `${Math.round(window.utilization!)}%` : undefined;
   const hour = read.find((window) => window.name === 'five_hour');
   const family = model && /^claude-([a-z]+)/.exec(model)?.[1];
+  const perModel = read
+    .filter((window) => modelWindow(window.name))
+    .sort((a, b) => b.utilization! - a.utilization!);
+  const own =
+    perModel.find((window) => family && modelWindow(window.name)!.toLowerCase() === family) ??
+    perModel[0];
   return {
     model: model ? modelName(model) : undefined,
     quota5h: used(hour),
     quota5hReset: hour?.resetsAt ? when(hour.resetsAt, timeZone) : undefined,
     quotaWeek: used(read.find((window) => window.name === 'seven_day')),
-    quotaModel: used(
-      family
-        ? read.find(
-            (window) =>
-              window.name.startsWith('seven_day') && window.name.toLowerCase().includes(family),
-          )
-        : undefined,
-    ),
+    quotaModel: used(own),
+    quotaModelName: own && modelWindow(own.name),
   };
 }
 

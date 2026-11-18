@@ -334,7 +334,12 @@ export const pushVariables = [
   { name: 'quota5h', label: '5 小时额度已用', sample: '32%' },
   { name: 'quota5hReset', label: '5 小时额度重置时间', sample: '11-19 02:00' },
   { name: 'quotaWeek', label: '每周额度已用', sample: '58%' },
-  { name: 'quotaModel', label: '当前模型的每周额度已用', sample: '71%' },
+  {
+    name: 'quotaModel',
+    label: '按模型单独计的每周额度已用（当前模型的，或用得最多的）',
+    sample: '71%',
+  },
+  { name: 'quotaModelName', label: '上面这项额度的模型', sample: 'Fable' },
   {
     name: 'url',
     label: '会话页面，开启浏览器访问时才有',
@@ -385,7 +390,7 @@ const pushPage = [
   `<div style="height:6px;background:#e5e7eb;border-radius:3px;margin-top:4px"><div style="width:{quota5h};height:6px;background:#2563eb;border-radius:3px"></div></div>`,
   `<div style="display:flex;justify-content:space-between;margin-top:10px"><span>每周额度</span><b style="color:#374151">{quotaWeek}</b></div>`,
   `<div style="height:6px;background:#e5e7eb;border-radius:3px;margin-top:4px"><div style="width:{quotaWeek};height:6px;background:#7c3aed;border-radius:3px"></div></div>`,
-  `<div style="display:flex;justify-content:space-between;margin-top:10px"><span>当前模型每周额度</span><b style="color:#374151">{quotaModel}</b></div>`,
+  `<div style="display:flex;justify-content:space-between;margin-top:10px"><span>{quotaModelName} 每周额度</span><b style="color:#374151">{quotaModel}</b></div>`,
   `<div style="height:6px;background:#e5e7eb;border-radius:3px;margin-top:4px"><div style="width:{quotaModel};height:6px;background:#0891b2;border-radius:3px"></div></div>`,
   `</div>`,
   `<div style="padding:0 20px 18px"><a href="{url}" style="display:block;text-align:center;background:#2563eb;color:#fff;text-decoration:none;padding:11px;border-radius:8px;font-size:15px">打开会话</a></div>`,
