@@ -4206,7 +4206,9 @@ dialog {
   font-size: 12.5px;
   line-height: 1.8;
 }
+/* Only to look at: its button and links go nowhere from here. */
 .push-preview-page {
+  pointer-events: none;
   width: 100%;
   height: 560px;
   border: 1px solid var(--line);

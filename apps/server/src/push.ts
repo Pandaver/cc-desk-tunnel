@@ -49,8 +49,16 @@ export function readPush(directory: string): PushSettings {
 function writePush(directory: string, settings: PushSettings) {
   const next = pushSettingsSchema.parse(settings);
   writeFileSync(`${file(directory)}.new`, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 });
-  renameSync(`${file(directory)}.new`, file(directory));
-  return next;
+  // Windows refuses the rename now and then while something, as a virus scan, still holds the file just written. The
+  // service runs on Linux, but its tests and the development service run here, and a switch saves at each click.
+  for (let attempt = 1; ; attempt++)
+    try {
+      renameSync(`${file(directory)}.new`, file(directory));
+      return next;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EPERM' || attempt === 5) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 * attempt);
+    }
 }
 
 // The variables of a push (`pushVariables`), each there even without a value, so that a line of one is left out.
@@ -105,7 +113,7 @@ export function pushRequest(
   const escaped =
     (config.kind === 'telegram' || config.kind === 'pushplus') && config.format === 'html';
   const title =
-    renderPush(config.title, values).split('\n')[0] || `【${values.event}】${values.session}`;
+    renderPush(config.title, values).split('\n')[0] || `「${values.event}」${values.session}`;
   const body = renderPush(config.body, values, escaped ? html : undefined);
   const plain = [title, body].filter(Boolean).join('\n');
   switch (config.kind) {

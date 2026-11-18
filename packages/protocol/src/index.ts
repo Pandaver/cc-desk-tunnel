@@ -407,7 +407,7 @@ export function pushDefaults(
   kind: PushChannelKind,
   format = pushFormats[kind][0]?.value,
 ): Record<string, string> {
-  const title = '【{event}】{session}';
+  const title = '「{event}」{session}';
   const body = [
     '设备：{device} · 项目：{project}',
     '错误：{error}',
@@ -420,7 +420,7 @@ export function pushDefaults(
         ? '\n<a href="{url}">打开会话</a>'
         : '';
   if (kind === 'webhook')
-    return { body: '{"title": "【{event}】{session}", "text": "设备：{device}", "url": "{url}"}' };
+    return { body: '{"title": "「{event}」{session}", "text": "设备：{device}", "url": "{url}"}' };
   if (kind === 'bark') return { title, body, clickUrl: '{url}' };
   if (kind === 'pushplus')
     return {

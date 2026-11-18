@@ -1140,7 +1140,7 @@ test('a session subscribed for one turn pushes its approval and its end, then no
     config: {
       kind: 'webhook',
       url: hookUrl,
-      body: '{"t":"【{event}】{session}","x":"设备：{device}"}',
+      body: '{"t":"「{event}」{session}","x":"设备：{device}"}',
     },
   });
   const state = await client.wait(
@@ -1171,7 +1171,7 @@ test('a session subscribed for one turn pushes its approval and its end, then no
   while (pushed.length < 2) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.deepEqual(
     pushed.map((message) => message.t),
-    ['【等待审批】中文会话', '【任务完成】中文会话'],
+    ['「等待审批」中文会话', '「任务完成」中文会话'],
   );
   assert.equal(pushed[1].x, `设备：${device.name}`);
 

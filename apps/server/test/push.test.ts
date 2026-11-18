@@ -74,7 +74,7 @@ test('each channel sends its own template: a webhook its JSON, a card its button
   const page = body(pushRequest(pushplus, values));
   assert.deepEqual(
     [page.template, page.title, 'channel' in page],
-    ['html', '【任务完成】"引号" <b>', false],
+    ['html', '「任务完成」"引号" <b>', false],
   );
   assert.ok(page.content.includes('&quot;引号&quot; &lt;b&gt;'));
   assert.equal(page.content.includes('⚠️'), false);
@@ -128,7 +128,7 @@ function setup(t: TestContext) {
     changed: () => {},
     deliver: async (_config, values) => {
       last = values;
-      sent.push(`【${values.event}】${values.session}`);
+      sent.push(`「${values.event}」${values.session}`);
     },
   });
   t.after(() => pushes.close());
@@ -206,7 +206,7 @@ test('an approval of a session not subscribed to is pushed after the delay, unle
 
   waiting();
   t.mock.timers.tick(5 * 60_000);
-  assert.deepEqual(sent, ['【等待审批】会话']);
+  assert.deepEqual(sent, ['「等待审批」会话']);
 });
 
 // Claude waits there for a build or tests and goes on once they end: a push for one turn is kept for the run's end.
@@ -219,6 +219,6 @@ test('a run waiting only on background tasks is not done: a subscription for one
   assert.deepEqual(sent, []);
   assert.equal(session.push, 'once');
   status('completed');
-  assert.deepEqual(sent, ['【任务完成】会话']);
+  assert.deepEqual(sent, ['「任务完成」会话']);
   assert.equal(session.push, undefined);
 });
