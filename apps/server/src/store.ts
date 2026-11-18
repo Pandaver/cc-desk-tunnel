@@ -22,6 +22,7 @@ import type {
   EventPayload,
   HistoryPage,
   PermissionMode,
+  PushMode,
   Session,
   SessionEvent,
   SessionSnapshot,
@@ -517,6 +518,8 @@ export class SessionStore {
       device: place.device,
       projectPath: place.projectPath ?? source.projectPath,
       autoTitle: false,
+      // A fork starts with the subscription the setting gives a new session.
+      push: undefined,
       // Claude Code forks a session beside it, in the directory it works in.
       nativeRoot: native
         ? (source.nativeRoot ?? source.id)
@@ -886,6 +889,14 @@ export class SessionStore {
     session.title = title;
     session.autoTitle = false;
     session.updatedAt = new Date().toISOString();
+    this.save(session);
+    return session;
+  }
+  // The session's subscription to pushes; it is not the session's use, and leaves its place in the list.
+  setPush(sessionId: string, mode: PushMode) {
+    const { session } = this.get(sessionId);
+    if (mode === 'off') delete session.push;
+    else session.push = mode;
     this.save(session);
     return session;
   }

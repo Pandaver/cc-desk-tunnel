@@ -4,7 +4,7 @@ import { webCertificateStateSchema } from './web-certificate.ts';
 export * from './web.ts';
 export * from './web-certificate.ts';
 
-export const PROTOCOL_VERSION = 27;
+export const PROTOCOL_VERSION = 28;
 // The release each protocol version began with, from 0.2.4 on: a client newer than its service signs in with
 // the service's number to have it upgrade (see the README). A new number adds its line here.
 export const PROTOCOL_HISTORY: Readonly<Record<string, number>> = {
@@ -26,6 +26,7 @@ export const PROTOCOL_HISTORY: Readonly<Record<string, number>> = {
   '0.3.14': 25,
   '0.3.15': 26,
   '0.3.16': 27,
+  '0.3.17': 28,
 };
 export const MAX_FRAME_BYTES = 256 * 1024;
 // The longest global instructions edited here, in characters; it keeps a frame of them within MAX_FRAME_BYTES.
@@ -143,6 +144,79 @@ export const idleCompactionSchema = z.object({
   minTokens: z.number().int().min(20_000).max(1_000_000),
 });
 export type IdleCompaction = z.infer<typeof idleCompactionSchema>;
+// The service's own pushes to a chat robot or a phone app, for a user away from every window, as in a browser: what a
+// session subscribed to says, and if asked, the approvals and questions of the others. Only a desktop sets up where
+// they go; what a channel is given to send there is never read back, by the desktop or a browser.
+export const pushKindSchema = z.enum(['approval', 'question', 'done', 'failed']);
+export type PushKind = z.infer<typeof pushKindSchema>;
+// `once` lasts until the session's turn now going, or the next one, ends.
+export const pushModeSchema = z.enum(['off', 'once', 'always']);
+export type PushMode = z.infer<typeof pushModeSchema>;
+const pushUrl = z.url({ protocol: /^https?$/ }).max(2048);
+const pushSecret = z.string().trim().min(1).max(512);
+export const pushChannelConfigSchema = z.discriminatedUnion('kind', [
+  // The robots' optional signing secrets; without one the robot must allow the request by keyword or address.
+  z.object({ kind: z.literal('dingtalk'), url: pushUrl, secret: pushSecret.optional() }).strict(),
+  z.object({ kind: z.literal('feishu'), url: pushUrl, secret: pushSecret.optional() }).strict(),
+  z.object({ kind: z.literal('wecom'), url: pushUrl }).strict(),
+  z
+    .object({
+      kind: z.literal('telegram'),
+      token: z
+        .string()
+        .trim()
+        .regex(/^\d+:[\w-]+$/),
+      chatId: z.string().trim().min(1).max(64),
+    })
+    .strict(),
+  // The app's address with the device key, as the Bark app shows it: https://api.day.app/<key>.
+  z.object({ kind: z.literal('bark'), url: pushUrl }).strict(),
+  // Any other service: the body, JSON with {{title}}, {{text}} and {{url}} in it, is posted; without one the URL is
+  // fetched with them filled into it.
+  z.object({ kind: z.literal('webhook'), url: pushUrl, body: z.string().max(4000) }).strict(),
+]);
+export type PushChannelConfig = z.infer<typeof pushChannelConfigSchema>;
+export const pushChannelSchema = z.object({
+  id,
+  name: z.string().trim().min(1).max(40),
+  enabled: z.boolean(),
+  config: pushChannelConfigSchema,
+});
+export type PushChannel = z.infer<typeof pushChannelSchema>;
+export const pushOptionsSchema = z.object({
+  enabled: z.boolean(),
+  events: z.object({
+    approval: z.boolean(),
+    question: z.boolean(),
+    done: z.boolean(),
+    failed: z.boolean(),
+  }),
+  // What a new or forked session starts with.
+  defaultMode: z.enum(['off', 'always']),
+  // Sessions not subscribed to also push their approvals and questions, `delayMinutes` after they began waiting
+  // if no window answered them by then; 0 pushes at once.
+  fallback: z.boolean(),
+  delayMinutes: z.number().int().min(0).max(60),
+});
+export type PushOptions = z.infer<typeof pushOptionsSchema>;
+export const pushSettingsSchema = pushOptionsSchema.extend({
+  channels: z.array(pushChannelSchema).max(20),
+});
+export type PushSettings = z.infer<typeof pushSettingsSchema>;
+// What every window is told: the channels without what they send with, and the last failure of each since the
+// service started.
+export const pushStateSchema = pushOptionsSchema.extend({
+  channels: z.array(
+    z.object({
+      id,
+      name: z.string(),
+      kind: z.enum(['dingtalk', 'feishu', 'wecom', 'telegram', 'bark', 'webhook']),
+      enabled: z.boolean(),
+      failure: z.object({ at: timestamp, message: z.string() }).optional(),
+    }),
+  ),
+});
+export type PushState = z.infer<typeof pushStateSchema>;
 export const contextUsageSchema = z.object({
   model: z.string(),
   usedTokens: z.number().nonnegative(),
@@ -474,6 +548,8 @@ export const sessionSchema = z.object({
   permissionMode: permissionModeSchema.default('auto'),
   model: z.string().trim().min(1).max(200).nullable().default(null),
   effort: effortSchema.nullable().default(null),
+  // The session's subscription to the service's pushes; none is `off`.
+  push: pushModeSchema.exclude(['off']).optional(),
   // The directory on the service that Claude Code works in, under its native/ folder: the one of the session's
   // project, which all sessions of the project share. A fork keeps it from the session it was forked from.
   // Sessions from before projects had one leave it out and work in a directory named after themselves.
@@ -619,6 +695,36 @@ export const commandSchema = z.discriminatedUnion('type', [
       ...request,
       values: idleCompactionSchema.partial().strict(),
     })
+    .strict(),
+  z.object({ type: z.literal('push.get'), ...request }).strict(),
+  z
+    .object({
+      type: z.literal('push.update'),
+      ...request,
+      values: pushOptionsSchema.partial().strict(),
+    })
+    .strict(),
+  // A channel's config is only ever given, never changed or read back: to change it, it is removed and added anew.
+  z
+    .object({
+      type: z.literal('push.channel.add'),
+      ...request,
+      name: pushChannelSchema.shape.name,
+      config: pushChannelConfigSchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('push.channel.enable'),
+      ...request,
+      channelId: id,
+      enabled: z.boolean(),
+    })
+    .strict(),
+  z.object({ type: z.literal('push.channel.delete'), ...request, channelId: id }).strict(),
+  z.object({ type: z.literal('push.test'), ...request, channelId: id }).strict(),
+  z
+    .object({ type: z.literal('session.push'), ...request, sessionId: id, mode: pushModeSchema })
     .strict(),
   // The shell the user prefers Claude to run scripts in on the computer of this connection; null leaves it to Claude.
   z
@@ -927,6 +1033,7 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
     requestId: id.optional(),
     values: idleCompactionSchema,
   }),
+  z.object({ type: z.literal('push.state'), requestId: id.optional(), values: pushStateSchema }),
   z.object({
     type: z.literal('instructions.state'),
     requestId: id,
