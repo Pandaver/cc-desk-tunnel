@@ -42,6 +42,15 @@ test('a session is subscribed to pushes from beside the input box once a channel
   await expect(bell).toHaveAttribute('title', '外部推送：本轮');
   await expect(page.locator('.session-row.selected').getByLabel('本轮推送')).toBeVisible();
   await page.screenshot({ path: resolve(shots, 'subscribed.png') });
+  // A toolbar too narrow for the native controls, as on a phone, folds the approval mode to its icon; the bell keeps
+  // its own. The simulated service has none of those controls, so the toolbar is folded here by hand, and read before
+  // it measures itself again.
+  const folded = await page.locator('.composer-toolbar').evaluate((bar) => {
+    bar.classList.add('compact-permission');
+    const icon = bar.querySelector('[aria-label="外部推送"] svg')!;
+    return getComputedStyle(icon).display;
+  });
+  expect(folded).not.toBe('none');
   await bell.click();
   await page.getByRole('menuitemradio', { name: '不订阅', exact: true }).click();
   await expect(page.locator('.session-row.selected .push-mark')).toHaveCount(0);

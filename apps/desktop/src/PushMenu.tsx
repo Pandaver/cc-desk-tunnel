@@ -3,7 +3,8 @@ import { Bell, BellDot, BellRing, Check } from 'lucide-react';
 import type { PushMode } from '@cc-desk-tunnel/protocol';
 
 // The session's subscription to the service's pushes, beside its approval mode: both go with the session, from
-// whichever window. Shown only once the service has a channel to push to.
+// whichever window. Shown only once the service has a channel to push to. Its menu is the approval mode's, but not its
+// control: a narrow toolbar folds that one to its first icon, and the bell has nothing but its icon.
 export const pushModes: { value: PushMode; name: string; detail: string; icon: typeof Bell }[] = [
   { value: 'off', name: '不订阅', detail: '不推送这个会话', icon: Bell },
   {
@@ -39,7 +40,7 @@ export default function PushMenu({
   }, [open]);
   const current = pushModes.find((item) => item.value === mode)!;
   return (
-    <div className="permission-control" ref={container}>
+    <div className="push-control" ref={container}>
       <button
         type="button"
         className={mode === 'off' ? 'chip' : 'chip subscribed'}
@@ -53,7 +54,7 @@ export default function PushMenu({
       </button>
       {open && (
         <div className="permission-menu" role="menu" aria-label="外部推送">
-          <p className="menu-heading">推送这个会话的通知到手机？</p>
+          <p className="menu-heading">把这个会话的通知推送到外部渠道？</p>
           {pushModes.map(({ value, name, detail, icon: Icon }) => (
             <button
               type="button"
