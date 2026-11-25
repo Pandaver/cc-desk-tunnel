@@ -1,13 +1,19 @@
 import { useState } from 'react';
 import { ChevronRight, ScrollText, Trash2 } from 'lucide-react';
 import { COMPOSER_SLOTS } from '@cc-desk-tunnel/protocol';
-import type { Plugin } from '@cc-desk-tunnel/protocol';
+import type { Plugin, PluginSlot } from '@cc-desk-tunnel/protocol';
 import type { ProxyClient } from './client.ts';
 import PluginInstall from './PluginInstall.tsx';
 import PluginLog from './PluginLog.tsx';
 import PluginPage, { titleOf, troubleOf } from './PluginPage.tsx';
 import { iconStyle } from './PluginSlot.tsx';
-import { IconButton, Page, SettingsHeading, Switch } from './ui.tsx';
+import { IconButton, Page, Switch } from './ui.tsx';
+
+const holds = `在输入框旁有按钮，最多同时 ${COMPOSER_SLOTS} 个插件有`;
+function slotIcon({ states }: PluginSlot) {
+  const all = Object.values(states);
+  return (all.find(({ active }) => active) ?? all[0]!).icon;
+}
 
 // The service's plugins, each opening a page of its own.
 export default function PluginSettings({
@@ -48,7 +54,6 @@ export default function PluginSettings({
         back={() => open(undefined)}
       />
     );
-  const taken = plugins.filter(({ slot }) => slot);
   return (
     <Page
       title="插件"
@@ -82,6 +87,15 @@ export default function PluginSettings({
               <button type="button" className="plugin-open" onClick={() => open(item.name)}>
                 <strong>
                   {title}
+                  {item.slot && (
+                    <i
+                      className="slot-icon plugin-holds"
+                      role="img"
+                      aria-label={holds}
+                      title={holds}
+                      style={iconStyle(slotIcon(item.slot))}
+                    />
+                  )}
                   {trouble && <i className="badge plugin-badge">{trouble.word}</i>}
                   <ChevronRight />
                 </strong>
@@ -116,38 +130,6 @@ export default function PluginSettings({
           );
         })}
       </div>
-      {plugins.length > 0 && (
-        <>
-          <SettingsHeading>输入框插槽</SettingsHeading>
-          <p className="muted page-section-note">
-            插件放在输入框旁的按钮，最多同时有 {COMPOSER_SLOTS} 个。
-          </p>
-          <div className="plugin-slots">
-            {Array.from({ length: COMPOSER_SLOTS }, (_, index) => {
-              const holder = taken[index];
-              if (!holder)
-                return (
-                  <span className="plugin-slot" key={index}>
-                    空闲
-                  </span>
-                );
-              const states = Object.values(holder.slot!.states);
-              const { icon } = states.find(({ active }) => active) ?? states[0]!;
-              return (
-                <button
-                  type="button"
-                  className="plugin-slot taken"
-                  key={index}
-                  onClick={() => open(holder.name)}
-                >
-                  <i className="slot-icon" style={iconStyle(icon)} />
-                  <span>{titleOf(holder)}</span>
-                </button>
-              );
-            })}
-          </div>
-        </>
-      )}
       {logging && (
         <PluginLog
           client={client}
