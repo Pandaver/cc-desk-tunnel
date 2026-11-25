@@ -305,14 +305,16 @@ export function createProxyServer(options: ServerOptions) {
     options.files === false ? undefined : new FileService(options.dataDir, options.files);
   // The file panel's connections of each control connection, which end with it.
   const fileConnections = new Map<string, Set<WebSocket>>();
-  const plugins = new Plugins(store.directory);
+  const plugins = new Plugins(store.directory, () => {
+    if (!closing) broadcast({ type: 'plugins', plugins: plugins.list() });
+  });
   const events = new ServiceEvents(
     (sessionId) => ({
       session: store.get(sessionId).session,
       metrics: store.lastMetrics(sessionId),
       quota: quotas.current(),
     }),
-    () => plugins.names().length > 0,
+    () => plugins.any(),
     (event) => plugins.dispatch(event),
   );
   const compactions = new IdleCompactions(store.directory, compactIdle);
@@ -1674,6 +1676,26 @@ export function createProxyServer(options: ServerOptions) {
     return true;
   }
 
+  async function plugin(peer: Peer, command: CommandOf<`plugin.${string}` & Command['type']>) {
+    const { name, requestId } = command;
+    if (command.type === 'plugin.enable') await plugins.enable(name, command.enabled);
+    else if (command.type === 'plugin.configure')
+      send(peer, {
+        type: 'plugin.checked',
+        requestId,
+        ...(await plugins.configure(name, command.values, command.save)),
+      });
+    else if (command.type === 'plugin.log')
+      send(peer, { type: 'plugin.log', requestId, text: plugins.logOf(name, command.clear) });
+    else
+      send(peer, {
+        type: 'plugin.done',
+        requestId,
+        ...(command.type === 'plugin.press'
+          ? await plugins.press(name, command.button, command.values)
+          : await plugins.attempt(name, command.event)),
+      });
+  }
   // Resolves to the session ID carried in the response frame; account and usage commands have none.
   async function execute(peer: Peer, command: Command): Promise<string | undefined> {
     if (isWebCommand(command)) {
@@ -1697,6 +1719,13 @@ export function createProxyServer(options: ServerOptions) {
         announce();
         return session.id;
       }
+      case 'plugin.enable':
+      case 'plugin.configure':
+      case 'plugin.press':
+      case 'plugin.try':
+      case 'plugin.log':
+        await plugin(peer, command);
+        return undefined;
       case 'account.status':
       case 'account.login':
       case 'account.token':
@@ -1991,6 +2020,7 @@ export function createProxyServer(options: ServerOptions) {
         },
       });
       send(peer, devices());
+      send(peer, { type: 'plugins', plugins: plugins.list() });
       return true;
     }
     const auth = authSchema.safeParse(value);
@@ -2045,6 +2075,7 @@ export function createProxyServer(options: ServerOptions) {
       ...(files?.state && auth.data.tunnel && options.tunnel ? { files: files.state } : {}),
     });
     send(peer, devices());
+    send(peer, { type: 'plugins', plugins: plugins.list() });
     // Every connection that asks has an execution channel of its own, to the computer it comes from.
     if (auth.data.tunnel && options.tunnel) {
       peer.tunnel = new Tunnel(
@@ -2520,6 +2551,7 @@ export function createProxyServer(options: ServerOptions) {
       await releases.refresh();
       await files?.start();
       updates?.start();
+      await plugins.start();
       if (usageReceiver)
         options.claude!.environment = telemetryEnvironment(await usageReceiver.listen());
       await new Promise<void>((resolve, reject) => {
