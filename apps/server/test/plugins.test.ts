@@ -106,24 +106,27 @@ export const settings = [{ title: '渠道', showWhen: 'on', fields: {
     message: '待配置：Token',
   });
 
-  const wrong = await plugins.configure('set', { token: 'abcd', lines: 10 }, true);
+  const wrong = await plugins.configure('set', { token: 'abcd', lines: 10 });
   assert.deepEqual(wrong, {
     errors: { token: '*** 太短', lines: '不能大于 9' },
     notice: undefined,
-    saved: false,
   });
+  // Neither was kept, and what holds beside one that does not is.
+  assert.deepEqual(plugins.list()[0]!.secrets, []);
+  await plugins.configure('set', { lines: 4, token: 'ab' });
+  assert.deepEqual([plugins.list()[0]!.values.lines, plugins.list()[0]!.secrets], [4, []]);
   // A button takes the values of the form, kept or not.
   assert.deepEqual(await plugins.press('set', 'test', { token: 'not-kept-yet' }), {
     ok: true,
     message: '***',
   });
-  assert.ok((await plugins.configure('set', { token: 'secret-token' }, true)).saved);
+  await plugins.configure('set', { token: 'secret-token' });
   const [listed] = plugins.list();
   assert.equal(listed!.problem, undefined);
-  assert.deepEqual([listed!.values, listed!.secrets], [{ on: true, lines: 5 }, ['token']]);
+  assert.deepEqual([listed!.values, listed!.secrets], [{ on: true, lines: 4 }, ['token']]);
 
   // Left empty a secret stays; the command is given it, and the log is not.
-  assert.ok((await plugins.configure('set', { token: '', lines: 6 }, true)).saved);
+  await plugins.configure('set', { token: '', lines: 6 });
   const tried = await plugins.attempt('set', 'RunEnded');
   assert.ok(tried.ok);
   assert.match(tried.message, /token: '\*\*\*', lines: 6/);
@@ -157,8 +160,8 @@ test('a check that hangs keeps nothing from being saved, and a ui file that cann
   const [, throws, unknown] = plugins.list();
   assert.equal(throws!.problem, '加载失败：no luck');
   assert.match(unknown!.problem!, /^加载失败：settings\.0\.fields\.a/);
-  const saved = await plugins.configure('a-hangs', { a: 'x' }, true);
-  assert.ok(saved.saved);
+  const saved = await plugins.configure('a-hangs', { a: 'x' });
+  assert.equal(plugins.list()[0]!.values.a, 'x');
   assert.match(saved.notice!, /没跑成：超过 2 秒/);
 });
 

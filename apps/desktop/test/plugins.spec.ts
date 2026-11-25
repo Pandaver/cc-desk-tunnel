@@ -15,9 +15,9 @@ export const settings = [
     bell: { type: 'boolean', title: '显示铃铛', default: true },
     url: { type: 'string', title: '机器人地址', sensitive: true, required: true,
       validate: (value: string) => ({ valid: value.startsWith('https://'), message: '要以 https:// 开头' }) },
-    format: { type: 'string', title: '格式', options: ['卡片', '文本'], default: '卡片' },
+    format: { type: 'string', title: '格式', description: '消息的样式', options: [{ value: 'card', label: '卡片' }, { value: 'text', label: '文本' }], default: 'card' },
     body: { type: 'string', title: '模板', multiline: true, default: '{session}' },
-    test: { type: 'button', title: '发送测试消息', run: async (all: { url: string }) => ({ ok: true, message: '已发送到 ' + all.url }) },
+    test: { type: 'button', title: '测试消息', label: '发送', run: async (all: { url: string }) => ({ ok: true, message: '已发送到 ' + all.url }) },
   } },
 ];
 const state = (icon: string, title: string, more = {}) => ({ icon, title, ...more });
@@ -42,7 +42,14 @@ function add(name: string) {
   mkdirSync(resolve(root, 'hooks'), { recursive: true });
   writeFileSync(
     resolve(root, '.claude-plugin/plugin.json'),
-    JSON.stringify({ name, displayName: '通知', version: '0.1.0', description: '推送到钉钉' }),
+    JSON.stringify({
+      name,
+      displayName: '通知',
+      version: '0.1.0',
+      description: '推送到钉钉',
+      author: { name: '作者甲' },
+      repository: 'https://example.com/notify',
+    }),
   );
   writeFileSync(
     resolve(root, 'hooks/hooks.json'),
@@ -122,65 +129,76 @@ test('a plugin is installed from an archive once its contents were agreed to, an
   expect(existsSync(resolve(plugins, 'notify'))).toBe(false);
   await page.screenshot({ path: resolve(shots, 'install.png') });
   await dialog.getByRole('button', { name: '安装', exact: true }).click();
-  await page.getByRole('button', { name: /^通知/ }).filter({ hasText: '正常' }).click();
-  await expect(page.locator('.workspace')).toContainText('版本 1.0.0');
+  await page.locator('.plugin-open').filter({ hasText: '通知' }).click();
+  await expect(page.locator('.workspace')).toContainText('1.0.0');
+  await page.locator('.plugin-back').click();
   page.once('dialog', (asked) => void asked.accept());
-  await page.getByRole('button', { name: '删除', exact: true }).click();
+  await page.getByRole('button', { name: '删除 通知' }).click();
   await expect(page.getByText('还没有插件')).toBeVisible();
   expect(existsSync(resolve(plugins, 'notify'))).toBe(false);
 });
 
-test('a plugin put in place is set up on its own page, tried and switched off without a reload', async ({
+test('a plugin put in place is set on its own page, each change saved at once, tried and switched off', async ({
   page,
 }) => {
   await openPlugins(page);
   await expect(page.getByText('还没有插件')).toBeVisible();
   add('notify');
   const row = page.locator('.plugin-open').filter({ hasText: '通知' });
-  await expect(row).toContainText('正常');
-  await expect(page.getByLabel('启用钉钉')).toHaveCount(0);
+  // One that goes well says nothing of it.
+  await expect(row).toHaveText('通知推送到钉钉');
   await row.click();
   const form = page.locator('.workspace');
   await expect(form.getByRole('heading', { level: 1 })).toHaveText('通知');
+  await expect(form).toContainText('作者甲');
   const url = form.getByLabel('机器人地址');
   await expect(url).toHaveCount(0);
   await form.getByRole('switch', { name: '启用钉钉' }).click();
+  await expect(form.getByRole('alert')).toHaveText('未运行：待配置：机器人地址');
+  // Each change is saved when its box is left; one that does not hold stays there, told of.
   await url.fill('http://x');
   await url.blur();
   await expect(form).toContainText('要以 https:// 开头');
-  // What is not saved is kept while the list is looked at.
-  await form.getByRole('button', { name: '插件', exact: true }).click();
-  await row.click();
   await expect(url).toHaveValue('http://x');
   await url.fill('https://example.com/robot');
-  await form.getByRole('button', { name: '发送测试消息' }).click();
-  await expect(form.locator('.plugin-result')).toHaveText('已发送到 ***');
-  await form.getByRole('button', { name: '保存' }).click();
+  await url.press('Enter');
   await expect(url).toHaveAttribute('placeholder', '已设置，留空沿用');
   await expect(url).toHaveValue('');
-  await form.getByRole('button', { name: '试跑' }).click();
+  await expect(form.getByRole('alert')).toHaveCount(0);
+  await form.getByLabel('格式').selectOption({ label: '文本' });
+  await form.getByLabel('模板').fill('{session} {project}');
+  await form.getByLabel('模板').blur();
+  await form.getByRole('button', { name: '发送' }).click();
+  await expect(form.getByRole('status')).toHaveText('已发送到 ***');
+  await form.getByRole('button', { name: '运行', exact: true }).click();
   await expect(form.locator('pre')).toContainText('收到');
   await page.screenshot({ path: resolve(shots, 'settings.png'), fullPage: true });
 
-  await form.getByRole('button', { name: '查看' }).click();
-  await expect(page.locator('.plugin-log')).toContainText('[试跑] RunEnded → 成功');
-  await expect(page.locator('.plugin-log')).not.toContainText('example.com');
-  await page.screenshot({ path: resolve(shots, 'log.png') });
-  await page.getByRole('button', { name: '关闭', exact: true }).click();
-
   // On a phone's width the way back is the title bar's, and nothing is wider than the page.
   await page.setViewportSize({ width: 360, height: 780 });
-  await form.getByLabel('模板').fill('{session} {project}');
+  await page.waitForTimeout(400);
   await page.screenshot({ path: resolve(shots, 'narrow.png') });
   const wide = () => form.evaluate((node) => node.scrollWidth - node.clientWidth);
   expect(await wide()).toBe(0);
   await page.getByRole('button', { name: '后退', exact: true }).click();
   await expect(row).toBeVisible();
+  await page.waitForTimeout(400);
   expect(await wide()).toBe(0);
   await page.screenshot({ path: resolve(shots, 'narrow-list.png') });
   await page.setViewportSize({ width: 1280, height: 900 });
+  await page.screenshot({ path: resolve(shots, 'list.png') });
+
+  await page.getByRole('button', { name: '通知：日志' }).click();
+  await expect(page.locator('.plugin-log')).toContainText('[试跑] RunEnded → 成功');
+  await expect(page.locator('.plugin-log')).not.toContainText('example.com');
+  await page.screenshot({ path: resolve(shots, 'log.png') });
+  await page.getByRole('button', { name: '关闭', exact: true }).click();
   await page.getByRole('switch', { name: '启用 通知' }).click();
-  await expect(row).toContainText('已停用');
+  await row.click();
+  await expect(form.getByLabel('启用钉钉')).toHaveCount(0);
+  await form.getByRole('switch', { name: '启用 通知' }).click();
+  await expect(form.getByLabel('格式')).toHaveValue('text');
+  await expect(form.getByLabel('模板')).toHaveValue('{session} {project}');
 });
 
 test('a plugin’s button goes by click, double click and long press, in every window, and by the end of a run', async ({

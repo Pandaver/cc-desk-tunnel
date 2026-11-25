@@ -113,6 +113,9 @@ export class Plugins {
         title: entry.manifest.displayName,
         description: entry.manifest.description,
         version: entry.manifest.version,
+        author: entry.manifest.author,
+        homepage: entry.manifest.homepage,
+        repository: entry.manifest.repository,
         enabled,
         problem: enabled ? this.problem(name) : entry.refused,
         failure: this.failures.get(name),
@@ -176,6 +179,8 @@ export class Plugins {
       manifest: {},
       declared: NOTHING,
       events: [],
+      // Still so, unless it is being enabled anew.
+      refused: this.config(name).enabled ? undefined : this.entries.get(name)?.refused,
     };
     try {
       const manifest = join(root, '.claude-plugin', 'plugin.json');
@@ -215,7 +220,9 @@ export class Plugins {
       const change = changes[key];
       const same = field.type === 'string' && field.sensitive && change === '';
       const value = change === undefined || same ? kept[key] : (change ?? undefined);
-      const effective = value ?? field.default;
+      // Text not set is empty and a switch not set is off, so that the plugin's own code need not tell them apart.
+      const unset = { string: '', boolean: false, number: undefined }[field.type];
+      const effective = value ?? field.default ?? unset;
       if (effective !== undefined) values[key] = effective;
     }
     return values;
@@ -250,7 +257,8 @@ export class Plugins {
     const { refused } = this.entry(name);
     if (enabled && refused) throw new DomainError('plugin_slots', refused);
   }
-  async configure(name: string, changes: Record<string, PluginValue | null>, save: boolean) {
+  // Keeps each of the changes that holds, whatever else is still to be set.
+  async configure(name: string, changes: Record<string, PluginValue | null>) {
     const entry = this.entry(name);
     const groups = entry.declared.settings;
     const values = this.values(name, changes);
@@ -260,16 +268,21 @@ export class Plugins {
     this.printed(name, '检查设置', said.printed, secrets);
     const errors = { ...said.errors, ...own };
     for (const key of Object.keys(errors)) errors[key] = masked(errors[key]!, secrets);
-    const saved = save && !Object.keys(errors).length;
-    if (saved) {
-      const kept = { ...this.config(name).values };
-      for (const [key, change] of Object.entries(changes))
-        if (change === null) delete kept[key];
-        else if (values[key] !== undefined) kept[key] = values[key];
+    const kept = { ...this.config(name).values };
+    const held = Object.entries(changes).filter(([key]) => {
+      const empty = values[key] === undefined || values[key] === '';
+      return empty || !errors[key];
+    });
+    for (const [key, change] of held)
+      if (change === null) delete kept[key];
+      else if (values[key] !== undefined) kept[key] = values[key];
+    if (held.length) {
       this.write(name, { ...this.config(name), values: kept });
-      this.log.write(name, '设置已保存');
+      const fields = fieldsOf(this.entry(name).declared.settings);
+      const titles = held.map(([key]) => fields[key]?.title ?? key);
+      this.log.write(name, `设置：${titles.join('、')}`);
     }
-    return { errors, notice: said.notice && masked(said.notice, secrets), saved };
+    return { errors, notice: said.notice && masked(said.notice, secrets) };
   }
   async press(name: string, button: string, changes: Record<string, PluginValue | null>) {
     const entry = this.entry(name);

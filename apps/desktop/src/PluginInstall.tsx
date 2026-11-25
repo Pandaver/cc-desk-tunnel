@@ -98,6 +98,18 @@ export default function PluginInstall({ client }: { client: ProxyClient }) {
               {found.manifest.version ?? '未写明'}
               {found.replaces && '，设置和数据保留'}
             </dd>
+            {found.manifest.author && (
+              <>
+                <dt>作者</dt>
+                <dd>{found.manifest.author.name}</dd>
+              </>
+            )}
+            {found.manifest.repository && (
+              <>
+                <dt>发布地址</dt>
+                <dd>{found.manifest.repository}</dd>
+              </>
+            )}
             <dt>订阅的事件</dt>
             <dd>{found.events.join('、') || '无'}</dd>
             <dt>会运行的命令</dt>

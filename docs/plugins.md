@@ -42,7 +42,7 @@
 - 桌面客户端的“设置 → 插件 → 从压缩包安装…”：zip，不超过 5 MB，内容是插件的文件或装着它们的一个文件夹，要有 `.claude-plugin/plugin.json` 和 `hooks/hooks.json`。服务端先核对格式、列出版本、事件和会运行的命令，这时不运行其中任何代码；同意后才放进去。同名的插件被替换，设置、数据和日志保留。浏览器里可以设置插件，不能安装和删除。
 - 或者直接把目录放进 `plugins`。
 
-`plugin.json` 是 `name`（与目录同名）、`displayName`、`description`、`version`，只有安装压缩包时必须有 `name`。
+`plugin.json` 有 `name`（与目录同名）、`displayName`、`description`、`version`、`author`（名字，或 `{ name, url }`）、`homepage`、`repository`（发布新版本的地址），只有安装压缩包时必须有 `name`。后几项显示在插件页的“关于”里。
 
 ## 设置
 
@@ -52,24 +52,29 @@
 export const settings = [
   {
     title: '钉钉',
+    description: '在钉钉群的“机器人”里添加自定义机器人。',
     showWhen: 'dingtalk_on',
     fields: {
-      dingtalk_on: { type: 'boolean', title: '启用' },
+      dingtalk_on: { type: 'boolean', title: '启用钉钉', description: '推送到钉钉群机器人。' },
+      dingtalk_format: {
+        type: 'string', title: '格式', default: 'card',
+        options: [{ value: 'card', label: '卡片' }, { value: 'text', label: '文本' }],
+      },
       dingtalk_url: {
         type: 'string', title: '机器人地址', sensitive: true, required: true,
         validate: (value, all) => ({ valid: value.includes('access_token='), message: '缺少 access_token' }),
       },
       dingtalk_body: { type: 'string', title: '模板', multiline: true, default: '{session}' },
-      dingtalk_test: { type: 'button', title: '发送测试消息', run: async (all) => ({ ok: true, message: '已发送' }) },
+      dingtalk_test: { type: 'button', title: '测试消息', label: '发送', run: async (all) => ({ ok: true, message: '已发送' }) },
     },
   },
 ];
 ```
 
-- 类型：`string`（可加 `multiline`、`options`、`sensitive`）、`number`（可加 `min`、`max`）、`boolean`、`button`。都有 `title`，可有 `description`；除按钮外可有 `default`，文本和数字可有 `required`。字段名在插件里不重复，文字最长 8000 个字符。
+- 类型：`string`（可加 `multiline`、`options`、`sensitive`）、`number`（可加 `min`、`max`）、`boolean`、`button`。分组和字段都有 `title`，可有 `description`（标题下面的一行说明）；`options` 的每一项是一个值，或 `{ value, label }`，最多 600 项，可以在 `ui.ts` 里算出来；按钮上的字是 `label`；除按钮外可有 `default`，文本和数字可有 `required`。字段名在插件里不重复，文字最长 8000 个字符。
 - `showWhen` 是一个开关的名字，或几个中的任一个：都关着时只显示这些开关，其余字段不检查。
-- `validate(值, 全部值)` 返回 `{ valid, message }`，可以是异步的；离开字段和保存时运行。超过 2 秒或出错时提示，但仍可保存。
-- 按钮的 `run(全部值)` 返回 `{ ok, message }`，用的是表单里的值，不必先保存；先检查它所在的一组。默认最多 20 秒，可用 `timeout` 设到 60 秒；`confirm` 是运行前要问的话。
+- `validate(值, 全部值)` 返回 `{ valid, message }`，可以是异步的。没有保存按钮：开关和下拉改了就存，文本在离开输入框或按回车时存；不合规的不存，错误显示在字段下。没填的文字是空串、开关是 `false`。检查超过 2 秒或出错时提示，但仍会保存。
+- 按钮的 `run(全部值)` 返回 `{ ok, message }`，用的是表单里的值，包括因不合规没有存下的；先检查它所在的一组。默认最多 20 秒，可用 `timeout` 设到 60 秒；`confirm` 是运行前要问的话。
 - `sensitive` 的值只进不出：任何窗口都读不回，留空沿用，日志和消息里原样出现的换成 `***`（编码或签名过的认不出来）。
 - 值存在 `<数据目录>/plugin-config/<名字>.json`（0600），命令从事件的 `config` 里得到，类型与这里相同。必填的没有填时插件不运行。
 - `ui.ts` 只在单独的子进程里运行，Node 只去掉类型，不支持 `enum` 之类需要转换的语法。停用的插件不运行任何代码，也就没有表单。

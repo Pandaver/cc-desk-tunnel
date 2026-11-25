@@ -1735,7 +1735,7 @@ export function createProxyServer(options: ServerOptions) {
       send(peer, {
         type: 'plugin.checked',
         requestId,
-        ...(await plugins.configure(name, command.values, command.save)),
+        ...(await plugins.configure(name, command.values)),
       });
     else if (command.type === 'plugin.log')
       send(peer, { type: 'plugin.log', requestId, text: plugins.logOf(name, command.clear) });

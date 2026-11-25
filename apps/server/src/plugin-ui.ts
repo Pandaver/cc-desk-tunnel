@@ -115,7 +115,13 @@ export function checkValues(groups: PluginGroup[], values: PluginValues) {
         errors[name] = `不能小于 ${field.min}`;
       if (field.max !== undefined && (value as number) > field.max)
         errors[name] = `不能大于 ${field.max}`;
-    } else if (field.type === 'string' && field.options && !field.options.includes(value as string))
+    } else if (
+      field.type === 'string' &&
+      field.options &&
+      !field.options.some(
+        (option) => (typeof option === 'string' ? option : option.value) === value,
+      )
+    )
       errors[name] = '不在可选的值里';
   }
   return errors;

@@ -4664,9 +4664,8 @@ dialog:has(.ccdt-dialog) {
 .plugin-open {
   display: flex;
   flex: 1;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  flex-direction: column;
+  gap: 3px;
   min-width: 0;
   padding: 0;
   border: 0;
@@ -4674,19 +4673,55 @@ dialog:has(.ccdt-dialog) {
   color: inherit;
   font: inherit;
   text-align: left;
+  overflow-wrap: anywhere;
   cursor: pointer;
 }
-.plugin-open > span {
+.plugin-open > strong {
   display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 0;
-  overflow-wrap: anywhere;
+  align-items: center;
+  gap: 8px;
 }
-.plugin-open > svg {
+.plugin-open svg {
   flex-shrink: 0;
-  width: 16px;
-  color: var(--muted);
+  width: 15px;
+  color: var(--faint);
+}
+.plugin-open:hover svg {
+  color: var(--text);
+}
+.plugin-badge {
+  font-style: normal;
+  color: var(--warn-text);
+  background: var(--warn-soft);
+  border-color: var(--warn-line);
+}
+.settings-list .plugin-trouble,
+.plugin-notice {
+  color: var(--warn-text);
+}
+.plugin-error {
+  display: block;
+  color: var(--danger-text);
+}
+.plugin-link {
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+.plugin-notice {
+  margin: 10px 2px 0;
+  font-size: 13px;
+}
+.plugin-controls,
+.plugin-try,
+.plugin-foot,
+.settings-list label > .plugin-input {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.plugin-controls {
+  flex-shrink: 0;
 }
 .plugin-back {
   display: inline-flex;
@@ -4707,95 +4742,23 @@ dialog:has(.ccdt-dialog) {
 .plugin-back > svg {
   width: 16px;
 }
-.plugin-remove {
-  color: var(--danger-text);
-}
-/* Within reach at the foot of a long form while there is something to save. */
-.plugin-save {
-  position: sticky;
-  z-index: 5;
-  bottom: 12px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin-top: 16px;
-  padding: 10px 14px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--raised);
-  box-shadow: var(--shadow);
-  font-size: 13px;
-}
-.plugin-save > span {
-  flex: 1;
-  min-width: 120px;
-}
-@media (max-width: 700px) {
-  /* The title bar has the way back. */
-  .plugin-back {
-    display: none;
-  }
-  .plugin-fields label {
-    align-items: stretch;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .settings-list.plugin-fields select,
-  .settings-list.plugin-fields input {
-    width: 100%;
-  }
-  .plugin-action {
-    flex-wrap: wrap;
-  }
-  .plugin-text .plugin-action {
-    flex-wrap: nowrap;
-  }
-  .plugin-facts {
-    grid-template-columns: 1fr;
-    gap: 2px;
-  }
-  .plugin-facts dd {
-    margin-bottom: 8px;
-  }
-}
-.plugin-facts {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 6px 16px;
-  margin: 12px 0;
-  font-size: 13.5px;
-}
-.plugin-facts dt {
-  color: var(--muted);
-}
-.plugin-facts dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-.plugin-facts code {
-  display: block;
-}
 .plugin-empty {
   margin: 0;
   padding: 16px 0;
 }
-.plugin-status {
-  display: block;
-  color: var(--muted);
+.settings-list.plugin-fields input,
+.settings-list.plugin-fields select {
+  width: 260px;
 }
-.plugin-status.bad,
-.plugin-result.bad {
-  color: var(--danger-text);
+.plugin-input input {
+  min-width: 0;
 }
 .settings-list label.plugin-text {
   align-items: stretch;
   flex-direction: column;
   gap: 8px;
 }
-.settings-list .plugin-text input,
 .settings-list .plugin-text textarea {
-  flex: 1;
   width: 100%;
   padding: 7px 10px;
   border: 1px solid var(--line);
@@ -4807,33 +4770,12 @@ dialog:has(.ccdt-dialog) {
 .settings-list [aria-invalid='true'] {
   border-color: var(--danger);
 }
-.settings-list label > .plugin-action,
-.plugin-action,
-.plugin-try,
-.plugin-foot {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-}
-.plugin-foot {
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  padding: 12px 0;
-}
-.plugin-foot > .plugin-try,
-.plugin-foot > .plugin-only {
-  margin-right: auto;
-}
-.plugin-notice {
-  margin: 8px 0 0;
-  color: var(--warn-text);
-  font-size: 13px;
-}
 .plugin-result {
-  font-size: 13px;
   color: var(--ok-text);
   overflow-wrap: anywhere;
+}
+.plugin-result.bad {
+  color: var(--danger-text);
 }
 pre.plugin-result,
 .plugin-log {
@@ -4853,11 +4795,60 @@ pre.plugin-result,
 dialog:has(> .plugin-log) {
   width: min(760px, calc(100vw - 32px));
 }
-.plugin-only {
+.plugin-foot {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  padding: 12px 0 0;
+}
+dialog .plugin-only {
   display: flex;
+  flex-direction: row;
   align-items: center;
   gap: 6px;
+  margin-right: auto;
   font-size: 13px;
+}
+.plugin-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 16px;
+  margin: 12px 0;
+  font-size: 13.5px;
+}
+.plugin-facts dt {
+  color: var(--muted);
+}
+.plugin-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.plugin-facts code {
+  display: block;
+}
+@media (max-width: 700px) {
+  /* The title bar has the way back. */
+  .plugin-back {
+    display: none;
+  }
+  .plugin-controls {
+    gap: 2px;
+  }
+  .plugin-fields label {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .settings-list.plugin-fields select,
+  .settings-list.plugin-fields input {
+    width: 100%;
+  }
+  .plugin-facts {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+  .plugin-facts dd {
+    margin-bottom: 8px;
+  }
 }
 
 /* A plugin's button beside the message input, and its mark beside a session (see PluginSlot.tsx). */

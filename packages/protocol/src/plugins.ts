@@ -11,6 +11,7 @@ const key = z
   .regex(/^[a-z]\w*$/i)
   .max(60);
 const label = z.string().trim().min(1).max(120);
+const option = z.string().min(1).max(120);
 const said = { title: label, description: z.string().max(1000).optional() };
 // The longest text of a setting, in characters; it keeps a frame of them within MAX_FRAME_BYTES.
 export const PLUGIN_TEXT_LIMIT = 8000;
@@ -27,7 +28,12 @@ export const pluginFieldSchema = z.discriminatedUnion('type', [
     multiline: z.boolean().optional(),
     // Kept by the service and sent to no window.
     sensitive: z.boolean().optional(),
-    options: z.array(z.string().min(1).max(120)).min(1).max(50).optional(),
+    // Each a value, with what it is shown as where that differs.
+    options: z
+      .array(z.union([option, z.object({ value: option, label })]))
+      .min(1)
+      .max(600)
+      .optional(),
   }),
   z.object({
     type: z.literal('number'),
@@ -41,6 +47,8 @@ export const pluginFieldSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('button'),
     ...said,
+    // What is on the button, beside its title.
+    label: z.string().trim().min(1).max(20).optional(),
     // Asked before it runs.
     confirm: z.string().max(300).optional(),
     // In seconds.
@@ -49,7 +57,7 @@ export const pluginFieldSchema = z.discriminatedUnion('type', [
 ]);
 export type PluginField = z.infer<typeof pluginFieldSchema>;
 export const pluginGroupSchema = z.object({
-  title: label,
+  ...said,
   // A switch whose group shows its other fields only while it is on, or one of several.
   showWhen: z.union([key, z.array(key).min(1)]).optional(),
   fields: z.record(key, pluginFieldSchema),
@@ -111,19 +119,34 @@ export function slotState(slot: PluginSlot, kept: string | undefined, values: Pl
   return slot.states[initial] ? initial : Object.keys(slot.states)[0]!;
 }
 
+const link = z.url({ protocol: /^https?$/ }).max(500);
 // A plugin's own .claude-plugin/plugin.json, of which an installed one needs the name.
 export const pluginManifestSchema = z.object({
   name: pluginNameSchema,
   displayName: label.optional(),
   description: z.string().max(1000).optional(),
   version: z.string().max(60).optional(),
+  author: z
+    .union([
+      label.transform((name): { name: string; url?: string } => ({ name })),
+      z.object({ name: label, url: link.optional() }),
+    ])
+    .optional(),
+  homepage: link.optional(),
+  // Where its new versions are published.
+  repository: link.optional(),
 });
 export type PluginManifest = z.infer<typeof pluginManifestSchema>;
 export const pluginSchema = z.object({
   name: pluginNameSchema,
   title: label.optional(),
-  description: z.string().max(1000).optional(),
-  version: z.string().max(60).optional(),
+  ...pluginManifestSchema.pick({
+    description: true,
+    version: true,
+    author: true,
+    homepage: true,
+    repository: true,
+  }).shape,
   enabled: z.boolean(),
   // Why it does not run though it is enabled, or could not be enabled.
   problem: z.string().optional(),
@@ -147,8 +170,8 @@ const request = { requestId: z.uuid(), name: pluginNameSchema };
 const values = z.record(key, pluginValueSchema.nullable());
 export const pluginCommandSchemas = [
   z.object({ type: z.literal('plugin.enable'), ...request, enabled: z.boolean() }).strict(),
-  // Checks the values, and keeps them if `save` and they hold.
-  z.object({ type: z.literal('plugin.configure'), ...request, values, save: z.boolean() }).strict(),
+  // Keeps each of the values that holds.
+  z.object({ type: z.literal('plugin.configure'), ...request, values }).strict(),
   // Runs a button of the plugin's settings with the values as they are in the form, kept or not.
   z.object({ type: z.literal('plugin.press'), ...request, button: key, values }).strict(),
   // Runs the plugin's commands for an example of the event.
@@ -190,7 +213,6 @@ export const pluginMessageSchemas = [
     errors: z.record(key, z.string()),
     // That the plugin's own check could not be run, which keeps nothing from being saved.
     notice: z.string().optional(),
-    saved: z.boolean(),
   }),
   z.object({
     type: z.literal('plugin.done'),

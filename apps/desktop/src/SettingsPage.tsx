@@ -1032,7 +1032,10 @@ export default function SettingsPage({
         )}
       </aside>
       <main className="workspace">
-        <PageHelp.Provider value={back ? null : (pageHelp[section] ?? 'settings')}>
+        {/* No article tells of the plugins. */}
+        <PageHelp.Provider
+          value={back || section === 'plugins' ? null : (pageHelp[section] ?? 'settings')}
+        >
           {indexOnly ? null : section === 'account' ? (
             account
           ) : section === 'claude' ? (
