@@ -74,6 +74,41 @@ export const settings = [
 - 值存在 `<数据目录>/plugin-config/<名字>.json`（0600），命令从事件的 `config` 里得到，类型与这里相同。必填的没有填时插件不运行。
 - `ui.ts` 只在单独的子进程里运行，Node 只去掉类型，不支持 `enum` 之类需要转换的语法。停用的插件不运行任何代码，也就没有表单。
 
+## 输入框旁的按钮
+
+`ui.ts` 导出的 `slots.composer` 是输入框旁的一个按钮，每个会话有自己的状态。状态由服务端保存、告诉所有窗口，按钮由客户端绘制，桌面、网页和手机相同；各个状态意味着什么只有插件知道。
+
+```ts
+const pivot = 'top';
+export const slots = {
+  composer: {
+    title: '外部推送',
+    showWhen: ['dingtalk_on', 'pushplus_on'],
+    initial: { setting: 'default_mode' },
+    hold: { ms: 800, ring: true, effect: 'tremble' },
+    mark: true,
+    states: {
+      off: { icon: 'icons/bell.svg', title: '不订阅', tip: '已取消订阅' },
+      once: { icon: 'icons/bell-dot.svg', title: '本轮', tip: '已订阅本轮', effect: 'shake', pivot, active: true },
+      always: { icon: 'icons/bell-ring.svg', title: '持续', tip: '已持续订阅', effect: 'shake', pivot, active: true },
+    },
+    on: {
+      click: { off: 'once', once: 'off', always: 'off' },
+      doubleClick: { once: 'always' },
+      longPress: { off: 'always', once: 'always' },
+      RunEnded: { once: 'off' },
+    },
+  },
+};
+```
+
+- `states`：图标是插件目录里的 SVG，只取形状、用文字的颜色画；`tip` 是切换到它时输入框上方的一句话；`effect` 是切换后的动效，`shake` 或 `pulse`，绕 `pivot`（`center` 或 `top`）；`active` 用强调色。
+- `on`：手势 `click`、`doubleClick`、`longPress`，或任何会话事件，切到哪个状态；可以按当前状态分别写，没写的不动。第一下单击立即生效，400 毫秒内的第二下先看 `doubleClick`。事件在交给命令之后切换，命令看到的是切换前的状态，在事件的 `slots.composer` 里。
+- `initial` 是一个状态，或 `{ setting }` 指着的设置的值；会话没有动过按钮时用它，分叉出的会话也是。
+- `hold`：长按多久算数、有没有进度圈和图标抖动；算数之前松开不算单击。
+- `mark`：`active` 的状态在会话列表里显示图标。
+- 两个窗口同时点时先到的算数。服务停止或重启打断的一轮没有 `RunEnded` 事件，但按钮照 `RunEnded` 切换。
+
 设置页的“试跑”用示例事件运行插件的命令，与真的事件一样会发出去。
 
 ## 日志
@@ -84,7 +119,7 @@ export const settings = [
 
 这份合约独立于客户端与服务端的协议。`version` 现在是 1：可能增加事件和字段，插件应忽略不认识的；删除字段或改变含义时才加一。
 
-每个事件都有 `version`、`hook_event_name`、`timestamp`（ISO 8601）、`config`（插件的设置）。除设备事件外还有 `session_id`、`session_title`、`project_path`、`run_id`，以及会话所在的设备 `device`（`id`、`name`，非 Windows 时有 `platform`；很早的会话可能没有）和当时的状态：
+每个事件都有 `version`、`hook_event_name`、`timestamp`（ISO 8601）、`config`（插件的设置）；插件有按钮时，会话事件还有 `slots`。除设备事件外还有 `session_id`、`session_title`、`project_path`、`run_id`，以及会话所在的设备 `device`（`id`、`name`，非 Windows 时有 `platform`；很早的会话可能没有）和当时的状态：
 
 - `model`（最近一次实际使用的，还没有时是会话选定的）、`effort`、`permission_mode`。
 - `context`：最近一次读到的上下文，`used_tokens` 与 `window_tokens`。

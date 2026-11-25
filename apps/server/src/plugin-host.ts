@@ -33,7 +33,7 @@ async function answer({ file, values = {}, check, button }: Request) {
     if (typeof result?.ok !== 'boolean') throw new Error('按钮要返回 { ok, message }。');
     return { ok: result.ok, message: String(result.message ?? '') };
   }
-  return { settings: ui.settings ?? [] };
+  return { settings: ui.settings ?? [], slots: ui.slots ?? {} };
 }
 
 process.once('message', async (request: Request) => {

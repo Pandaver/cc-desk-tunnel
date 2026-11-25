@@ -310,9 +310,17 @@ export function createProxyServer(options: ServerOptions) {
     options.files === false ? undefined : new FileService(options.dataDir, options.files);
   // The file panel's connections of each control connection, which end with it.
   const fileConnections = new Map<string, Set<WebSocket>>();
-  const plugins = new Plugins(store.directory, () => {
-    if (!closing) broadcast({ type: 'plugins', plugins: plugins.list() });
-  });
+  const plugins = new Plugins(
+    store.directory,
+    () => {
+      if (!closing) broadcast({ type: 'plugins', plugins: plugins.list() });
+    },
+    {
+      of: (sessionId, name) => store.get(sessionId).session.slots?.[name],
+      set: (sessionId, name, state) =>
+        broadcast({ type: 'session.updated', session: store.setSlot(sessionId, name, state) }),
+    },
+  );
   const events = new ServiceEvents(
     (sessionId) => ({
       session: store.get(sessionId).session,
@@ -1718,6 +1726,8 @@ export function createProxyServer(options: ServerOptions) {
       return plugins.install(archive);
     }
     const { name, requestId } = command;
+    if (command.type === 'plugin.slot')
+      return plugins.move(name, command.sessionId, command.gesture, command.from);
     if (command.type === 'plugin.remove') await plugins.remove(name);
     else if (command.type === 'plugin.enable') await plugins.enable(name, command.enabled);
     else if (command.type === 'plugin.configure')
@@ -1766,6 +1776,7 @@ export function createProxyServer(options: ServerOptions) {
       case 'plugin.try':
       case 'plugin.log':
       case 'plugin.remove':
+      case 'plugin.slot':
       case 'plugin.upload':
       case 'plugin.install':
         await plugin(peer, command);
@@ -2596,6 +2607,7 @@ export function createProxyServer(options: ServerOptions) {
       await files?.start();
       updates?.start();
       await plugins.start();
+      for (const sessionId of store.interrupted) plugins.interrupted(sessionId);
       if (usageReceiver)
         options.claude!.environment = telemetryEnvironment(await usageReceiver.listen());
       await new Promise<void>((resolve, reject) => {

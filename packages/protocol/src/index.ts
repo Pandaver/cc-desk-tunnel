@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { webCommandSchemas, webSettingsStateSchema, webTotpSetupSchema } from './web.ts';
 import { webCertificateStateSchema } from './web-certificate.ts';
-import { pluginCommandSchemas, pluginMessageSchemas } from './plugins.ts';
+import { pluginCommandSchemas, pluginMessageSchemas, pluginNameSchema } from './plugins.ts';
 export * from './web.ts';
 export * from './web-certificate.ts';
 export * from './plugins.ts';
@@ -539,6 +539,8 @@ export const sessionSchema = z.object({
       compacted: z.boolean().optional(),
     })
     .optional(),
+  // The states of the plugins' buttons that were set in it (see `pluginSlotSchema`).
+  slots: z.record(pluginNameSchema, z.string().max(60)).optional(),
   createdAt: timestamp,
   updatedAt: timestamp,
   activeRun: z

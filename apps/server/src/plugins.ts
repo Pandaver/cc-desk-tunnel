@@ -3,7 +3,12 @@ import type { ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, watch } from 'node:fs';
 import type { FSWatcher } from 'node:fs';
 import { join } from 'node:path';
-import { pluginManifestSchema, pluginNameSchema } from '@cc-desk-tunnel/protocol';
+import {
+  pluginManifestSchema,
+  pluginNameSchema,
+  slotMove,
+  slotState,
+} from '@cc-desk-tunnel/protocol';
 import type { Plugin, PluginManifest, PluginValue, PluginValues } from '@cc-desk-tunnel/protocol';
 import { DomainError } from './errors.ts';
 import { eventExample } from './event-examples.ts';
@@ -28,6 +33,12 @@ type Entry = {
   broken?: string;
 };
 
+// Where the states of the plugins' buttons are kept: with each session.
+type Slots = {
+  of: (sessionId: string, name: string) => string | undefined;
+  set: (sessionId: string, name: string, state: string) => void;
+};
+
 // How much of what a command printed is kept, and how long changes in the directory are gathered.
 const OUTPUT_LIMIT = 8192;
 const SETTLE_MS = 300;
@@ -40,6 +51,7 @@ const reason = (error: unknown) => (error instanceof Error ? error.message : Str
 export class Plugins {
   private directory: string;
   private changed: () => void;
+  private slots: Slots;
   private log: PluginLog;
   private entries = new Map<string, Entry>();
   // Apart from what is read anew, which may be while a plugin is set or runs.
@@ -52,9 +64,14 @@ export class Plugins {
   private stale = new Set<string>();
   private loading: Promise<void> = Promise.resolve();
   private closed = false;
-  constructor(directory: string, changed: () => void = () => {}) {
+  constructor(
+    directory: string,
+    changed: () => void = () => {},
+    slots: Slots = { of: () => undefined, set: () => {} },
+  ) {
     this.directory = directory;
     this.changed = changed;
+    this.slots = slots;
     this.log = new PluginLog(directory);
   }
   async start() {
@@ -77,7 +94,7 @@ export class Plugins {
   }
   // Whether an event reaches anyone.
   any() {
-    return !this.closed && this.entries.size > 0;
+    return this.entries.size > 0;
   }
   list(): Plugin[] {
     return [...this.entries].map(([name, entry]) => {
@@ -98,6 +115,7 @@ export class Plugins {
         failure: this.failures.get(name),
         events: entry.events,
         settings: entry.declared.settings,
+        slot: entry.declared.slot,
         values: Object.fromEntries(Object.entries(values).filter(([key]) => !secret(key))),
         secrets: Object.keys(values).filter((key) => secret(key) && values[key] !== ''),
       };
@@ -261,6 +279,11 @@ export class Plugins {
     if (problem) return { ok: false, message: problem };
     const example = eventExample(event);
     if (!example) throw new DomainError('not_found', '没有这个事件。');
+    const { slot } = this.entry(name).declared;
+    if (slot && example.session_id) {
+      const active = Object.keys(slot.states).find((state) => slot.states[state]!.active);
+      example.slots = { composer: active ?? slotState(slot, undefined, this.values(name)) };
+    }
     const hooks = this.hooksFor(name, example);
     if (!hooks.length) return { ok: false, message: '这个事件没有匹配的命令。' };
     const results = await Promise.all(
@@ -299,15 +322,36 @@ export class Plugins {
   }
 
   dispatch(event: ServiceEvent) {
-    if (this.closed) return;
+    const sessionId = event.session_id as string | undefined;
     for (const name of this.entries.keys()) {
-      if (!this.config(name).enabled || this.problem(name)) continue;
+      const state = sessionId && this.state(name, sessionId);
+      // The state changes while the service closes too, and what the event did to it is not seen by the event.
+      if (sessionId) this.move(name, sessionId, event.hook_event_name);
+      if (this.closed || !this.config(name).enabled || this.problem(name)) continue;
+      const told = state ? { ...event, slots: { composer: state } } : event;
       try {
-        for (const hook of this.hooksFor(name, event)) void this.run(name, hook, event);
+        for (const hook of this.hooksFor(name, event)) void this.run(name, hook, told);
       } catch (error) {
         this.failed(name, `${event.hook_event_name} 没有运行：${reason(error)}`);
       }
     }
+  }
+  private state(name: string, sessionId: string) {
+    const { slot } = this.entry(name).declared;
+    return slot && slotState(slot, this.slots.of(sessionId, name), this.values(name));
+  }
+  // Moves the plugin's button in a session, as a gesture or an event does. A gesture made on another state than it is
+  // in came late.
+  move(name: string, sessionId: string, cause: string, from?: string) {
+    const { slot } = this.entry(name).declared;
+    const state = this.state(name, sessionId);
+    if (!slot || !state || (from !== undefined && from !== state)) return;
+    const to = slotMove(slot, cause, state);
+    if (to) this.slots.set(sessionId, name, to);
+  }
+  // What a run's end does to the buttons of a session, where the service stopped before it could be told.
+  interrupted(sessionId: string) {
+    for (const name of this.entries.keys()) this.move(name, sessionId, 'RunEnded');
   }
   private hooksFor(name: string, event: ServiceEvent) {
     const field = matcherFields[event.hook_event_name];

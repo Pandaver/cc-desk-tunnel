@@ -19,13 +19,16 @@ import type {
   NativeMetrics,
   NativeSession,
   PermissionMode,
+  Plugin,
   Session,
+  SlotGesture,
 } from '@cc-desk-tunnel/protocol';
 import { slashCommands } from './commands.ts';
 import ComposerControls from './ComposerControls.tsx';
 import MessageInput, { messageLimit } from './MessageInput.tsx';
 import type { MessageInputHandle } from './MessageInput.tsx';
 import PermissionMenu from './PermissionMenu.tsx';
+import PluginSlotButton, { slotsOf } from './PluginSlot.tsx';
 import { IconButton } from './ui.tsx';
 import type { MenuPosition } from './ui.tsx';
 
@@ -84,6 +87,8 @@ export default function Composer({
   compact,
   refresh,
   configure,
+  plugins,
+  slot,
   stop,
 }: {
   session: Session;
@@ -122,6 +127,9 @@ export default function Composer({
     effort?: Effort | null;
     permissionMode?: PermissionMode;
   }) => Promise<void>;
+  plugins: Plugin[];
+  // What the user did to a plugin's button, in the state it was shown in.
+  slot: (name: string, gesture: SlotGesture, from: string) => void;
   stop: () => void;
 }) {
   const input = useRef<MessageInputHandle>(null);
@@ -404,6 +412,14 @@ export default function Composer({
               change={(permissionMode) => void configure({ permissionMode })}
             />
           )}
+          {slotsOf(plugins, session).map((shown) => (
+            <PluginSlotButton
+              key={shown.name + session.id}
+              shown={shown}
+              disabled={!connected}
+              move={(gesture, from) => slot(shown.name, gesture, from)}
+            />
+          ))}
           <span className="toolbar-space" />
           {native && (
             <ComposerControls

@@ -1880,6 +1880,7 @@ export function App({
             selectedId={selected?.id}
             projects={state.projects}
             localProjects={host.localProjects}
+            plugins={state.plugins}
             connected={connected}
             busy={busy}
             refreshing={refreshing}
@@ -2150,6 +2151,18 @@ export function App({
                   void refreshStatus();
                 }}
                 configure={configure}
+                plugins={state.plugins}
+                slot={(name, gesture, from) =>
+                  void act(async () => {
+                    await client.request({
+                      type: 'plugin.slot',
+                      name,
+                      sessionId: selected.id,
+                      gesture,
+                      from,
+                    });
+                  })
+                }
                 stop={stopRun}
               />
             )}
