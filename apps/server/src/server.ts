@@ -312,6 +312,7 @@ export function createProxyServer(options: ServerOptions) {
       metrics: store.lastMetrics(sessionId),
       quota: quotas.current(),
     }),
+    () => plugins.names().length > 0,
     (event) => plugins.dispatch(event),
   );
   const compactions = new IdleCompactions(store.directory, compactIdle);
@@ -1125,14 +1126,13 @@ export function createProxyServer(options: ServerOptions) {
           rmSync(settingsPath, { force: true });
           rmSync(hooksPath, { force: true });
           rmSync(statusPath, { force: true });
-          events.observe(
-            store.append(current.sessionId, current.id, {
-              type: 'run.status',
-              status: 'completed',
-              surface: 'terminal',
-              connectionId: peer.id,
-            }),
-          );
+          const closed = store.append(current.sessionId, current.id, {
+            type: 'run.status',
+            status: 'completed',
+            surface: 'terminal',
+            connectionId: peer.id,
+          });
+          events.observe(closed);
           updated(current.sessionId);
           if (current.owner)
             send(current.owner, {
@@ -1220,15 +1220,14 @@ export function createProxyServer(options: ServerOptions) {
         }
         if (ended || !activity || activity === continued.activity) return;
         continued.activity = activity;
-        events.observe(
-          record(terminal.sessionId, terminal.id, {
-            type: 'run.status',
-            status: 'running',
-            surface: 'terminal',
-            activity,
-            connectionId: continued.connectionId,
-          }),
-        );
+        const event = record(terminal.sessionId, terminal.id, {
+          type: 'run.status',
+          status: 'running',
+          surface: 'terminal',
+          activity,
+          connectionId: continued.connectionId,
+        });
+        events.observe(event);
         updated(terminal.sessionId);
       })
       .catch(() => {});

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -15,7 +15,7 @@ test('a matcher is names or a regular expression, as in Claude Code', () => {
   assert.ok(matches('^mcp__.*', 'mcp__memory__read') && !matches('^mcp__.*', 'Bash'));
 });
 
-test('a broken plugin and one that does not end leave the others and the service alone', async (t) => {
+test('a broken plugin and one that does not end leave the others alone, and each log says how it went', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'cc-desk-tunnel-plugins-'));
   const plugins = new Plugins(directory);
   t.after(() => {
@@ -39,19 +39,27 @@ test('a broken plugin and one that does not end leave the others and the service
   add('a-broken', '{');
   add('b-hangs', script('setInterval(() => {}, 1000)', 0.5));
   add('c-fails', script('console.error("no token"); process.exit(3)', 10));
-  const logged: string[] = [];
-  t.mock.method(console, 'log', (line: string) => logged.push(line));
+  add('d-works', script('console.log("sent")', 10));
+  const logged = (name: string) => {
+    try {
+      return readFileSync(join(directory, 'plugin-logs', `${name}.log`), 'utf8');
+    } catch {
+      return '';
+    }
+  };
   plugins.dispatch({
     version: EVENTS_VERSION,
     hook_event_name: 'RunEnded',
     timestamp: new Date().toISOString(),
     status: 'completed',
   });
-  for (const deadline = Date.now() + 10_000; logged.length < 3 && Date.now() < deadline;)
+  const all = ['a-broken', 'b-hangs', 'c-fails', 'd-works'];
+  for (const deadline = Date.now() + 10_000; !all.every(logged) && Date.now() < deadline;)
     await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.match(logged.join('\n'), /Plugin a-broken, RunEnded: /);
-  assert.ok(logged.includes('Plugin b-hangs, RunEnded: stopped after 0.5s'));
-  assert.ok(logged.includes('Plugin c-fails, RunEnded: exit 3 no token'));
+  assert.match(logged('a-broken'), /RunEnded 没有运行：/);
+  assert.match(logged('b-hangs'), /RunEnded → 超时 0\.5s，已结束 \d+ms\n$/);
+  assert.match(logged('c-fails'), /RunEnded → 退出 3 \d+ms\n    no token\n$/);
+  assert.match(logged('d-works'), /RunEnded → 成功 \d+ms\n    sent\n$/);
 });
 
 test('every wait is resolved by the end of its run, and a failed run says why and how the quota stands', () => {
@@ -61,6 +69,7 @@ test('every wait is resolved by the end of its run, and a failed run says why an
   const session = { id: randomUUID(), title: '会话', projectPath: 'D:\\p' } as Session;
   const events = new ServiceEvents(
     () => ({ session, metrics: null, quota }),
+    () => true,
     (event) => heard.push(event),
   );
   const connectionId = randomUUID();
@@ -112,4 +121,30 @@ test('every wait is resolved by the end of its run, and a failed run says why an
   assert.deepEqual(ended.quota, [
     { name: window.name, utilization: 42, resets_at: window.resetsAt },
   ]);
+});
+
+test('an event is not made while no plugin is there, and one that cannot be made leaves the run alone', (t) => {
+  let wanted = false;
+  let asked = 0;
+  const events = new ServiceEvents(
+    () => {
+      asked++;
+      throw new Error('no such session');
+    },
+    () => wanted,
+    () => assert.fail('nothing to emit'),
+  );
+  const failed = {
+    sessionId: randomUUID(),
+    runId: randomUUID(),
+    sequence: 1,
+    createdAt: new Date().toISOString(),
+    payload: { type: 'run.error', code: 'c', message: 'm' } as const,
+  };
+  t.mock.method(console, 'error', () => {});
+  events.observe(failed);
+  assert.equal(asked, 0);
+  wanted = true;
+  events.observe(failed);
+  assert.equal(asked, 1);
 });

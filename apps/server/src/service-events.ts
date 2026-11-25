@@ -49,18 +49,19 @@ type Facts = { session: Session; metrics: NativeMetrics | null; quota: AccountQu
 export class ServiceEvents {
   private runs = new Map<string, Followed>();
   private facts: (sessionId: string) => Facts;
+  private wanted: () => boolean;
   private emit: (event: ServiceEvent) => void;
-  constructor(facts: (sessionId: string) => Facts, emit: (event: ServiceEvent) => void) {
+  constructor(
+    facts: (sessionId: string) => Facts,
+    wanted: () => boolean,
+    emit: (event: ServiceEvent) => void,
+  ) {
     this.facts = facts;
+    this.wanted = wanted;
     this.emit = emit;
   }
   device(name: 'DeviceOnline' | 'DeviceOffline', device: Device) {
-    this.emit({
-      version: EVENTS_VERSION,
-      hook_event_name: name,
-      timestamp: new Date().toISOString(),
-      device,
-    });
+    this.send(name, new Date().toISOString(), () => ({ device }));
   }
   observe(event: SessionEvent) {
     const { payload, runId } = event;
@@ -130,31 +131,39 @@ export class ServiceEvents {
     this.fire('WaitResolved', event, { wait_id: id, ...wait, allowed });
   }
   private fire(name: ServiceEventName, event: SessionEvent, fields: Record<string, unknown> = {}) {
-    const { session, metrics, quota } = this.facts(event.sessionId);
-    const context = metrics?.context;
-    this.emit({
-      version: EVENTS_VERSION,
-      hook_event_name: name,
-      timestamp: event.createdAt,
-      session_id: session.id,
-      session_title: session.title,
-      project_path: session.projectPath,
-      device: session.device,
-      run_id: event.runId,
-      model: context?.model ?? session.model ?? undefined,
-      effort: session.effort ?? undefined,
-      permission_mode: session.permissionMode,
-      context: context
-        ? { used_tokens: context.usedTokens, window_tokens: context.windowTokens }
-        : undefined,
-      quota: quota.rateLimits?.available
-        ? quota.rateLimits.windows.map(({ name, utilization, resetsAt }) => ({
-            name,
-            utilization,
-            resets_at: resetsAt,
-          }))
-        : undefined,
-      ...fields,
+    this.send(name, event.createdAt, () => {
+      const { session, metrics, quota } = this.facts(event.sessionId);
+      const context = metrics?.context;
+      return {
+        session_id: session.id,
+        session_title: session.title,
+        project_path: session.projectPath,
+        device: session.device,
+        run_id: event.runId,
+        model: context?.model ?? session.model ?? undefined,
+        effort: session.effort ?? undefined,
+        permission_mode: session.permissionMode,
+        context: context
+          ? { used_tokens: context.usedTokens, window_tokens: context.windowTokens }
+          : undefined,
+        quota: quota.rateLimits?.available
+          ? quota.rateLimits.windows.map(({ name, utilization, resetsAt }) => ({
+              name,
+              utilization,
+              resets_at: resetsAt,
+            }))
+          : undefined,
+        ...fields,
+      };
     });
+  }
+  // Nothing is looked up while no plugin is there, and nothing that goes wrong reaches the run that is told of.
+  private send(name: ServiceEventName, timestamp: string, fields: () => Record<string, unknown>) {
+    try {
+      if (!this.wanted()) return;
+      this.emit({ version: EVENTS_VERSION, hook_event_name: name, timestamp, ...fields() });
+    } catch (error) {
+      console.error(`Event ${name}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 }
