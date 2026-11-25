@@ -4656,3 +4656,97 @@ dialog:has(.ccdt-dialog) {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* The settings' page of the plugins: a card for each, with the fields it declares. */
+.plugin-card + .plugin-card {
+  margin-top: 16px;
+}
+.plugin-empty {
+  margin: 0;
+  padding: 16px 0;
+}
+.plugin-status {
+  display: block;
+  color: var(--muted);
+}
+.plugin-status.bad,
+.plugin-result.bad {
+  color: var(--danger-text);
+}
+.plugin-group {
+  margin: 14px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.settings-list label.plugin-text {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 8px;
+}
+.settings-list .plugin-text input,
+.settings-list .plugin-text textarea {
+  flex: 1;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: inherit;
+  resize: vertical;
+}
+.settings-list [aria-invalid='true'] {
+  border-color: var(--danger);
+}
+.settings-list label > .plugin-action,
+.plugin-action,
+.plugin-try,
+.plugin-foot {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.plugin-foot {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  padding: 12px 0;
+}
+.plugin-foot > .plugin-try,
+.plugin-foot > .plugin-only {
+  margin-right: auto;
+}
+.plugin-notice {
+  margin: 8px 0 0;
+  color: var(--warn-text);
+  font-size: 13px;
+}
+.plugin-result {
+  font-size: 13px;
+  color: var(--ok-text);
+  overflow-wrap: anywhere;
+}
+pre.plugin-result,
+.plugin-log {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  max-height: 320px;
+  overflow: auto;
+  border-radius: var(--radius-s);
+  background: var(--surface-2);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.plugin-log {
+  max-height: 55vh;
+}
+dialog:has(> .plugin-log) {
+  width: min(760px, calc(100vw - 32px));
+}
+.plugin-only {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}

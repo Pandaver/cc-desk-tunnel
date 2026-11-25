@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { platformOf } from '@cc-desk-tunnel/protocol';
+import type { Plugin } from '@cc-desk-tunnel/protocol';
 import {
   ArrowLeft,
   Bell,
@@ -11,6 +12,7 @@ import {
   Info,
   Keyboard,
   LogOut,
+  Plug,
   Palette,
   Search,
   Settings,
@@ -32,6 +34,7 @@ import { barText, inBar, sampleSession, sessionFields } from './sessionStats.ts'
 import { GithubMark, openProject, project } from './project.tsx';
 import GlobalInstructions from './GlobalInstructions.tsx';
 import IdleCompactionSettings from './IdleCompactionSettings.tsx';
+import PluginSettings from './PluginSettings.tsx';
 import SettingsPanel from './SettingsPanel.tsx';
 import { useShared } from './shared.ts';
 import type { Account } from './shared.ts';
@@ -50,6 +53,7 @@ export type Section =
   | 'context'
   | 'shell'
   | 'web'
+  | 'plugins'
   | 'account'
   | 'claude'
   | 'instructions'
@@ -120,6 +124,13 @@ export const sections: {
     group: '服务端',
     icon: Globe,
     words: 'Web 网页 证书 域名 两步验证 反向代理 浏览器登录',
+  },
+  {
+    id: 'plugins',
+    name: '插件',
+    group: '服务端',
+    icon: Plug,
+    words: '插件 通知 推送 事件 hook 试跑 日志 启用 停用',
   },
   {
     id: 'account',
@@ -914,7 +925,10 @@ export default function SettingsPage({
   disconnect,
   browser = false,
   here,
+  plugins = [],
 }: {
+  // The service's, once there is a connection to one.
+  plugins?: Plugin[];
   // This computer as the service lists it, with the shells it runs Claude's scripts in. A Windows one has a page for
   // the shell Claude should prefer.
   here?: ConnectedDevice;
@@ -1043,6 +1057,10 @@ export default function SettingsPage({
           ) : section === 'web' ? (
             <Page title="浏览器访问" intro={everyDevice}>
               <WebAccessSettings client={client} browser={browser} connectionUrl={form.url} />
+            </Page>
+          ) : section === 'plugins' ? (
+            <Page title="插件" intro={everyDevice}>
+              <PluginSettings client={client} plugins={plugins} />
             </Page>
           ) : section === 'install' && browser ? (
             <InstallAppSettings />
