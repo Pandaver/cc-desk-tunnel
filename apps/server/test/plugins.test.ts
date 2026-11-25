@@ -54,11 +54,13 @@ test('a broken plugin and one that does not end leave the others and the service
   assert.ok(logged.includes('Plugin c-fails, RunEnded: exit 3 no token'));
 });
 
-test('every wait is resolved, at the latest by the end of its run', () => {
+test('every wait is resolved by the end of its run, and a failed run says why and how the quota stands', () => {
   const heard: ServiceEvent[] = [];
+  const window = { name: 'five_hour', utilization: 42, resetsAt: '2026-11-25T08:00:00.000Z' };
+  const quota = { rateLimits: { available: true, windows: [window] } };
   const session = { id: randomUUID(), title: '会话', projectPath: 'D:\\p' } as Session;
   const events = new ServiceEvents(
-    () => session,
+    () => ({ session, metrics: null, quota }),
     (event) => heard.push(event),
   );
   const connectionId = randomUUID();
@@ -102,4 +104,12 @@ test('every wait is resolved, at the latest by the end of its run', () => {
       ['WaitResolved', terminal],
     ],
   );
+  const failing = randomUUID();
+  observe(failing, { type: 'run.error', code: 'cli_process_failed', message: 'boom' });
+  observe(failing, { type: 'run.status', status: 'failed', connectionId });
+  const ended = heard.at(-1)!;
+  assert.deepEqual(ended.error, { code: 'cli_process_failed', message: 'boom' });
+  assert.deepEqual(ended.quota, [
+    { name: window.name, utilization: 42, resets_at: window.resetsAt },
+  ]);
 });

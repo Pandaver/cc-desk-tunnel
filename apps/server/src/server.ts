@@ -307,7 +307,11 @@ export function createProxyServer(options: ServerOptions) {
   const fileConnections = new Map<string, Set<WebSocket>>();
   const plugins = new Plugins(store.directory);
   const events = new ServiceEvents(
-    (sessionId) => store.get(sessionId).session,
+    (sessionId) => ({
+      session: store.get(sessionId).session,
+      metrics: store.lastMetrics(sessionId),
+      quota: quotas.current(),
+    }),
     (event) => plugins.dispatch(event),
   );
   const compactions = new IdleCompactions(store.directory, compactIdle);

@@ -1,5 +1,11 @@
 import { terminalStatuses } from '@cc-desk-tunnel/protocol';
-import type { Device, Session, SessionEvent } from '@cc-desk-tunnel/protocol';
+import type {
+  AccountQuota,
+  Device,
+  NativeMetrics,
+  Session,
+  SessionEvent,
+} from '@cc-desk-tunnel/protocol';
 
 // The contract with plugins, described in docs/plugins.md. It is apart from the protocol between client and service:
 // fields may be added to it freely, and the version goes up only when one is removed or changes its meaning.
@@ -29,16 +35,23 @@ export const matcherFields: Partial<Record<ServiceEventName, string>> = {
 };
 
 type Wait = { waiting: 'approval' | 'question' | 'terminal'; tool_name?: string };
-type Followed = { startedAt: number; tools: Map<string, string>; waits: Map<string, Wait> };
+type Followed = {
+  startedAt: number;
+  tools: Map<string, string>;
+  waits: Map<string, Wait>;
+  error?: { code: string; message: string };
+};
+// What the service knows of a session as an event is made: its last figures, and the account's quota.
+type Facts = { session: Session; metrics: NativeMetrics | null; quota: AccountQuota };
 
 // Makes the service's events out of what its sessions record. They say what happened and where, and nothing of what
 // was said: no messages, no tool input or output.
 export class ServiceEvents {
   private runs = new Map<string, Followed>();
-  private session: (sessionId: string) => Session;
+  private facts: (sessionId: string) => Facts;
   private emit: (event: ServiceEvent) => void;
-  constructor(session: (sessionId: string) => Session, emit: (event: ServiceEvent) => void) {
-    this.session = session;
+  constructor(facts: (sessionId: string) => Facts, emit: (event: ServiceEvent) => void) {
+    this.facts = facts;
     this.emit = emit;
   }
   device(name: 'DeviceOnline' | 'DeviceOffline', device: Device) {
@@ -69,6 +82,7 @@ export class ServiceEvents {
         this.resolve(event, payload.approvalId, payload.allowed);
         break;
       case 'run.error':
+        this.follow(event).error = { code: payload.code, message: payload.message };
         this.fire('RunError', event, { code: payload.code, message: payload.message });
         break;
       case 'run.status': {
@@ -80,6 +94,7 @@ export class ServiceEvents {
             this.fire('RunEnded', event, {
               status: payload.status,
               reason: payload.reason,
+              error: payload.status === 'failed' ? run.error : undefined,
               duration_ms: Date.parse(event.createdAt) - run.startedAt,
             });
         } else if (payload.surface === 'terminal') {
@@ -115,7 +130,8 @@ export class ServiceEvents {
     this.fire('WaitResolved', event, { wait_id: id, ...wait, allowed });
   }
   private fire(name: ServiceEventName, event: SessionEvent, fields: Record<string, unknown> = {}) {
-    const session = this.session(event.sessionId);
+    const { session, metrics, quota } = this.facts(event.sessionId);
+    const context = metrics?.context;
     this.emit({
       version: EVENTS_VERSION,
       hook_event_name: name,
@@ -125,6 +141,19 @@ export class ServiceEvents {
       project_path: session.projectPath,
       device: session.device,
       run_id: event.runId,
+      model: context?.model ?? session.model ?? undefined,
+      effort: session.effort ?? undefined,
+      permission_mode: session.permissionMode,
+      context: context
+        ? { used_tokens: context.usedTokens, window_tokens: context.windowTokens }
+        : undefined,
+      quota: quota.rateLimits?.available
+        ? quota.rateLimits.windows.map(({ name, utilization, resetsAt }) => ({
+            name,
+            utilization,
+            resets_at: resetsAt,
+          }))
+        : undefined,
       ...fields,
     });
   }
