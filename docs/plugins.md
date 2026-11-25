@@ -28,14 +28,53 @@
 }
 ```
 
-- 每次发生事件时重新读取，新增、修改、删除插件立即生效，不用重启。
+- 服务端监听这个目录，新增、修改、删除插件片刻后生效，并告诉所有窗口，不用重启。
 - `type` 只支持 `command`。有 `args` 时直接启动 `command`，没有时交给 shell 执行。
 - `matcher` 的写法与 Claude Code 相同：省略、空或 `*` 匹配全部；只含字母、数字、`_`、`-`、空格、`,`、`|` 时是一个或几个名字；其他是正则表达式。对照的字段见下表，没有列出的事件忽略它。
 - `timeout` 是秒数，默认 60，最长 600，到时连同它启动的进程一起结束。默认值比 Claude Code 的 600 短，因为这里只是通知。
 - 命令在插件目录里运行，事件是标准输入上的一个 JSON 对象（UTF-8）。环境变量 `CLAUDE_PLUGIN_ROOT` 是插件目录，`CLAUDE_PLUGIN_DATA` 是它存状态用的目录（`<数据目录>/plugin-data/<名字>/`），两者也可以在 `command` 和 `args` 里写成 `${…}`。
 - 匹配的命令同时启动，事件之间也不排队：要分先后时看 `timestamp`。
 
-插件与服务端同一 Linux 用户运行，能做的与会话里的 Claude 一样多，只装信得过的。渠道的密钥放在插件自己的目录里：文件面板读不到它（内核支持 Landlock 时，见[部署与安全边界](deployment.md)），会话里的 Claude 能读到。
+插件与服务端同一 Linux 用户运行，能做的与会话里的 Claude 一样多，只装信得过的。密钥在数据目录里：文件面板读不到它（内核支持 Landlock 时，见[部署与安全边界](deployment.md)），会话里的 Claude 能读到。
+
+## 安装
+
+- 桌面客户端的“设置 → 插件 → 从压缩包安装…”：zip，不超过 5 MB，内容是插件的文件或装着它们的一个文件夹，要有 `.claude-plugin/plugin.json` 和 `hooks/hooks.json`。服务端先核对格式、列出版本、事件和会运行的命令，这时不运行其中任何代码；同意后才放进去。同名的插件被替换，设置、数据和日志保留。浏览器里可以设置插件，不能安装和删除。
+- 或者直接把目录放进 `plugins`。
+
+`plugin.json` 是 `name`（与目录同名）、`displayName`、`description`、`version`，只有安装压缩包时必须有 `name`。
+
+## 设置
+
+插件目录里有 `ui.ts`（或 `ui.js`、`ui.mjs`）时，它导出的 `settings` 成为设置页上的表单，由客户端绘制，桌面和网页相同：
+
+```ts
+export const settings = [
+  {
+    title: '钉钉',
+    showWhen: 'dingtalk_on',
+    fields: {
+      dingtalk_on: { type: 'boolean', title: '启用' },
+      dingtalk_url: {
+        type: 'string', title: '机器人地址', sensitive: true, required: true,
+        validate: (value, all) => ({ valid: value.includes('access_token='), message: '缺少 access_token' }),
+      },
+      dingtalk_body: { type: 'string', title: '模板', multiline: true, default: '{session}' },
+      dingtalk_test: { type: 'button', title: '发送测试消息', run: async (all) => ({ ok: true, message: '已发送' }) },
+    },
+  },
+];
+```
+
+- 类型：`string`（可加 `multiline`、`options`、`sensitive`）、`number`（可加 `min`、`max`）、`boolean`、`button`。都有 `title`，可有 `description`；除按钮外可有 `default`，文本和数字可有 `required`。字段名在插件里不重复，文字最长 8000 个字符。
+- `showWhen` 是一个开关的名字，或几个中的任一个：都关着时只显示这些开关，其余字段不检查。
+- `validate(值, 全部值)` 返回 `{ valid, message }`，可以是异步的；离开字段和保存时运行。超过 2 秒或出错时提示，但仍可保存。
+- 按钮的 `run(全部值)` 返回 `{ ok, message }`，用的是表单里的值，不必先保存；先检查它所在的一组。默认最多 20 秒，可用 `timeout` 设到 60 秒；`confirm` 是运行前要问的话。
+- `sensitive` 的值只进不出：任何窗口都读不回，留空沿用，日志和消息里原样出现的换成 `***`（编码或签名过的认不出来）。
+- 值存在 `<数据目录>/plugin-config/<名字>.json`（0600），命令从事件的 `config` 里得到，类型与这里相同。必填的没有填时插件不运行。
+- `ui.ts` 只在单独的子进程里运行，Node 只去掉类型，不支持 `enum` 之类需要转换的语法。停用的插件不运行任何代码，也就没有表单。
+
+设置页的“试跑”用示例事件运行插件的命令，与真的事件一样会发出去。
 
 ## 日志
 
@@ -45,7 +84,7 @@
 
 这份合约独立于客户端与服务端的协议。`version` 现在是 1：可能增加事件和字段，插件应忽略不认识的；删除字段或改变含义时才加一。
 
-每个事件都有 `version`、`hook_event_name`、`timestamp`（ISO 8601）。除设备事件外还有 `session_id`、`session_title`、`project_path`、`run_id`，以及会话所在的设备 `device`（`id`、`name`，非 Windows 时有 `platform`；很早的会话可能没有）和当时的状态：
+每个事件都有 `version`、`hook_event_name`、`timestamp`（ISO 8601）、`config`（插件的设置）。除设备事件外还有 `session_id`、`session_title`、`project_path`、`run_id`，以及会话所在的设备 `device`（`id`、`name`，非 Windows 时有 `platform`；很早的会话可能没有）和当时的状态：
 
 - `model`（最近一次实际使用的，还没有时是会话选定的）、`effort`、`permission_mode`。
 - `context`：最近一次读到的上下文，`used_tokens` 与 `window_tokens`。

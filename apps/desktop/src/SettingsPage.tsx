@@ -1060,7 +1060,7 @@ export default function SettingsPage({
             </Page>
           ) : section === 'plugins' ? (
             <Page title="插件" intro={everyDevice}>
-              <PluginSettings client={client} plugins={plugins} />
+              <PluginSettings client={client} plugins={plugins} browser={browser} />
             </Page>
           ) : section === 'install' && browser ? (
             <InstallAppSettings />

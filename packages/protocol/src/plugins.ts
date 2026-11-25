@@ -60,6 +60,14 @@ export type PluginValues = Record<string, PluginValue>;
 export const shownWhen = (showWhen: string | string[] | undefined, values: PluginValues) =>
   !showWhen || [showWhen].flat().some((name) => !!values[name]);
 
+// A plugin's own .claude-plugin/plugin.json, of which an installed one needs the name.
+export const pluginManifestSchema = z.object({
+  name: pluginNameSchema,
+  displayName: label.optional(),
+  description: z.string().max(1000).optional(),
+  version: z.string().max(60).optional(),
+});
+export type PluginManifest = z.infer<typeof pluginManifestSchema>;
 export const pluginSchema = z.object({
   name: pluginNameSchema,
   title: label.optional(),
@@ -79,6 +87,9 @@ export const pluginSchema = z.object({
 });
 export type Plugin = z.infer<typeof pluginSchema>;
 
+// A plugin's archive comes in parts, so that a frame of one is within MAX_FRAME_BYTES.
+export const PLUGIN_PART_BYTES = 128 * 1024;
+export const PLUGIN_ARCHIVE_LIMIT = 5 * 1024 * 1024;
 const request = { requestId: z.uuid(), name: pluginNameSchema };
 // A sensitive setting left out or empty keeps its value; null clears any setting.
 const values = z.record(key, pluginValueSchema.nullable());
@@ -93,6 +104,20 @@ export const pluginCommandSchemas = [
   z
     .object({ type: z.literal('plugin.log'), ...request, clear: z.literal(true).optional() })
     .strict(),
+  // With its settings, data and log.
+  z.object({ type: z.literal('plugin.remove'), ...request }).strict(),
+  // A part of a zip archive, base64; after the last one the service says what is in it.
+  z
+    .object({
+      type: z.literal('plugin.upload'),
+      requestId: z.uuid(),
+      uploadId: z.uuid(),
+      data: z.base64().max(Math.ceil(PLUGIN_PART_BYTES / 3) * 4),
+      last: z.boolean(),
+    })
+    .strict(),
+  // Puts the archive uploaded in place, once the user has seen what is in it.
+  z.object({ type: z.literal('plugin.install'), requestId: z.uuid(), uploadId: z.uuid() }).strict(),
 ] as const;
 export const pluginMessageSchemas = [
   // Every plugin, sent on signing in and to every connection whenever it changes.
@@ -112,4 +137,14 @@ export const pluginMessageSchemas = [
     message: z.string(),
   }),
   z.object({ type: z.literal('plugin.log'), requestId: z.uuid(), text: z.string() }),
+  z.object({
+    type: z.literal('plugin.archive'),
+    requestId: z.uuid(),
+    manifest: pluginManifestSchema,
+    events: z.array(z.string()),
+    commands: z.array(z.string()),
+    files: z.number().int().nonnegative(),
+    // There is a plugin of the name, which it takes the place of; its version, if it has one.
+    replaces: z.object({ version: z.string().optional() }).optional(),
+  }),
 ] as const;

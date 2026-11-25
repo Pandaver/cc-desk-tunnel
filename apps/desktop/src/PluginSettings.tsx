@@ -9,6 +9,7 @@ import type {
   PluginValues,
 } from '@cc-desk-tunnel/protocol';
 import type { ProxyClient } from './client.ts';
+import PluginInstall from './PluginInstall.tsx';
 import { Modal, Row, SettingText, Switch } from './ui.tsx';
 
 type Draft = Record<string, PluginValue | null>;
@@ -34,22 +35,39 @@ const failed = (error: unknown): Done => ({
 export default function PluginSettings({
   client,
   plugins,
+  browser,
 }: {
   client: ProxyClient;
   plugins: Plugin[];
+  // Where plugins are set but neither installed nor removed.
+  browser: boolean;
 }) {
-  if (!plugins.length)
-    return (
-      <div className="settings-list card">
-        <p className="muted plugin-empty">
-          还没有插件。插件是服务端数据目录 plugins 下的一个目录，放进去就会出现在这里。
-        </p>
-      </div>
-    );
-  return plugins.map((plugin) => <PluginCard key={plugin.name} client={client} plugin={plugin} />);
+  return (
+    <>
+      {!browser && <PluginInstall client={client} />}
+      {!plugins.length && (
+        <div className="settings-list card">
+          <p className="muted plugin-empty">
+            还没有插件。插件也可以直接放进服务端数据目录的 plugins，放进去就会出现在这里。
+          </p>
+        </div>
+      )}
+      {plugins.map((plugin) => (
+        <PluginCard key={plugin.name} client={client} plugin={plugin} fixed={browser} />
+      ))}
+    </>
+  );
 }
 
-function PluginCard({ client, plugin }: { client: ProxyClient; plugin: Plugin }) {
+function PluginCard({
+  client,
+  plugin,
+  fixed,
+}: {
+  client: ProxyClient;
+  plugin: Plugin;
+  fixed: boolean;
+}) {
   // What was changed and is not saved.
   const [draft, setDraft] = useState<Draft>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -251,6 +269,21 @@ function PluginCard({ client, plugin }: { client: ProxyClient; plugin: Plugin })
                 void act('try', () => client.fetch({ type: 'plugin.try', name, event }))
               }
             />
+          )}
+          {!fixed && (
+            <button
+              type="button"
+              className="button"
+              onClick={() =>
+                window.confirm(`删除“${title}”，连同它的设置、数据和日志？`) &&
+                void act('enable', async () => {
+                  await client.request({ type: 'plugin.remove', name });
+                  return undefined;
+                })
+              }
+            >
+              删除
+            </button>
           )}
           <button type="button" className="button" onClick={() => setLogging(true)}>
             日志

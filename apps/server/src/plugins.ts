@@ -1,15 +1,18 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, watch } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, watch } from 'node:fs';
 import type { FSWatcher } from 'node:fs';
 import { join } from 'node:path';
-import { z } from 'zod';
-import { pluginNameSchema } from '@cc-desk-tunnel/protocol';
-import type { Plugin, PluginValue, PluginValues } from '@cc-desk-tunnel/protocol';
+import { pluginManifestSchema, pluginNameSchema } from '@cc-desk-tunnel/protocol';
+import type { Plugin, PluginManifest, PluginValue, PluginValues } from '@cc-desk-tunnel/protocol';
 import { DomainError } from './errors.ts';
 import { eventExample } from './event-examples.ts';
-import { readPluginConfig, writePluginConfig } from './plugin-config.ts';
+import { readPluginConfig, removePluginConfig, writePluginConfig } from './plugin-config.ts';
 import type { PluginConfig } from './plugin-config.ts';
+import { hooksFileSchema, matches } from './plugin-hooks.ts';
+import type { Hook } from './plugin-hooks.ts';
+import { installArchive } from './plugin-install.ts';
+import type { PluginArchive } from './plugin-install.ts';
 import { masked, PluginLog } from './plugin-log.ts';
 import { stop } from './plugin-process.ts';
 import { askButton, askCheck, checkValues, fieldsOf, loadUi, NOTHING } from './plugin-ui.ts';
@@ -17,46 +20,18 @@ import type { Declared } from './plugin-ui.ts';
 import { matcherFields } from './service-events.ts';
 import type { ServiceEvent } from './service-events.ts';
 
-// The structure of a Claude Code plugin's hooks/hooks.json, of which only command hooks are run.
-const hookSchema = z.object({
-  type: z.literal('command'),
-  command: z.string().min(1),
-  args: z.array(z.string()).optional(),
-  timeout: z.number().positive().max(600).default(60),
-});
-const hooksFileSchema = z.object({
-  hooks: z.record(
-    z.string(),
-    z.array(z.object({ matcher: z.string().optional(), hooks: z.array(hookSchema) })),
-  ),
-});
-type Hook = z.infer<typeof hookSchema>;
-const manifestSchema = z.object({
-  displayName: z.string().trim().min(1).max(120).optional(),
-  description: z.string().max(1000).optional(),
-  version: z.string().max(60).optional(),
-});
 // What is known of a plugin, read anew whenever its directory changes.
 type Entry = {
-  manifest: z.infer<typeof manifestSchema>;
-  config: PluginConfig;
+  manifest: Partial<PluginManifest>;
   declared: Declared;
   events: string[];
   broken?: string;
-  failure?: { at: string; message: string };
 };
 
 // How much of what a command printed is kept, and how long changes in the directory are gathered.
 const OUTPUT_LIMIT = 8192;
 const SETTLE_MS = 300;
 
-// As Claude Code reads a matcher: names when it holds nothing but them, otherwise a regular expression.
-export function matches(matcher: string | undefined, value: unknown) {
-  if (!matcher || matcher === '*' || value === undefined) return true;
-  if (/^[\w\- ,|]+$/.test(matcher))
-    return matcher.split(/[|,]/).some((name) => name.trim() === value);
-  return new RegExp(matcher).test(String(value));
-}
 const reason = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 // The plugins in <data>/plugins, each a directory with a hooks/hooks.json and, for its settings, a ui file (see
@@ -67,6 +42,9 @@ export class Plugins {
   private changed: () => void;
   private log: PluginLog;
   private entries = new Map<string, Entry>();
+  // Apart from what is read anew, which may be while a plugin is set or runs.
+  private configs = new Map<string, PluginConfig>();
+  private failures = new Map<string, { at: string; message: string }>();
   private running = new Set<ChildProcess>();
   private pressed = new Set<string>();
   private watcher?: FSWatcher;
@@ -104,7 +82,8 @@ export class Plugins {
   list(): Plugin[] {
     return [...this.entries].map(([name, entry]) => {
       const fields = fieldsOf(entry.declared.settings);
-      const values = this.values(entry);
+      const values = this.values(name);
+      const { enabled } = this.config(name);
       const secret = (key: string) => {
         const field = fields[key];
         return field?.type === 'string' && !!field.sensitive;
@@ -114,9 +93,9 @@ export class Plugins {
         title: entry.manifest.displayName,
         description: entry.manifest.description,
         version: entry.manifest.version,
-        enabled: entry.config.enabled,
-        problem: entry.config.enabled ? this.problem(entry) : undefined,
-        failure: entry.failure,
+        enabled,
+        problem: enabled ? this.problem(name) : undefined,
+        failure: this.failures.get(name),
         events: entry.events,
         settings: entry.declared.settings,
         values: Object.fromEntries(Object.entries(values).filter(([key]) => !secret(key))),
@@ -154,18 +133,18 @@ export class Plugins {
     const root = join(this.directory, 'plugins', name);
     const entry: Entry = {
       manifest: {},
-      config: readPluginConfig(this.directory, name),
       declared: NOTHING,
       events: [],
-      failure: this.entries.get(name)?.failure,
     };
     try {
       const manifest = join(root, '.claude-plugin', 'plugin.json');
       if (existsSync(manifest))
-        entry.manifest = manifestSchema.parse(JSON.parse(readFileSync(manifest, 'utf8')));
+        entry.manifest = pluginManifestSchema
+          .partial()
+          .parse(JSON.parse(readFileSync(manifest, 'utf8')));
       entry.events = Object.keys(this.hooks(name)).filter((event) => eventExample(event));
       // A disabled plugin's code does not run, and so it has nothing to be set.
-      if (entry.config.enabled) entry.declared = await loadUi(root);
+      if (this.config(name).enabled) entry.declared = await loadUi(root);
     } catch (error) {
       entry.broken = `加载失败：${reason(error)}`;
       this.log.write(name, entry.broken);
@@ -176,46 +155,54 @@ export class Plugins {
     const path = join(this.directory, 'plugins', name, 'hooks', 'hooks.json');
     return hooksFileSchema.parse(JSON.parse(readFileSync(path, 'utf8'))).hooks;
   }
+  private config(name: string) {
+    let config = this.configs.get(name);
+    if (!config) this.configs.set(name, (config = readPluginConfig(this.directory, name)));
+    return config;
+  }
   private entry(name: string) {
     const entry = this.entries.get(name);
     if (!entry) throw new DomainError('not_found', '插件不存在。');
     return entry;
   }
   // What the plugin is set to, with the defaults of what it was not.
-  private values(entry: Entry, changes: Record<string, PluginValue | null> = {}): PluginValues {
+  private values(name: string, changes: Record<string, PluginValue | null> = {}): PluginValues {
     const values: PluginValues = {};
-    for (const [key, field] of Object.entries(fieldsOf(entry.declared.settings))) {
+    const kept = this.config(name).values;
+    for (const [key, field] of Object.entries(fieldsOf(this.entry(name).declared.settings))) {
       if (field.type === 'button') continue;
       const change = changes[key];
-      const kept = field.type === 'string' && field.sensitive && change === '';
-      const value = change === undefined || kept ? entry.config.values[key] : (change ?? undefined);
+      const same = field.type === 'string' && field.sensitive && change === '';
+      const value = change === undefined || same ? kept[key] : (change ?? undefined);
       const effective = value ?? field.default;
       if (effective !== undefined) values[key] = effective;
     }
     return values;
   }
-  private secrets(entry: Entry, values = this.values(entry)) {
-    return Object.entries(fieldsOf(entry.declared.settings)).flatMap(([key, field]) =>
+  private secrets(name: string, values = this.values(name)) {
+    const kept = this.config(name).values;
+    return Object.entries(fieldsOf(this.entry(name).declared.settings)).flatMap(([key, field]) =>
       field.type === 'string' && field.sensitive
-        ? [values[key], entry.config.values[key]].filter((value) => typeof value === 'string')
+        ? [values[key], kept[key]].filter((value) => typeof value === 'string')
         : [],
     );
   }
-  private problem(entry: Entry) {
+  private problem(name: string) {
+    const entry = this.entry(name);
     if (entry.broken) return entry.broken;
     const groups = entry.declared.settings;
-    const wrong = Object.keys(checkValues(groups, this.values(entry)))[0];
+    const wrong = Object.keys(checkValues(groups, this.values(name)))[0];
     return wrong && `待配置：${fieldsOf(groups)[wrong]!.title}`;
   }
-  private write(name: string, entry: Entry, config: PluginConfig) {
+  private write(name: string, config: PluginConfig) {
     writePluginConfig(this.directory, name, config);
-    entry.config = config;
+    this.configs.set(name, config);
     this.changed();
   }
 
   async enable(name: string, enabled: boolean) {
-    const entry = this.entry(name);
-    this.write(name, entry, { ...entry.config, enabled });
+    this.entry(name);
+    this.write(name, { ...this.config(name), enabled });
     this.log.write(name, enabled ? '启用' : '停用');
     this.stale.add(name);
     await this.refresh();
@@ -223,8 +210,8 @@ export class Plugins {
   async configure(name: string, changes: Record<string, PluginValue | null>, save: boolean) {
     const entry = this.entry(name);
     const groups = entry.declared.settings;
-    const values = this.values(entry, changes);
-    const secrets = this.secrets(entry, values);
+    const values = this.values(name, changes);
+    const secrets = this.secrets(name, values);
     const own = checkValues(groups, values);
     const said = await askCheck(this.root(name), groups, values);
     this.printed(name, '检查设置', said.printed, secrets);
@@ -232,11 +219,11 @@ export class Plugins {
     for (const key of Object.keys(errors)) errors[key] = masked(errors[key]!, secrets);
     const saved = save && !Object.keys(errors).length;
     if (saved) {
-      const kept = { ...entry.config.values };
+      const kept = { ...this.config(name).values };
       for (const [key, change] of Object.entries(changes))
         if (change === null) delete kept[key];
         else if (values[key] !== undefined) kept[key] = values[key];
-      this.write(name, entry, { ...entry.config, values: kept });
+      this.write(name, { ...this.config(name), values: kept });
       this.log.write(name, '设置已保存');
     }
     return { errors, notice: said.notice && masked(said.notice, secrets), saved };
@@ -250,8 +237,8 @@ export class Plugins {
     if (this.pressed.has(key)) return { ok: false, message: '正在运行。' };
     this.pressed.add(key);
     try {
-      const values = this.values(entry, changes);
-      const secrets = this.secrets(entry, values);
+      const values = this.values(name, changes);
+      const secrets = this.secrets(name, values);
       const errors = {
         ...(await askCheck(this.root(name), [group!], values)).errors,
         ...checkValues([group!], values),
@@ -270,20 +257,40 @@ export class Plugins {
   }
   // Runs what the plugin has for an example of the event, as the event itself would.
   async attempt(name: string, event: string) {
-    const entry = this.entry(name);
-    const problem = entry.config.enabled ? this.problem(entry) : '插件没有启用。';
+    const problem = this.config(name).enabled ? this.problem(name) : '插件没有启用。';
     if (problem) return { ok: false, message: problem };
     const example = eventExample(event);
     if (!example) throw new DomainError('not_found', '没有这个事件。');
     const hooks = this.hooksFor(name, example);
     if (!hooks.length) return { ok: false, message: '这个事件没有匹配的命令。' };
     const results = await Promise.all(
-      hooks.map((hook) => this.run(name, entry, hook, example, '[试跑] ')),
+      hooks.map((hook) => this.run(name, hook, example, '[试跑] ')),
     );
     return {
       ok: results.every(({ ok }) => ok),
       message: results.map(({ text }) => text).join('\n'),
     };
+  }
+  version(name: string) {
+    const entry = this.entries.get(name);
+    return entry && { version: entry.manifest.version };
+  }
+  async install(archive: PluginArchive) {
+    const { name, version } = archive.manifest;
+    installArchive(this.directory, archive);
+    this.log.write(name, `安装 ${version ?? ''}`.trim());
+    this.stale.add(name);
+    await this.refresh();
+  }
+  async remove(name: string) {
+    this.entry(name);
+    rmSync(this.root(name), { recursive: true, force: true });
+    rmSync(join(this.directory, 'plugin-data', name), { recursive: true, force: true });
+    removePluginConfig(this.directory, name);
+    this.configs.delete(name);
+    this.failures.delete(name);
+    this.log.clear(name);
+    await this.refresh();
   }
   logOf(name: string, clear = false) {
     this.entry(name);
@@ -293,12 +300,12 @@ export class Plugins {
 
   dispatch(event: ServiceEvent) {
     if (this.closed) return;
-    for (const [name, entry] of this.entries) {
-      if (!entry.config.enabled || this.problem(entry)) continue;
+    for (const name of this.entries.keys()) {
+      if (!this.config(name).enabled || this.problem(name)) continue;
       try {
-        for (const hook of this.hooksFor(name, event)) void this.run(name, entry, hook, event);
+        for (const hook of this.hooksFor(name, event)) void this.run(name, hook, event);
       } catch (error) {
-        this.failed(name, entry, `${event.hook_event_name} 没有运行：${reason(error)}`);
+        this.failed(name, `${event.hook_event_name} 没有运行：${reason(error)}`);
       }
     }
   }
@@ -311,7 +318,7 @@ export class Plugins {
   private root(name: string) {
     return join(this.directory, 'plugins', name);
   }
-  private run(name: string, entry: Entry, hook: Hook, event: ServiceEvent, mark = '') {
+  private run(name: string, hook: Hook, event: ServiceEvent, mark = '') {
     const root = this.root(name);
     const data = join(this.directory, 'plugin-data', name);
     mkdirSync(data, { recursive: true, mode: 0o700 });
@@ -320,8 +327,8 @@ export class Plugins {
       text
         .replaceAll('${CLAUDE_PLUGIN_ROOT}', () => root)
         .replaceAll('${CLAUDE_PLUGIN_DATA}', () => data);
-    const config = this.values(entry);
-    const secrets = this.secrets(entry, config);
+    const config = this.values(name);
+    const secrets = this.secrets(name, config);
     const started = Date.now();
     const child = spawn(filled(hook.command), hook.args?.map(filled) ?? [], {
       cwd: root,
@@ -352,7 +359,7 @@ export class Plugins {
         const text = `${result} ${Date.now() - started}ms${output && `\n${output.replace(/^/gm, '    ')}`}`;
         if (!this.closed) {
           this.log.write(name, `${mark}${event.hook_event_name}${mark ? '' : of} → ${text}`);
-          this.told(entry, ok ? undefined : `${event.hook_event_name} ${result}`);
+          this.told(name, ok ? undefined : `${event.hook_event_name} ${result}`);
         }
         resolve({ ok, text });
       };
@@ -368,14 +375,15 @@ export class Plugins {
     child.stdin.end(JSON.stringify({ ...event, config }));
     return done;
   }
-  private failed(name: string, entry: Entry, message: string) {
+  private failed(name: string, message: string) {
     this.log.write(name, message);
-    this.told(entry, message);
+    this.told(name, message);
   }
   // Every window hears of a first failure and of the first time it went well after it.
-  private told(entry: Entry, failure: string | undefined) {
-    const before = entry.failure?.message;
-    entry.failure = failure ? { at: new Date().toISOString(), message: failure } : undefined;
+  private told(name: string, failure: string | undefined) {
+    const before = this.failures.get(name)?.message;
+    if (failure) this.failures.set(name, { at: new Date().toISOString(), message: failure });
+    else this.failures.delete(name);
     if (before !== failure) this.changed();
   }
   private printed(name: string, of: string, text: string, secrets: string[]) {

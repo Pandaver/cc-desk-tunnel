@@ -4661,6 +4661,26 @@ dialog:has(.ccdt-dialog) {
 .plugin-card + .plugin-card {
   margin-top: 16px;
 }
+.plugin-install {
+  margin-bottom: 16px;
+}
+.plugin-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 16px;
+  margin: 12px 0;
+  font-size: 13.5px;
+}
+.plugin-facts dt {
+  color: var(--muted);
+}
+.plugin-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.plugin-facts code {
+  display: block;
+}
 .plugin-empty {
   margin: 0;
   padding: 16px 0;

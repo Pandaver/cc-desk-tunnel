@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import type { Page } from '@playwright/test';
+import { strToU8, zipSync } from 'fflate';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { login, screenshots } from './helpers.ts';
 
@@ -37,6 +39,10 @@ function add(name: string) {
   );
   writeFileSync(resolve(root, 'ui.ts'), ui);
 }
+// What an earlier run left.
+test.beforeAll(() =>
+  rmSync(resolve(plugins, '../plugin-config'), { recursive: true, force: true }),
+);
 // The service watches the directory itself, which stays.
 test.afterEach(() =>
   rmSync(resolve(plugins, 'notify'), {
@@ -47,14 +53,63 @@ test.afterEach(() =>
   }),
 );
 
-test('a plugin put in place is set up, tried and switched off without a reload', async ({
-  page,
-}) => {
+async function openPlugins(page: Page) {
   await page.goto('/');
   await login(page);
   await page.getByRole('button', { name: '设置与账号', exact: true }).click();
   await page.getByRole('menuitem', { name: '设置', exact: true }).click();
   await page.getByRole('button', { name: '插件', exact: true }).click();
+}
+
+test('a plugin is installed from an archive once its contents were agreed to, and removed', async ({
+  page,
+}) => {
+  await openPlugins(page);
+  const choose = (files: Record<string, string>) =>
+    page.getByLabel('插件压缩包').setInputFiles({
+      name: 'notify.zip',
+      mimeType: 'application/zip',
+      buffer: Buffer.from(
+        zipSync(
+          Object.fromEntries(Object.entries(files).map(([name, text]) => [name, strToU8(text)])),
+        ),
+      ),
+    });
+  await choose({ 'readme.txt': 'nothing' });
+  await expect(page.getByRole('alert')).toContainText('没有 .claude-plugin/plugin.json');
+  await choose({
+    'notify/.claude-plugin/plugin.json': JSON.stringify({
+      name: 'notify',
+      displayName: '通知',
+      version: '1.0.0',
+    }),
+    'notify/hooks/hooks.json': JSON.stringify({
+      hooks: {
+        RunEnded: [{ hooks: [{ type: 'command', command: 'node', args: ['notify.mjs'] }] }],
+      },
+    }),
+    // More than one part of an upload.
+    'notify/notify.mjs': Array.from({ length: 12_000 }, () => Math.random().toString(36)).join(
+      '\n',
+    ),
+  });
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText('node notify.mjs');
+  expect(existsSync(resolve(plugins, 'notify'))).toBe(false);
+  await page.screenshot({ path: resolve(shots, 'install.png') });
+  await dialog.getByRole('button', { name: '安装', exact: true }).click();
+  const card = page.getByRole('region', { name: '通知', exact: true });
+  await expect(card).toContainText('通知 1.0.0');
+  page.once('dialog', (asked) => void asked.accept());
+  await card.getByRole('button', { name: '删除' }).click();
+  await expect(card).toHaveCount(0);
+  expect(existsSync(resolve(plugins, 'notify'))).toBe(false);
+});
+
+test('a plugin put in place is set up, tried and switched off without a reload', async ({
+  page,
+}) => {
+  await openPlugins(page);
   await expect(page.getByText('还没有插件')).toBeVisible();
   add('notify');
   const card = page.getByRole('region', { name: '通知', exact: true });

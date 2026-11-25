@@ -4,8 +4,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { strToU8, zipSync } from 'fflate';
 import type { EventPayload, Session } from '@cc-desk-tunnel/protocol';
-import { matches, Plugins } from '../src/plugins.ts';
+import { matches } from '../src/plugin-hooks.ts';
+import { readArchive } from '../src/plugin-install.ts';
+import { Plugins } from '../src/plugins.ts';
 import { EVENTS_VERSION, ServiceEvents } from '../src/service-events.ts';
 import type { ServiceEvent } from '../src/service-events.ts';
 
@@ -157,6 +160,55 @@ test('a check that hangs keeps nothing from being saved, and a ui file that cann
   const saved = await plugins.configure('a-hangs', { a: 'x' }, true);
   assert.ok(saved.saved);
   assert.match(saved.notice!, /没跑成：超过 2 秒/);
+});
+
+test('an archive is checked before any of it is run, and takes the place of the plugin of its name', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'cc-desk-tunnel-plugins-'));
+  const plugins = new Plugins(directory);
+  t.after(() => {
+    plugins.close();
+    rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+  const hooks = {
+    RunEnded: [{ hooks: [{ type: 'command', command: 'node', args: ['notify.mjs'] }] }],
+  };
+  const pack = (version: string, more: Record<string, string> = {}, folder = '') =>
+    zipSync(
+      Object.fromEntries(
+        Object.entries({
+          '.claude-plugin/plugin.json': JSON.stringify({ name: 'notify', version }),
+          'hooks/hooks.json': JSON.stringify({ hooks }),
+          'notify.mjs': version,
+          ...more,
+        }).map(([name, text]) => [folder + name, strToU8(text)]),
+      ),
+    );
+  for (const [archive, message] of [
+    [strToU8('not a zip'), /不是有效的 zip/],
+    [zipSync({ 'a.txt': strToU8('a') }), /没有 \.claude-plugin\/plugin\.json/],
+    [pack('1', { '../evil.mjs': '' }), /路径不合规/],
+    [pack('1', { '.claude-plugin/plugin.json': '{"name":"../x"}' }), /plugin\.json 有误：name/],
+    [
+      pack('1', { 'hooks/hooks.json': '{"hooks":{"RunEnded":[{"hooks":[{"type":"http"}]}]}}' }),
+      /hooks\.json 有误/,
+    ],
+    [pack('1', { big: 'x'.repeat(21 * 1024 * 1024) }), /超过 20 MB/],
+  ] as const)
+    assert.throws(() => readArchive(archive), message);
+
+  await plugins.start();
+  const archive = readArchive(pack('1.0.0', { '__MACOSX/x': '' }, 'notify-main/'));
+  assert.deepEqual([archive.events, archive.commands], [['RunEnded'], ['node notify.mjs']]);
+  await plugins.install(archive);
+  assert.equal(plugins.list()[0]!.version, '1.0.0');
+  await plugins.enable('notify', false);
+  await plugins.install(readArchive(pack('2.0.0')));
+  assert.deepEqual(
+    plugins.list().map(({ name, version, enabled }) => [name, version, enabled]),
+    [['notify', '2.0.0', false]],
+  );
+  await plugins.remove('notify');
+  assert.deepEqual(plugins.list(), []);
 });
 
 test('every wait is resolved by the end of its run, and a failed run says why and how the quota stands', () => {
