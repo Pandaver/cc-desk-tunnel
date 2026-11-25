@@ -4870,6 +4870,10 @@ dialog:has(> .plugin-log) {
   .plugin-controls {
     gap: 2px;
   }
+  /* A switch, or a button, stays beside what is said of it. */
+  .plugin-fields .setting-row {
+    flex-wrap: nowrap;
+  }
   .plugin-fields label {
     align-items: stretch;
     flex-direction: column;
