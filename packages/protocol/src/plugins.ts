@@ -74,7 +74,7 @@ export const COMPOSER_SLOTS = 2;
 // state and the clients draw it; what the states mean is the plugin's alone.
 export const slotGestureSchema = z.enum(['click', 'doubleClick', 'longPress']);
 export type SlotGesture = z.infer<typeof slotGestureSchema>;
-export const pluginSlotSchema = z.object({
+export const composerSlotSchema = z.object({
   title: label,
   showWhen: z.union([key, z.array(key).min(1)]).optional(),
   // A state, or the setting that names it.
@@ -104,15 +104,15 @@ export const pluginSlotSchema = z.object({
   // What a gesture or an event makes of the state: another for any, or by the state it is in.
   on: z.record(z.string().max(60), z.union([key, z.record(key, key)])),
 });
-export type PluginSlot = z.infer<typeof pluginSlotSchema>;
+export type ComposerSlot = z.infer<typeof composerSlotSchema>;
 // The state a gesture or an event brings the slot to; nothing when it stays.
-export function slotMove(slot: PluginSlot, cause: string, state: string) {
+export function slotMove(slot: ComposerSlot, cause: string, state: string) {
   const move = slot.on[cause];
   const to = typeof move === 'object' ? move[state] : move;
   return to !== state && to !== undefined && slot.states[to] ? to : undefined;
 }
 // The state the slot is in: the one kept for the session, or what it begins with.
-export function slotState(slot: PluginSlot, kept: string | undefined, values: PluginValues) {
+export function slotState(slot: ComposerSlot, kept: string | undefined, values: PluginValues) {
   if (kept !== undefined && slot.states[kept]) return kept;
   const initial =
     typeof slot.initial === 'string' ? slot.initial : String(values[slot.initial.setting]);
@@ -158,7 +158,7 @@ export const pluginSchema = z.object({
   values: z.record(key, pluginValueSchema),
   // The sensitive settings that have a value.
   secrets: z.array(key),
-  slot: pluginSlotSchema.optional(),
+  composerSlot: composerSlotSchema.optional(),
 });
 export type Plugin = z.infer<typeof pluginSchema>;
 
@@ -182,7 +182,7 @@ export const pluginCommandSchemas = [
   // What the user did to the plugin's button in a session, which counts if it still is in the state they saw.
   z
     .object({
-      type: z.literal('plugin.slot'),
+      type: z.literal('plugin.composerSlot'),
       ...request,
       sessionId: z.uuid(),
       gesture: slotGestureSchema,

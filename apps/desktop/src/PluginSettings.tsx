@@ -51,12 +51,15 @@ export default function PluginSettings({
     <Page
       title="插件"
       intro={
-        <span className="plugin-intro">
+        <>
           保存在服务端，对所有连接到它的设备生效。
-          <span title={`输入框旁的插件按钮，最多同时 ${COMPOSER_SLOTS} 个`}>
-            插槽 {plugins.filter(({ slot }) => slot).length}/{COMPOSER_SLOTS}
+          <span className="plugin-tags">
+            <span className="badge" title={`输入框旁的插件按钮，最多同时 ${COMPOSER_SLOTS} 个`}>
+              输入框插槽 {plugins.filter(({ composerSlot }) => composerSlot).length}/
+              {COMPOSER_SLOTS}
+            </span>
           </span>
-        </span>
+        </>
       }
       actions={
         !browser && (

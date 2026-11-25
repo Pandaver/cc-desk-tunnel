@@ -28,7 +28,7 @@ import ComposerControls from './ComposerControls.tsx';
 import MessageInput, { messageLimit } from './MessageInput.tsx';
 import type { MessageInputHandle } from './MessageInput.tsx';
 import PermissionMenu from './PermissionMenu.tsx';
-import PluginSlotButton, { slotsOf } from './PluginSlot.tsx';
+import ComposerSlotButton, { composerSlots } from './ComposerSlot.tsx';
 import { IconButton } from './ui.tsx';
 import type { MenuPosition } from './ui.tsx';
 
@@ -135,7 +135,7 @@ export default function Composer({
   const input = useRef<MessageInputHandle>(null);
   const tooLong = draft.length > messageLimit;
   const toolbar = useRef<HTMLDivElement>(null);
-  const slots = slotsOf(plugins, session);
+  const slots = composerSlots(plugins, session);
   useLayoutEffect(() => {
     const bar = toolbar.current!;
     const fit = () => {
@@ -414,7 +414,7 @@ export default function Composer({
             />
           )}
           {slots.map((shown) => (
-            <PluginSlotButton
+            <ComposerSlotButton
               key={shown.name + session.id}
               shown={shown}
               disabled={!connected}

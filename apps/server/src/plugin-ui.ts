@@ -3,8 +3,13 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { z } from 'zod';
-import { pluginGroupSchema, pluginSlotSchema, shownWhen } from '@cc-desk-tunnel/protocol';
-import type { PluginField, PluginGroup, PluginSlot, PluginValues } from '@cc-desk-tunnel/protocol';
+import { pluginGroupSchema, composerSlotSchema, shownWhen } from '@cc-desk-tunnel/protocol';
+import type {
+  PluginField,
+  PluginGroup,
+  ComposerSlot,
+  PluginValues,
+} from '@cc-desk-tunnel/protocol';
 import { stop } from './plugin-process.ts';
 
 const HOST = fileURLToPath(new URL('plugin-host.ts', import.meta.url));
@@ -15,9 +20,9 @@ const ICON_LIMIT = 16_000;
 
 const declaredSchema = z.object({
   settings: z.array(pluginGroupSchema),
-  slots: z.object({ composer: pluginSlotSchema.optional() }),
+  slots: z.object({ composer: composerSlotSchema.optional() }),
 });
-export type Declared = { settings: PluginGroup[]; slot?: PluginSlot };
+export type Declared = { settings: PluginGroup[]; composerSlot?: ComposerSlot };
 export const NOTHING: Declared = { settings: [] };
 
 const uiFile = (root: string) =>
@@ -75,10 +80,10 @@ export async function loadUi(root: string): Promise<Declared> {
   const twice = names.find((name, index) => names.indexOf(name) !== index);
   if (twice) throw new Error(`字段 ${twice} 重复`);
   const { settings, slots } = declared.data;
-  return { settings, slot: slots.composer && drawn(root, slots.composer) };
+  return { settings, composerSlot: slots.composer && drawn(root, slots.composer) };
 }
 // The slot with its icons in place of the paths of their files.
-function drawn(root: string, slot: PluginSlot): PluginSlot {
+function drawn(root: string, slot: ComposerSlot): ComposerSlot {
   const states = Object.entries(slot.states).map(([name, state]) => {
     const path = resolve(root, state.icon);
     if (!path.startsWith(resolve(root) + sep) || !path.endsWith('.svg') || !existsSync(path))

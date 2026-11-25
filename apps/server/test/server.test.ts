@@ -183,12 +183,19 @@ export const slots = { composer: { title: '订阅', initial: 'off',
     join(root, 'hooks', 'hooks.json'),
     JSON.stringify({ hooks: { RunEnded: [{ hooks: [hook] }] } }),
   );
-  await client.wait((message) => message.type === 'plugins' && !!message.plugins[0]?.slot);
+  await client.wait((message) => message.type === 'plugins' && !!message.plugins[0]?.composerSlot);
   const click = (from: string) =>
-    client.request({ type: 'plugin.slot', name: 'bell', sessionId, gesture: 'click', from });
+    client.request({
+      type: 'plugin.composerSlot',
+      name: 'bell',
+      sessionId,
+      gesture: 'click',
+      from,
+    });
   const moved = (state: string) =>
     client.wait(
-      (message) => message.type === 'session.updated' && message.session.slots?.bell === state,
+      (message) =>
+        message.type === 'session.updated' && message.session.composerSlots?.bell === state,
     );
   await click('off');
   await moved('once');
@@ -219,7 +226,7 @@ export const slots = { composer: { title: '订阅', initial: 'off',
   const store = new SessionStore(directory);
   const [cut, waiting] = ['运行中', '等下一轮'].map((title) => {
     const { id } = store.create(randomUUID(), title, 'D:\\p', device);
-    store.setSlot(id, 'bell', 'once');
+    store.setComposerSlot(id, 'bell', 'once');
     return id;
   });
   store.append(cut!, randomUUID(), {
@@ -230,7 +237,7 @@ export const slots = { composer: { title: '订阅', initial: 'off',
   store.close();
   const server = createProxyServer({ token, dataDir: directory, stepMs: 2 });
   await server.listen(0);
-  const slots = (id: string) => server.store.get(id).session.slots;
+  const slots = (id: string) => server.store.get(id).session.composerSlots;
   assert.deepEqual([slots(cut!), slots(waiting!)], [{ bell: 'off' }, { bell: 'once' }]);
   await server.close();
 });

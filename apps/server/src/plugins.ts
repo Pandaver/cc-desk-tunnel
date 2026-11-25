@@ -37,7 +37,7 @@ type Entry = {
 };
 
 // Where the states of the plugins' buttons are kept: with each session.
-type Slots = {
+type ComposerSlots = {
   of: (sessionId: string, name: string) => string | undefined;
   set: (sessionId: string, name: string, state: string) => void;
 };
@@ -54,7 +54,7 @@ const reason = (error: unknown) => (error instanceof Error ? error.message : Str
 export class Plugins {
   private directory: string;
   private changed: () => void;
-  private slots: Slots;
+  private composerSlots: ComposerSlots;
   private log: PluginLog;
   private entries = new Map<string, Entry>();
   // Apart from what is read anew, which may be while a plugin is set or runs.
@@ -70,11 +70,11 @@ export class Plugins {
   constructor(
     directory: string,
     changed: () => void = () => {},
-    slots: Slots = { of: () => undefined, set: () => {} },
+    composerSlots: ComposerSlots = { of: () => undefined, set: () => {} },
   ) {
     this.directory = directory;
     this.changed = changed;
-    this.slots = slots;
+    this.composerSlots = composerSlots;
     this.log = new PluginLog(directory);
   }
   async start() {
@@ -121,7 +121,7 @@ export class Plugins {
         failure: this.failures.get(name),
         events: entry.events,
         settings: entry.declared.settings,
-        slot: entry.declared.slot,
+        composerSlot: entry.declared.composerSlot,
         values: Object.fromEntries(Object.entries(values).filter(([key]) => !secret(key))),
         secrets: Object.keys(values).filter((key) => secret(key) && values[key] !== ''),
       };
@@ -157,16 +157,16 @@ export class Plugins {
   // Of the plugins that want a button, those that had one keep it, and the others get what is left. One that gets
   // none is not enabled.
   private grant(entries: Map<string, Entry>) {
-    const had = (name: string) => Number(!!this.entries.get(name)?.declared.slot);
+    const had = (name: string) => Number(!!this.entries.get(name)?.declared.composerSlot);
     const wanting = [...entries]
-      .filter(([, entry]) => entry.declared.slot)
+      .filter(([, entry]) => entry.declared.composerSlot)
       .sort(([a], [b]) => had(b) - had(a));
     const holders = wanting.slice(0, COMPOSER_SLOTS);
     if (holders.length < COMPOSER_SLOTS) for (const entry of entries.values()) delete entry.refused;
     const named = holders.map(([name, { manifest }]) => `“${manifest.displayName ?? name}”`);
     for (const [name, entry] of wanting.slice(COMPOSER_SLOTS)) {
       entry.declared = NOTHING;
-      entry.refused = `输入框旁的 ${COMPOSER_SLOTS} 个插槽已被${named.join('')}占用，停用其中一个后再启用。`;
+      entry.refused = `${COMPOSER_SLOTS} 个输入框插槽已被${named.join('')}占用，停用其中一个后再启用。`;
       const config = { ...this.config(name), enabled: false };
       writePluginConfig(this.directory, name, config);
       this.configs.set(name, config);
@@ -254,7 +254,7 @@ export class Plugins {
     this.stale.add(name);
     await this.refresh();
     const { refused } = this.entry(name);
-    if (enabled && refused) throw new DomainError('plugin_slots', refused);
+    if (enabled && refused) throw new DomainError('composer_slots', refused);
     this.log.write(name, enabled ? '启用' : '停用');
   }
   // Keeps each of the changes that holds, whatever else is still to be set.
@@ -317,7 +317,7 @@ export class Plugins {
     if (problem) return { ok: false, message: problem };
     const example = eventExample(event);
     if (!example) throw new DomainError('not_found', '没有这个事件。');
-    const { slot } = this.entry(name).declared;
+    const { composerSlot: slot } = this.entry(name).declared;
     if (slot && example.session_id) {
       const active = Object.keys(slot.states).find((state) => slot.states[state]!.active);
       example.slots = { composer: active ?? slotState(slot, undefined, this.values(name)) };
@@ -379,17 +379,17 @@ export class Plugins {
     }
   }
   private state(name: string, sessionId: string) {
-    const { slot } = this.entry(name).declared;
-    return slot && slotState(slot, this.slots.of(sessionId, name), this.values(name));
+    const { composerSlot: slot } = this.entry(name).declared;
+    return slot && slotState(slot, this.composerSlots.of(sessionId, name), this.values(name));
   }
   // Moves the plugin's button in a session, as a gesture or an event does. A gesture made on another state than it is
   // in came late.
   move(name: string, sessionId: string, cause: string, from?: string) {
-    const { slot } = this.entry(name).declared;
+    const { composerSlot: slot } = this.entry(name).declared;
     const state = this.state(name, sessionId);
     if (!slot || !state || (from !== undefined && from !== state)) return;
     const to = slotMove(slot, cause, state);
-    if (to) this.slots.set(sessionId, name, to);
+    if (to) this.composerSlots.set(sessionId, name, to);
   }
   // What a run's end does to the buttons of a session, where the service stopped before it could be told.
   interrupted(sessionId: string) {

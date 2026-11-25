@@ -2170,7 +2170,7 @@ export function App({
                 slot={(name, gesture, from) =>
                   void act(async () => {
                     await client.request({
-                      type: 'plugin.slot',
+                      type: 'plugin.composerSlot',
                       name,
                       sessionId: selected.id,
                       gesture,

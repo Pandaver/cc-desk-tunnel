@@ -316,9 +316,12 @@ export function createProxyServer(options: ServerOptions) {
       if (!closing) broadcast({ type: 'plugins', plugins: plugins.list() });
     },
     {
-      of: (sessionId, name) => store.get(sessionId).session.slots?.[name],
+      of: (sessionId, name) => store.get(sessionId).session.composerSlots?.[name],
       set: (sessionId, name, state) =>
-        broadcast({ type: 'session.updated', session: store.setSlot(sessionId, name, state) }),
+        broadcast({
+          type: 'session.updated',
+          session: store.setComposerSlot(sessionId, name, state),
+        }),
     },
   );
   const events = new ServiceEvents(
@@ -1727,7 +1730,7 @@ export function createProxyServer(options: ServerOptions) {
       return send(peer, { type: 'plugin.done', requestId, ...(await plugins.install(archive)) });
     }
     const { name, requestId } = command;
-    if (command.type === 'plugin.slot')
+    if (command.type === 'plugin.composerSlot')
       return plugins.move(name, command.sessionId, command.gesture, command.from);
     if (command.type === 'plugin.remove') await plugins.remove(name);
     else if (command.type === 'plugin.enable') await plugins.enable(name, command.enabled);
@@ -1777,7 +1780,7 @@ export function createProxyServer(options: ServerOptions) {
       case 'plugin.try':
       case 'plugin.log':
       case 'plugin.remove':
-      case 'plugin.slot':
+      case 'plugin.composerSlot':
       case 'plugin.upload':
       case 'plugin.install':
         await plugin(peer, command);

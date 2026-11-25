@@ -539,8 +539,8 @@ export const sessionSchema = z.object({
       compacted: z.boolean().optional(),
     })
     .optional(),
-  // The states of the plugins' buttons that were set in it (see `pluginSlotSchema`).
-  slots: z.record(pluginNameSchema, z.string().max(60)).optional(),
+  // The states of the plugins' buttons beside the message input that were set in it (see `composerSlotSchema`).
+  composerSlots: z.record(pluginNameSchema, z.string().max(60)).optional(),
   createdAt: timestamp,
   updatedAt: timestamp,
   activeRun: z

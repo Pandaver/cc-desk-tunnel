@@ -619,7 +619,7 @@ export class SessionStore {
       device: place.device,
       projectPath: place.projectPath ?? source.projectPath,
       autoTitle: false,
-      slots: undefined,
+      composerSlots: undefined,
       // Claude Code forks a session beside it, in the directory it works in.
       nativeRoot: native
         ? (source.nativeRoot ?? source.id)
@@ -813,9 +813,9 @@ export class SessionStore {
     this.save(session);
     return session;
   }
-  setSlot(sessionId: string, name: string, state: string) {
+  setComposerSlot(sessionId: string, name: string, state: string) {
     const { session } = this.get(sessionId);
-    session.slots = { ...session.slots, [name]: state };
+    session.composerSlots = { ...session.composerSlots, [name]: state };
     this.save(session);
     return session;
   }

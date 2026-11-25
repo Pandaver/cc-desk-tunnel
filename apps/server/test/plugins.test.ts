@@ -235,13 +235,13 @@ test('a third plugin that wants a button is not enabled while two have one', asy
   const enabled = () => plugins.list().flatMap(({ name, enabled }) => (enabled ? [name] : []));
   await plugins.start();
   assert.deepEqual(enabled(), ['b', 'c', 'none']);
-  assert.match(plugins.list()[2]!.problem!, /插槽已被“b”“c”占用/);
-  await assert.rejects(plugins.enable('d', true), /插槽已被“b”“c”占用/);
+  assert.match(plugins.list()[2]!.problem!, /输入框插槽已被“b”“c”占用/);
+  await assert.rejects(plugins.enable('d', true), /输入框插槽已被“b”“c”占用/);
   await plugins.enable('c', false);
   assert.equal(plugins.list()[2]!.problem, undefined);
   await plugins.enable('d', true);
   // Those that have one keep it, whatever their names.
-  await assert.rejects(plugins.enable('c', true), /插槽已被“b”“d”占用/);
+  await assert.rejects(plugins.enable('c', true), /输入框插槽已被“b”“d”占用/);
   assert.deepEqual(enabled(), ['b', 'd', 'none']);
 });
 

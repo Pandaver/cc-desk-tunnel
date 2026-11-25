@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { projectOf } from '@cc-desk-tunnel/protocol';
 import type { Plugin, Project, Session } from '@cc-desk-tunnel/protocol';
-import { SlotMarks } from './PluginSlot.tsx';
+import { ComposerSlotMarks } from './ComposerSlot.tsx';
 import type { ConnectedDevice } from './client.ts';
 import NoticeBell from './NoticeBell.tsx';
 import type { Notifications } from './notifications.ts';
@@ -284,7 +284,7 @@ export default function Sidebar({
       >
         <button type="button" className="session-select" onClick={() => select(session.id)}>
           <strong>{session.title}</strong>
-          <SlotMarks plugins={plugins} session={session} />
+          <ComposerSlotMarks plugins={plugins} session={session} />
           {session.activeRun && (
             <span className={`running-dot${breathing(session.activeRun) ? ' breathing' : ''}`} />
           )}

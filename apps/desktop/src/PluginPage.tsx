@@ -299,7 +299,7 @@ export default function PluginPage({
               </Row>
             )}
             {repository && (
-              <Row title="发布地址" detail="在这里查看新版本，下载压缩包后重新安装即可更新。">
+              <Row title="发布地址">
                 <Link url={repository}>{repository}</Link>
               </Row>
             )}

@@ -4746,14 +4746,17 @@ dialog:has(.ccdt-dialog) {
   width: 16px;
   height: 16px;
 }
-.plugin-intro {
+/* How much of each kind of slot is taken. */
+.plugin-tags {
   display: flex;
   flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 0 12px;
+  gap: 6px;
+  margin-top: 8px;
 }
-.plugin-intro > span {
-  white-space: nowrap;
+.plugin-tags > .badge {
+  border-color: var(--line);
+  background: var(--surface-2);
+  color: var(--text-2);
 }
 .plugin-empty {
   margin: 0;
@@ -4885,7 +4888,7 @@ dialog:has(> .plugin-log) {
   }
 }
 
-/* A plugin's button beside the message input, and its mark beside a session (see PluginSlot.tsx). */
+/* A plugin's button beside the message input, and its mark beside a session (see ComposerSlot.tsx). */
 .slot-control {
   flex-shrink: 0;
 }

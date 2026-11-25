@@ -2,22 +2,22 @@ import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { shownWhen, slotMove, slotState } from '@cc-desk-tunnel/protocol';
-import type { Plugin, PluginSlot, Session, SlotGesture } from '@cc-desk-tunnel/protocol';
+import type { Plugin, ComposerSlot, Session, SlotGesture } from '@cc-desk-tunnel/protocol';
 
-export type ShownSlot = { name: string; slot: PluginSlot; state: string };
+export type ShownSlot = { name: string; slot: ComposerSlot; state: string };
 // The plugins' buttons a session has, each in its state there.
-export const slotsOf = (plugins: Plugin[], session: Session): ShownSlot[] =>
-  plugins.flatMap(({ name, slot, values, problem }) =>
+export const composerSlots = (plugins: Plugin[], session: Session): ShownSlot[] =>
+  plugins.flatMap(({ name, composerSlot: slot, values, problem }) =>
     slot && !problem && shownWhen(slot.showWhen, values)
-      ? [{ name, slot, state: slotState(slot, session.slots?.[name], values) }]
+      ? [{ name, slot, state: slotState(slot, session.composerSlots?.[name], values) }]
       : [],
   );
 // Drawn as a mask, so that the icon takes the colour of the text and nothing in it runs.
 const iconStyle = (svg: string) =>
   ({ '--icon': `url("data:image/svg+xml,${encodeURIComponent(svg)}")` }) as CSSProperties;
 
-export function SlotMarks({ plugins, session }: { plugins: Plugin[]; session: Session }) {
-  return slotsOf(plugins, session).map(({ name, slot, state }) => {
+export function ComposerSlotMarks({ plugins, session }: { plugins: Plugin[]; session: Session }) {
+  return composerSlots(plugins, session).map(({ name, slot, state }) => {
     const { active, title, icon: svg } = slot.states[state]!;
     return slot.mark && active ? (
       <i
@@ -38,7 +38,7 @@ const DOUBLE_MS = 400;
 const HELD_MS = 200;
 const TIP_MS = 2500;
 
-export default function PluginSlotButton({
+export default function ComposerSlotButton({
   shown: { slot, state: told },
   disabled,
   move,
