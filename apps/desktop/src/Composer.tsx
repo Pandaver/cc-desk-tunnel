@@ -135,6 +135,7 @@ export default function Composer({
   const input = useRef<MessageInputHandle>(null);
   const tooLong = draft.length > messageLimit;
   const toolbar = useRef<HTMLDivElement>(null);
+  const slots = slotsOf(plugins, session);
   useLayoutEffect(() => {
     const bar = toolbar.current!;
     const fit = () => {
@@ -153,7 +154,7 @@ export default function Composer({
     observer.observe(bar);
     for (const child of bar.children) observer.observe(child);
     return () => observer.disconnect();
-  }, [session, native, capabilities, nativeSession, !!resume, !!draft.trim()]);
+  }, [session, native, capabilities, nativeSession, !!resume, !!draft.trim(), slots.length]);
   const branch = useBranch(session.projectPath, !!session.activeRun);
   const [dropping, setDropping] = useState(false);
   // The command menu: this window's own actions, then Claude Code's commands that fit what follows the slash. Enter
@@ -412,7 +413,7 @@ export default function Composer({
               change={(permissionMode) => void configure({ permissionMode })}
             />
           )}
-          {slotsOf(plugins, session).map((shown) => (
+          {slots.map((shown) => (
             <PluginSlotButton
               key={shown.name + session.id}
               shown={shown}

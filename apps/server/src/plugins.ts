@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, watch } from 
 import type { FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import {
+  COMPOSER_SLOTS,
   pluginManifestSchema,
   pluginNameSchema,
   slotMove,
@@ -31,6 +32,8 @@ type Entry = {
   declared: Declared;
   events: string[];
   broken?: string;
+  // It wanted a button when none was left, and so was not enabled.
+  refused?: string;
 };
 
 // Where the states of the plugins' buttons are kept: with each session.
@@ -111,7 +114,7 @@ export class Plugins {
         description: entry.manifest.description,
         version: entry.manifest.version,
         enabled,
-        problem: enabled ? this.problem(name) : undefined,
+        problem: enabled ? this.problem(name) : entry.refused,
         failure: this.failures.get(name),
         events: entry.events,
         settings: entry.declared.settings,
@@ -139,6 +142,7 @@ export class Plugins {
         entries.set(name, known && !stale.has(name) ? known : await this.load(name));
       }
       if (this.closed) return;
+      this.grant(entries);
       this.entries = entries;
       this.changed();
     };
@@ -146,6 +150,25 @@ export class Plugins {
       .then(read)
       .catch((error) => console.error(`Plugins were not read: ${reason(error)}`));
     return this.loading;
+  }
+  // Of the plugins that want a button, those that had one keep it, and the others get what is left. One that gets
+  // none is not enabled.
+  private grant(entries: Map<string, Entry>) {
+    const had = (name: string) => Number(!!this.entries.get(name)?.declared.slot);
+    const wanting = [...entries]
+      .filter(([, entry]) => entry.declared.slot)
+      .sort(([a], [b]) => had(b) - had(a));
+    const holders = wanting.slice(0, COMPOSER_SLOTS);
+    if (holders.length < COMPOSER_SLOTS) for (const entry of entries.values()) delete entry.refused;
+    const named = holders.map(([name, { manifest }]) => `“${manifest.displayName ?? name}”`);
+    for (const [name, entry] of wanting.slice(COMPOSER_SLOTS)) {
+      entry.declared = NOTHING;
+      entry.refused = `输入框旁的 ${COMPOSER_SLOTS} 个插槽已被${named.join('')}占用，停用其中一个后再启用。`;
+      const config = { ...this.config(name), enabled: false };
+      writePluginConfig(this.directory, name, config);
+      this.configs.set(name, config);
+      this.log.write(name, `没有启用：${entry.refused}`);
+    }
   }
   private async load(name: string): Promise<Entry> {
     const root = join(this.directory, 'plugins', name);
@@ -224,6 +247,8 @@ export class Plugins {
     this.log.write(name, enabled ? '启用' : '停用');
     this.stale.add(name);
     await this.refresh();
+    const { refused } = this.entry(name);
+    if (enabled && refused) throw new DomainError('plugin_slots', refused);
   }
   async configure(name: string, changes: Record<string, PluginValue | null>, save: boolean) {
     const entry = this.entry(name);
@@ -304,6 +329,10 @@ export class Plugins {
     this.log.write(name, `安装 ${version ?? ''}`.trim());
     this.stale.add(name);
     await this.refresh();
+    const { refused } = this.entry(name);
+    return refused
+      ? { ok: false, message: `已安装，但没有启用：${refused}` }
+      : { ok: true, message: '' };
   }
   async remove(name: string) {
     this.entry(name);

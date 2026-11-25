@@ -4657,12 +4657,107 @@ dialog:has(.ccdt-dialog) {
   overflow-wrap: anywhere;
 }
 
-/* The settings' page of the plugins: a card for each, with the fields it declares. */
-.plugin-card + .plugin-card {
-  margin-top: 16px;
+/* The settings' list of the plugins, and the page of one with the fields it declares. */
+.plugin-row {
+  flex-wrap: nowrap;
 }
-.plugin-install {
-  margin-bottom: 16px;
+.plugin-open {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.plugin-open > span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.plugin-open > svg {
+  flex-shrink: 0;
+  width: 16px;
+  color: var(--muted);
+}
+.plugin-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 10px -4px;
+  padding: 4px 8px 4px 2px;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+.plugin-back:hover {
+  background: var(--hover);
+}
+.plugin-back > svg {
+  width: 16px;
+}
+.plugin-remove {
+  color: var(--danger-text);
+}
+/* Within reach at the foot of a long form while there is something to save. */
+.plugin-save {
+  position: sticky;
+  z-index: 5;
+  bottom: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--raised);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+}
+.plugin-save > span {
+  flex: 1;
+  min-width: 120px;
+}
+@media (max-width: 700px) {
+  /* The title bar has the way back. */
+  .plugin-back {
+    display: none;
+  }
+  .plugin-fields label {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .settings-list.plugin-fields select,
+  .settings-list.plugin-fields input {
+    width: 100%;
+  }
+  .plugin-action {
+    flex-wrap: wrap;
+  }
+  .plugin-text .plugin-action {
+    flex-wrap: nowrap;
+  }
+  .plugin-facts {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+  .plugin-facts dd {
+    margin-bottom: 8px;
+  }
 }
 .plugin-facts {
   display: grid;
@@ -4692,12 +4787,6 @@ dialog:has(.ccdt-dialog) {
 .plugin-status.bad,
 .plugin-result.bad {
   color: var(--danger-text);
-}
-.plugin-group {
-  margin: 14px 0 0;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-2);
 }
 .settings-list label.plugin-text {
   align-items: stretch;

@@ -1723,7 +1723,8 @@ export function createProxyServer(options: ServerOptions) {
       const archive = peer.upload?.id === command.uploadId ? peer.upload.archive : undefined;
       peer.upload = undefined;
       if (!archive) throw new DomainError('plugin_archive', '没有收到完整的压缩包，请重新选择。');
-      return plugins.install(archive);
+      const { requestId } = command;
+      return send(peer, { type: 'plugin.done', requestId, ...(await plugins.install(archive)) });
     }
     const { name, requestId } = command;
     if (command.type === 'plugin.slot')

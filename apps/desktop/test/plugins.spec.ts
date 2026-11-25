@@ -122,48 +122,65 @@ test('a plugin is installed from an archive once its contents were agreed to, an
   expect(existsSync(resolve(plugins, 'notify'))).toBe(false);
   await page.screenshot({ path: resolve(shots, 'install.png') });
   await dialog.getByRole('button', { name: '安装', exact: true }).click();
-  const card = page.getByRole('region', { name: '通知', exact: true });
-  await expect(card).toContainText('通知 1.0.0');
+  await page.getByRole('button', { name: /^通知/ }).filter({ hasText: '正常' }).click();
+  await expect(page.locator('.workspace')).toContainText('版本 1.0.0');
   page.once('dialog', (asked) => void asked.accept());
-  await card.getByRole('button', { name: '删除' }).click();
-  await expect(card).toHaveCount(0);
+  await page.getByRole('button', { name: '删除', exact: true }).click();
+  await expect(page.getByText('还没有插件')).toBeVisible();
   expect(existsSync(resolve(plugins, 'notify'))).toBe(false);
 });
 
-test('a plugin put in place is set up, tried and switched off without a reload', async ({
+test('a plugin put in place is set up on its own page, tried and switched off without a reload', async ({
   page,
 }) => {
   await openPlugins(page);
   await expect(page.getByText('还没有插件')).toBeVisible();
   add('notify');
-  const card = page.getByRole('region', { name: '通知', exact: true });
-  await expect(card).toContainText('正常');
-  await expect(card.getByLabel('机器人地址')).toHaveCount(0);
-
-  await card.getByRole('switch', { name: '启用钉钉' }).click();
-  await card.getByLabel('机器人地址').fill('http://x');
-  await card.getByLabel('机器人地址').blur();
-  await expect(card).toContainText('要以 https:// 开头');
-  await card.getByRole('button', { name: '保存' }).click();
-  await expect(card.getByRole('button', { name: '保存' })).toBeEnabled();
-  await card.getByLabel('机器人地址').fill('https://example.com/robot');
-  await card.getByRole('button', { name: '发送测试消息' }).click();
-  await expect(card.getByRole('status')).toHaveText('已发送到 ***');
-  await card.getByRole('button', { name: '保存' }).click();
-  await expect(card.getByLabel('机器人地址')).toHaveAttribute('placeholder', '已设置，留空沿用');
-  await expect(card.getByLabel('机器人地址')).toHaveValue('');
-  await card.getByRole('button', { name: '试跑' }).click();
-  await expect(card.locator('pre')).toContainText('收到');
+  const row = page.locator('.plugin-open').filter({ hasText: '通知' });
+  await expect(row).toContainText('正常');
+  await expect(page.getByLabel('启用钉钉')).toHaveCount(0);
+  await row.click();
+  const form = page.locator('.workspace');
+  await expect(form.getByRole('heading', { level: 1 })).toHaveText('通知');
+  const url = form.getByLabel('机器人地址');
+  await expect(url).toHaveCount(0);
+  await form.getByRole('switch', { name: '启用钉钉' }).click();
+  await url.fill('http://x');
+  await url.blur();
+  await expect(form).toContainText('要以 https:// 开头');
+  // What is not saved is kept while the list is looked at.
+  await form.getByRole('button', { name: '插件', exact: true }).click();
+  await row.click();
+  await expect(url).toHaveValue('http://x');
+  await url.fill('https://example.com/robot');
+  await form.getByRole('button', { name: '发送测试消息' }).click();
+  await expect(form.locator('.plugin-result')).toHaveText('已发送到 ***');
+  await form.getByRole('button', { name: '保存' }).click();
+  await expect(url).toHaveAttribute('placeholder', '已设置，留空沿用');
+  await expect(url).toHaveValue('');
+  await form.getByRole('button', { name: '试跑' }).click();
+  await expect(form.locator('pre')).toContainText('收到');
   await page.screenshot({ path: resolve(shots, 'settings.png'), fullPage: true });
 
-  await card.getByRole('button', { name: '日志' }).click();
+  await form.getByRole('button', { name: '查看' }).click();
   await expect(page.locator('.plugin-log')).toContainText('[试跑] RunEnded → 成功');
   await expect(page.locator('.plugin-log')).not.toContainText('example.com');
   await page.screenshot({ path: resolve(shots, 'log.png') });
   await page.getByRole('button', { name: '关闭', exact: true }).click();
-  await card.getByRole('switch', { name: '启用 通知' }).click();
-  await expect(card).toContainText('已停用');
-  await expect(card.getByLabel('机器人地址')).toHaveCount(0);
+
+  // On a phone's width the way back is the title bar's, and nothing is wider than the page.
+  await page.setViewportSize({ width: 360, height: 780 });
+  await form.getByLabel('模板').fill('{session} {project}');
+  await page.screenshot({ path: resolve(shots, 'narrow.png') });
+  const wide = () => form.evaluate((node) => node.scrollWidth - node.clientWidth);
+  expect(await wide()).toBe(0);
+  await page.getByRole('button', { name: '后退', exact: true }).click();
+  await expect(row).toBeVisible();
+  expect(await wide()).toBe(0);
+  await page.screenshot({ path: resolve(shots, 'narrow-list.png') });
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.getByRole('switch', { name: '启用 通知' }).click();
+  await expect(row).toContainText('已停用');
 });
 
 test('a plugin’s button goes by click, double click and long press, in every window, and by the end of a run', async ({

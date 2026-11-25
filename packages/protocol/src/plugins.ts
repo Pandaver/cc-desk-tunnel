@@ -60,6 +60,8 @@ export type PluginValues = Record<string, PluginValue>;
 export const shownWhen = (showWhen: string | string[] | undefined, values: PluginValues) =>
   !showWhen || [showWhen].flat().some((name) => !!values[name]);
 
+// How many plugins may have a button beside the message input at once; a narrow toolbar holds no more.
+export const COMPOSER_SLOTS = 2;
 // A button of the plugin beside the message input, whose state each session has its own of. The service keeps the
 // state and the clients draw it; what the states mean is the plugin's alone.
 export const slotGestureSchema = z.enum(['click', 'doubleClick', 'longPress']);
@@ -123,7 +125,7 @@ export const pluginSchema = z.object({
   description: z.string().max(1000).optional(),
   version: z.string().max(60).optional(),
   enabled: z.boolean(),
-  // Why it does not run though it is enabled.
+  // Why it does not run though it is enabled, or could not be enabled.
   problem: z.string().optional(),
   // How it last failed, until it next goes well.
   failure: z.object({ at: z.iso.datetime(), message: z.string() }).optional(),

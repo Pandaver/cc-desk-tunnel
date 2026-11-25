@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
-import { shownWhen } from '@cc-desk-tunnel/protocol';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { COMPOSER_SLOTS, shownWhen } from '@cc-desk-tunnel/protocol';
 import type {
   Plugin,
   PluginField,
@@ -10,7 +11,7 @@ import type {
 } from '@cc-desk-tunnel/protocol';
 import type { ProxyClient } from './client.ts';
 import PluginInstall from './PluginInstall.tsx';
-import { Modal, Row, SettingText, Switch } from './ui.tsx';
+import { Modal, Page, Row, SettingsHeading, SettingText, Switch } from './ui.tsx';
 
 type Draft = Record<string, PluginValue | null>;
 type Done = { ok: boolean; message: string };
@@ -30,53 +31,132 @@ const failed = (error: unknown): Done => ({
   message: error instanceof Error ? error.message : '操作失败。',
 });
 
-// The service's plugins: each with its switch, the settings it declares, and what any of them has besides: a try of
-// an event and its log. The plugin's own code runs at the service; here is only what it declares.
+const titleOf = (plugin: Plugin) => plugin.title ?? plugin.name;
+function Status({ plugin }: { plugin: Plugin }) {
+  const { enabled, problem, failure } = plugin;
+  const text = !enabled
+    ? problem
+      ? `未启用：${problem}`
+      : '已停用'
+    : (problem ??
+      (failure
+        ? `最近一次失败（${new Date(failure.at).toLocaleString('zh-CN')}）：${failure.message}`
+        : '正常'));
+  return <span className={problem || failure ? 'plugin-status bad' : 'plugin-status'}>{text}</span>;
+}
+
+// The service's plugins, each opening its own page: its switch, the settings it declares, and what any of them has
+// besides, a try of an event and its log. The plugin's own code runs at the service; here is only what it declares.
 export default function PluginSettings({
   client,
   plugins,
+  shown,
+  open,
   browser,
 }: {
   client: ProxyClient;
   plugins: Plugin[];
+  shown?: string;
+  open: (name: string | undefined) => void;
   // Where plugins are set but neither installed nor removed.
   browser: boolean;
 }) {
+  // What was changed and is not saved, kept while the list is looked at.
+  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
+  const [failure, setFailure] = useState<{ name: string; message: string }>();
+  const plugin = plugins.find(({ name }) => name === shown);
+  const enable = async (name: string, enabled: boolean) => {
+    setFailure(undefined);
+    try {
+      await client.request({ type: 'plugin.enable', name, enabled });
+    } catch (error) {
+      setFailure({ name, message: failed(error).message });
+    }
+  };
+  if (plugin)
+    return (
+      <PluginPage
+        key={plugin.name}
+        client={client}
+        plugin={plugin}
+        fixed={browser}
+        draft={drafts[plugin.name] ?? {}}
+        setDraft={(change) =>
+          setDrafts((all) => ({ ...all, [plugin.name]: change(all[plugin.name] ?? {}) }))
+        }
+        enable={(enabled) => void enable(plugin.name, enabled)}
+        failure={failure?.name === plugin.name ? failure.message : undefined}
+        back={() => open(undefined)}
+      />
+    );
+  const taken = plugins.filter(({ slot }) => slot).length;
   return (
-    <>
-      {!browser && <PluginInstall client={client} />}
-      {!plugins.length && (
-        <div className="settings-list card">
+    <Page
+      title="插件"
+      intro={`保存在服务端，对所有连接到它的设备生效。输入框插槽已用 ${taken} / ${COMPOSER_SLOTS}。`}
+      actions={!browser && <PluginInstall client={client} />}
+    >
+      {failure && (
+        <p className="error-text" role="alert">
+          {failure.message}
+        </p>
+      )}
+      <div className="settings-list card">
+        {!plugins.length && (
           <p className="muted plugin-empty">
             还没有插件。插件也可以直接放进服务端数据目录的 plugins，放进去就会出现在这里。
           </p>
-        </div>
-      )}
-      {plugins.map((plugin) => (
-        <PluginCard key={plugin.name} client={client} plugin={plugin} fixed={browser} />
-      ))}
-    </>
+        )}
+        {plugins.map((item) => (
+          <div className="setting-row plugin-row" key={item.name}>
+            <button type="button" className="plugin-open" onClick={() => open(item.name)}>
+              <span>
+                <strong>{titleOf(item)}</strong>
+                {item.description && <small>{item.description}</small>}
+                <small>
+                  <Status plugin={item} />
+                </small>
+              </span>
+              <ChevronRight />
+            </button>
+            <Switch
+              label={`启用 ${titleOf(item)}`}
+              checked={item.enabled}
+              onChange={(enabled) => void enable(item.name, enabled)}
+            />
+          </div>
+        ))}
+      </div>
+    </Page>
   );
 }
 
-function PluginCard({
+function PluginPage({
   client,
   plugin,
   fixed,
+  draft,
+  setDraft,
+  enable,
+  failure,
+  back,
 }: {
   client: ProxyClient;
   plugin: Plugin;
   fixed: boolean;
+  draft: Draft;
+  setDraft: (change: (draft: Draft) => Draft) => void;
+  enable: (enabled: boolean) => void;
+  failure?: string;
+  back: () => void;
 }) {
-  // What was changed and is not saved.
-  const [draft, setDraft] = useState<Draft>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState<string>();
   const [results, setResults] = useState<Record<string, Done | 'running'>>({});
   const [logging, setLogging] = useState(false);
   const [busy, setBusy] = useState(false);
   const { name } = plugin;
-  const title = plugin.title ?? name;
+  const title = titleOf(plugin);
   const value = (key: string) =>
     draft[key] === undefined ? (plugin.values[key] ?? '') : (draft[key] ?? '');
   const values: PluginValues = { ...plugin.values };
@@ -98,7 +178,7 @@ function PluginCard({
           ? reply.errors
           : Object.fromEntries(Object.entries(reply.errors).filter(([key]) => key in draft)),
       );
-      if (reply.saved) setDraft({});
+      if (reply.saved) setDraft(() => ({}));
     } catch (error) {
       setNotice(failed(error).message);
     } finally {
@@ -214,54 +294,76 @@ function PluginCard({
     const shown = Object.entries(item.fields).filter(([key]) => whole || switches.includes(key));
     if (!shown.length) return null;
     return (
-      <div key={item.title} role="group" aria-label={item.title}>
-        <h3 className="plugin-group">{item.title}</h3>
-        {shown.map(([key, entry]) => field(key, entry))}
-      </div>
+      <section key={item.title} aria-label={item.title}>
+        <SettingsHeading>{item.title}</SettingsHeading>
+        <div className="settings-list card plugin-fields">
+          {shown.map(([key, entry]) => field(key, entry))}
+        </div>
+      </section>
     );
   }
-  const status = !plugin.enabled
-    ? '已停用'
-    : (plugin.problem ??
-      (plugin.failure
-        ? `最近一次失败（${new Date(plugin.failure.at).toLocaleString('zh-CN')}）：${plugin.failure.message}`
-        : '正常'));
+  const changed = Object.keys(draft).length > 0;
   return (
-    <>
-      <section className="settings-list card plugin-card" aria-label={title}>
+    <Page
+      title={title}
+      intro={plugin.description}
+      before={
+        <button type="button" className="plugin-back" onClick={back}>
+          <ChevronLeft />
+          插件
+        </button>
+      }
+    >
+      <div className="settings-list card">
         <Row
-          title={plugin.version ? `${title} ${plugin.version}` : title}
+          title="启用"
           detail={
             <>
-              {plugin.description}
-              <span
-                className={plugin.problem || plugin.failure ? 'plugin-status bad' : 'plugin-status'}
-              >
-                {status}
-              </span>
+              {plugin.version && `版本 ${plugin.version}，`}
+              <Status plugin={plugin} />
             </>
           }
         >
-          <Switch
-            label={`启用 ${title}`}
-            checked={plugin.enabled}
-            onChange={(enabled) =>
-              void act('enable', async () => {
-                await client.request({ type: 'plugin.enable', name, enabled });
-                setDraft({});
-                return undefined;
-              })
-            }
-          />
+          <Switch label={`启用 ${title}`} checked={plugin.enabled} onChange={enable} />
         </Row>
-        {plugin.settings.map(group)}
-        {notice && (
-          <p className="plugin-notice" role="alert">
-            {notice}
-          </p>
-        )}
-        <div className="plugin-foot">
-          {plugin.enabled && plugin.events.length > 0 && (
+      </div>
+      {failure && (
+        <p className="error-text" role="alert">
+          {failure}
+        </p>
+      )}
+      {plugin.settings.map(group)}
+      {(changed || notice) && (
+        <div className="plugin-save">
+          <span role={notice ? 'alert' : undefined}>{notice ?? '有未保存的改动'}</span>
+          <button
+            type="button"
+            className="button"
+            disabled={busy}
+            onClick={() => {
+              setDraft(() => ({}));
+              setErrors({});
+              setNotice(undefined);
+            }}
+          >
+            {changed ? '放弃' : '知道了'}
+          </button>
+          {changed && (
+            <button
+              type="button"
+              className="button primary"
+              disabled={busy}
+              onClick={() => void configure(true)}
+            >
+              保存
+            </button>
+          )}
+        </div>
+      )}
+      <SettingsHeading>排查</SettingsHeading>
+      <div className="settings-list card">
+        {plugin.enabled && plugin.events.length > 0 && (
+          <Row title="试跑" detail="用示例事件和已保存的设置运行插件，渠道会真的收到。">
             <Try
               events={plugin.events}
               running={results.try === 'running'}
@@ -269,41 +371,36 @@ function PluginCard({
                 void act('try', () => client.fetch({ type: 'plugin.try', name, event }))
               }
             />
-          )}
-          {!fixed && (
+          </Row>
+        )}
+        <Result done={results.try} block />
+        <Row title="日志" detail="每次运行的结果、用时和插件打印的内容。">
+          <button type="button" className="button" onClick={() => setLogging(true)}>
+            查看
+          </button>
+        </Row>
+        {!fixed && (
+          <Row title="删除插件" detail="连同它的设置、数据和日志。">
             <button
               type="button"
-              className="button"
+              className="button plugin-remove"
               onClick={() =>
                 window.confirm(`删除“${title}”，连同它的设置、数据和日志？`) &&
-                void act('enable', async () => {
+                void act('remove', async () => {
                   await client.request({ type: 'plugin.remove', name });
+                  back();
                   return undefined;
                 })
               }
             >
               删除
             </button>
-          )}
-          <button type="button" className="button" onClick={() => setLogging(true)}>
-            日志
-          </button>
-          {plugin.settings.length > 0 && (
-            <button
-              type="button"
-              className="button primary"
-              disabled={busy || !Object.keys(draft).length}
-              onClick={() => void configure(true)}
-            >
-              保存
-            </button>
-          )}
-        </div>
-        <Result done={results.try} block />
-        <Result done={results.enable} block />
-      </section>
+          </Row>
+        )}
+        <Result done={results.remove} block />
+      </div>
       {logging && <Log client={client} name={name} title={title} close={() => setLogging(false)} />}
-    </>
+    </Page>
   );
 }
 

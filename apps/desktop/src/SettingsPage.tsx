@@ -926,9 +926,13 @@ export default function SettingsPage({
   browser = false,
   here,
   plugins = [],
+  plugin,
+  openPlugin = () => {},
 }: {
-  // The service's, once there is a connection to one.
+  // The service's, once there is a connection to one, and the one whose settings are shown.
   plugins?: Plugin[];
+  plugin?: string;
+  openPlugin?: (name: string | undefined) => void;
   // This computer as the service lists it, with the shells it runs Claude's scripts in. A Windows one has a page for
   // the shell Claude should prefer.
   here?: ConnectedDevice;
@@ -1059,9 +1063,13 @@ export default function SettingsPage({
               <WebAccessSettings client={client} browser={browser} connectionUrl={form.url} />
             </Page>
           ) : section === 'plugins' ? (
-            <Page title="插件" intro={everyDevice}>
-              <PluginSettings client={client} plugins={plugins} browser={browser} />
-            </Page>
+            <PluginSettings
+              client={client}
+              plugins={plugins}
+              shown={plugin}
+              open={openPlugin}
+              browser={browser}
+            />
           ) : section === 'install' && browser ? (
             <InstallAppSettings />
           ) : section === 'general' ? (

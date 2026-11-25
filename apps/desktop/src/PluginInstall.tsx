@@ -47,7 +47,8 @@ export default function PluginInstall({ client }: { client: ProxyClient }) {
   async function install() {
     setBusy(true);
     try {
-      await client.request({ type: 'plugin.install', uploadId: found!.uploadId });
+      const done = await client.fetch({ type: 'plugin.install', uploadId: found!.uploadId });
+      if (!done.ok) setFailure(done.message);
     } catch (error) {
       setFailure(said(error));
     } finally {

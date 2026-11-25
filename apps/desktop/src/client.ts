@@ -79,6 +79,7 @@ type Replies = {
   'plugin.configure': 'plugin.checked';
   'plugin.press': 'plugin.done';
   'plugin.try': 'plugin.done';
+  'plugin.install': 'plugin.done';
   'plugin.log': 'plugin.log';
   'plugin.upload': 'plugin.archive';
 };

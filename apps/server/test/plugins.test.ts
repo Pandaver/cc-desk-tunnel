@@ -211,6 +211,37 @@ test('an archive is checked before any of it is run, and takes the place of the 
   assert.deepEqual(plugins.list(), []);
 });
 
+test('a third plugin that wants a button is not enabled while two have one', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'cc-desk-tunnel-plugins-'));
+  const add = (name: string, ui: string) => {
+    const root = join(directory, 'plugins', name);
+    mkdirSync(join(root, 'hooks'), { recursive: true });
+    writeFileSync(join(root, 'hooks', 'hooks.json'), '{"hooks":{}}');
+    writeFileSync(join(root, 'a.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
+    writeFileSync(join(root, 'ui.mjs'), ui);
+  };
+  const button =
+    "export const slots = { composer: { title: 'B', initial: 'a', states: { a: { icon: 'a.svg', title: 'A' } }, on: {} } };";
+  for (const name of ['b', 'c', 'd']) add(name, button);
+  add('none', 'export const settings = [];');
+  const plugins = new Plugins(directory);
+  t.after(() => {
+    plugins.close();
+    rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+  const enabled = () => plugins.list().flatMap(({ name, enabled }) => (enabled ? [name] : []));
+  await plugins.start();
+  assert.deepEqual(enabled(), ['b', 'c', 'none']);
+  assert.match(plugins.list()[2]!.problem!, /插槽已被“b”“c”占用/);
+  await assert.rejects(plugins.enable('d', true), /插槽已被“b”“c”占用/);
+  await plugins.enable('c', false);
+  assert.equal(plugins.list()[2]!.problem, undefined);
+  await plugins.enable('d', true);
+  // Those that have one keep it, whatever their names.
+  await assert.rejects(plugins.enable('c', true), /插槽已被“b”“d”占用/);
+  assert.deepEqual(enabled(), ['b', 'd', 'none']);
+});
+
 test('every wait is resolved by the end of its run, and a failed run says why and how the quota stands', () => {
   const heard: ServiceEvent[] = [];
   const window = { name: 'five_hour', utilization: 42, resetsAt: '2026-11-25T08:00:00.000Z' };
