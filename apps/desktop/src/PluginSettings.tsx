@@ -1,19 +1,12 @@
 import { useState } from 'react';
 import { ChevronRight, ScrollText, Trash2 } from 'lucide-react';
 import { COMPOSER_SLOTS } from '@cc-desk-tunnel/protocol';
-import type { Plugin, PluginSlot } from '@cc-desk-tunnel/protocol';
+import type { Plugin } from '@cc-desk-tunnel/protocol';
 import type { ProxyClient } from './client.ts';
 import PluginInstall from './PluginInstall.tsx';
 import PluginLog from './PluginLog.tsx';
 import PluginPage, { titleOf, troubleOf } from './PluginPage.tsx';
-import { iconStyle } from './PluginSlot.tsx';
 import { IconButton, Page, Switch } from './ui.tsx';
-
-const holds = `在输入框旁有按钮，最多同时 ${COMPOSER_SLOTS} 个插件有`;
-function slotIcon({ states }: PluginSlot) {
-  const all = Object.values(states);
-  return (all.find(({ active }) => active) ?? all[0]!).icon;
-}
 
 // The service's plugins, each opening a page of its own.
 export default function PluginSettings({
@@ -57,7 +50,14 @@ export default function PluginSettings({
   return (
     <Page
       title="插件"
-      intro="保存在服务端，对所有连接到它的设备生效。"
+      intro={
+        <span className="plugin-intro">
+          保存在服务端，对所有连接到它的设备生效。
+          <span title={`输入框旁的插件按钮，最多同时 ${COMPOSER_SLOTS} 个`}>
+            插槽 {plugins.filter(({ slot }) => slot).length}/{COMPOSER_SLOTS}
+          </span>
+        </span>
+      }
       actions={
         !browser && (
           <PluginInstall
@@ -87,15 +87,6 @@ export default function PluginSettings({
               <button type="button" className="plugin-open" onClick={() => open(item.name)}>
                 <strong>
                   {title}
-                  {item.slot && (
-                    <i
-                      className="slot-icon plugin-holds"
-                      role="img"
-                      aria-label={holds}
-                      title={holds}
-                      style={iconStyle(slotIcon(item.slot))}
-                    />
-                  )}
                   {trouble && <i className="badge plugin-badge">{trouble.word}</i>}
                   <ChevronRight />
                 </strong>

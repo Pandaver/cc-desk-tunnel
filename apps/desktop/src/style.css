@@ -4746,10 +4746,14 @@ dialog:has(.ccdt-dialog) {
   width: 16px;
   height: 16px;
 }
-.slot-icon.plugin-holds {
-  width: 14px;
-  height: 14px;
-  color: var(--muted);
+.plugin-intro {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0 12px;
+}
+.plugin-intro > span {
+  white-space: nowrap;
 }
 .plugin-empty {
   margin: 0;

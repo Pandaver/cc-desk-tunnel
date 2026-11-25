@@ -13,7 +13,7 @@ export const slotsOf = (plugins: Plugin[], session: Session): ShownSlot[] =>
       : [],
   );
 // Drawn as a mask, so that the icon takes the colour of the text and nothing in it runs.
-export const iconStyle = (svg: string) =>
+const iconStyle = (svg: string) =>
   ({ '--icon': `url("data:image/svg+xml,${encodeURIComponent(svg)}")` }) as CSSProperties;
 
 export function SlotMarks({ plugins, session }: { plugins: Plugin[]; session: Session }) {
