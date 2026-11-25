@@ -1,0 +1,131 @@
+import { terminalStatuses } from '@cc-desk-tunnel/protocol';
+import type { Device, Session, SessionEvent } from '@cc-desk-tunnel/protocol';
+
+// The contract with plugins, described in docs/plugins.md. It is apart from the protocol between client and service:
+// fields may be added to it freely, and the version goes up only when one is removed or changes its meaning.
+export const EVENTS_VERSION = 1;
+export type ServiceEventName =
+  | 'ApprovalRequested'
+  | 'QuestionAsked'
+  | 'TerminalWaiting'
+  | 'WaitResolved'
+  | 'BackgroundOnly'
+  | 'RunError'
+  | 'RunEnded'
+  | 'DeviceOnline'
+  | 'DeviceOffline';
+export type ServiceEvent = {
+  version: typeof EVENTS_VERSION;
+  hook_event_name: ServiceEventName;
+  timestamp: string;
+  [field: string]: unknown;
+};
+// The field a hook's matcher is held against; the other events take no matcher.
+export const matcherFields: Partial<Record<ServiceEventName, string>> = {
+  ApprovalRequested: 'tool_name',
+  WaitResolved: 'waiting',
+  RunError: 'code',
+  RunEnded: 'status',
+};
+
+type Wait = { waiting: 'approval' | 'question' | 'terminal'; tool_name?: string };
+type Followed = { startedAt: number; tools: Map<string, string>; waits: Map<string, Wait> };
+
+// Makes the service's events out of what its sessions record. They say what happened and where, and nothing of what
+// was said: no messages, no tool input or output.
+export class ServiceEvents {
+  private runs = new Map<string, Followed>();
+  private session: (sessionId: string) => Session;
+  private emit: (event: ServiceEvent) => void;
+  constructor(session: (sessionId: string) => Session, emit: (event: ServiceEvent) => void) {
+    this.session = session;
+    this.emit = emit;
+  }
+  device(name: 'DeviceOnline' | 'DeviceOffline', device: Device) {
+    this.emit({
+      version: EVENTS_VERSION,
+      hook_event_name: name,
+      timestamp: new Date().toISOString(),
+      device,
+    });
+  }
+  observe(event: SessionEvent) {
+    const { payload, runId } = event;
+    switch (payload.type) {
+      case 'tool.requested':
+        this.follow(event).tools.set(payload.toolId, payload.name);
+        break;
+      case 'tool.result':
+        this.runs.get(runId)?.tools.delete(payload.toolId);
+        break;
+      case 'approval.requested': {
+        const run = this.follow(event);
+        const tool_name = run.tools.get(payload.toolId);
+        const waiting = tool_name === 'AskUserQuestion' ? 'question' : 'approval';
+        this.wait(event, payload.approvalId, { waiting, tool_name });
+        break;
+      }
+      case 'approval.resolved':
+        this.resolve(event, payload.approvalId, payload.allowed);
+        break;
+      case 'run.error':
+        this.fire('RunError', event, { code: payload.code, message: payload.message });
+        break;
+      case 'run.status': {
+        const run = this.follow(event);
+        if (terminalStatuses.has(payload.status)) {
+          for (const id of [...run.waits.keys()]) this.resolve(event, id);
+          this.runs.delete(runId);
+          if (payload.surface !== 'terminal')
+            this.fire('RunEnded', event, {
+              status: payload.status,
+              reason: payload.reason,
+              duration_ms: Date.parse(event.createdAt) - run.startedAt,
+            });
+        } else if (payload.surface === 'terminal') {
+          if (payload.activity === 'waiting') this.wait(event, runId, { waiting: 'terminal' });
+          else this.resolve(event, runId);
+        } else if (payload.waiting === 'background') this.fire('BackgroundOnly', event);
+      }
+    }
+  }
+  private follow({ runId, createdAt }: SessionEvent) {
+    let run = this.runs.get(runId);
+    if (!run) {
+      run = { startedAt: Date.parse(createdAt), tools: new Map(), waits: new Map() };
+      this.runs.set(runId, run);
+    }
+    return run;
+  }
+  private wait(event: SessionEvent, id: string, wait: Wait) {
+    this.follow(event).waits.set(id, wait);
+    if (wait.waiting === 'terminal') this.fire('TerminalWaiting', event, { wait_id: id });
+    else
+      this.fire(wait.waiting === 'question' ? 'QuestionAsked' : 'ApprovalRequested', event, {
+        wait_id: id,
+        tool_name: wait.tool_name,
+      });
+  }
+  // `allowed` is absent when nobody decided: the run ended, or the terminal does not say.
+  private resolve(event: SessionEvent, id: string, allowed?: boolean) {
+    const waits = this.runs.get(event.runId)?.waits;
+    const wait = waits?.get(id);
+    if (!wait) return;
+    waits!.delete(id);
+    this.fire('WaitResolved', event, { wait_id: id, ...wait, allowed });
+  }
+  private fire(name: ServiceEventName, event: SessionEvent, fields: Record<string, unknown> = {}) {
+    const session = this.session(event.sessionId);
+    this.emit({
+      version: EVENTS_VERSION,
+      hook_event_name: name,
+      timestamp: event.createdAt,
+      session_id: session.id,
+      session_title: session.title,
+      project_path: session.projectPath,
+      device: session.device,
+      run_id: event.runId,
+      ...fields,
+    });
+  }
+}
