@@ -251,11 +251,11 @@ export class Plugins {
   async enable(name: string, enabled: boolean) {
     this.entry(name);
     this.write(name, { ...this.config(name), enabled });
-    this.log.write(name, enabled ? '启用' : '停用');
     this.stale.add(name);
     await this.refresh();
     const { refused } = this.entry(name);
     if (enabled && refused) throw new DomainError('plugin_slots', refused);
+    this.log.write(name, enabled ? '启用' : '停用');
   }
   // Keeps each of the changes that holds, whatever else is still to be set.
   async configure(name: string, changes: Record<string, PluginValue | null>) {

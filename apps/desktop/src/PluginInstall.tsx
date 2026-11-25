@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { Plus } from 'lucide-react';
 import { PLUGIN_ARCHIVE_LIMIT, PLUGIN_PART_BYTES } from '@cc-desk-tunnel/protocol';
 import type { ServerMessage } from '@cc-desk-tunnel/protocol';
 import type { ProxyClient } from './client.ts';
@@ -15,14 +16,20 @@ const base64 = (bytes: Uint8Array) => {
 
 // Installs a plugin from a zip archive: the service says what is in it, without running any of it, and it is put in
 // place once the user agrees.
-export default function PluginInstall({ client }: { client: ProxyClient }) {
+export default function PluginInstall({
+  client,
+  failed: setFailure,
+}: {
+  client: ProxyClient;
+  // Told why it could not be installed, or nothing once another is tried.
+  failed: (message: string | undefined) => void;
+}) {
   const input = useRef<HTMLInputElement>(null);
   const [found, setFound] = useState<(Archive & { uploadId: string }) | null>(null);
-  const [failure, setFailure] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function upload(file: File) {
-    setFailure(null);
+    setFailure(undefined);
     setBusy(true);
     try {
       if (file.size > PLUGIN_ARCHIVE_LIMIT) throw new Error('压缩包超过 5 MB。');
@@ -58,33 +65,29 @@ export default function PluginInstall({ client }: { client: ProxyClient }) {
   }
   return (
     <>
-      <div className="plugin-install">
-        <input
-          ref={input}
-          type="file"
-          accept=".zip"
-          aria-label="插件压缩包"
-          hidden
-          onChange={({ target }) => {
-            const file = target.files?.[0];
-            target.value = '';
-            if (file) void upload(file);
-          }}
-        />
-        <button
-          type="button"
-          className="button"
-          disabled={busy}
-          onClick={() => input.current!.click()}
-        >
-          从压缩包安装…
-        </button>
-        {failure && (
-          <p className="error-text" role="alert">
-            {failure}
-          </p>
-        )}
-      </div>
+      <input
+        ref={input}
+        type="file"
+        accept=".zip"
+        aria-label="插件压缩包"
+        hidden
+        onChange={({ target }) => {
+          const file = target.files?.[0];
+          target.value = '';
+          if (file) void upload(file);
+        }}
+      />
+      <button
+        type="button"
+        className="button plugin-install"
+        title="从 zip 压缩包安装插件"
+        aria-label="安装插件"
+        disabled={busy}
+        onClick={() => input.current!.click()}
+      >
+        <Plus />
+        <span>安装插件</span>
+      </button>
       {found && (
         <Modal
           title={`${found.replaces ? '更新' : '安装'}“${found.manifest.displayName ?? found.manifest.name}”`}

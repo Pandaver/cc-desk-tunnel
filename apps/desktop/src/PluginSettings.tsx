@@ -6,7 +6,8 @@ import type { ProxyClient } from './client.ts';
 import PluginInstall from './PluginInstall.tsx';
 import PluginLog from './PluginLog.tsx';
 import PluginPage, { titleOf, troubleOf } from './PluginPage.tsx';
-import { IconButton, Page, Switch } from './ui.tsx';
+import { iconStyle } from './PluginSlot.tsx';
+import { IconButton, Page, SettingsHeading, Switch } from './ui.tsx';
 
 // The service's plugins, each opening a page of its own.
 export default function PluginSettings({
@@ -47,12 +48,19 @@ export default function PluginSettings({
         back={() => open(undefined)}
       />
     );
-  const taken = plugins.filter(({ slot }) => slot).length;
+  const taken = plugins.filter(({ slot }) => slot);
   return (
     <Page
       title="插件"
-      intro={`保存在服务端，对所有连接到它的设备生效。输入框插槽已用 ${taken} / ${COMPOSER_SLOTS}。`}
-      actions={!browser && <PluginInstall client={client} />}
+      intro="保存在服务端，对所有连接到它的设备生效。"
+      actions={
+        !browser && (
+          <PluginInstall
+            client={client}
+            failed={(message) => setFailure(message ? { name: '', message } : undefined)}
+          />
+        )
+      }
     >
       {/* What its row says already is not said twice. */}
       {failure && !plugins.some(({ problem }) => problem === failure.message) && (
@@ -108,6 +116,38 @@ export default function PluginSettings({
           );
         })}
       </div>
+      {plugins.length > 0 && (
+        <>
+          <SettingsHeading>输入框插槽</SettingsHeading>
+          <p className="muted page-section-note">
+            插件放在输入框旁的按钮，最多同时有 {COMPOSER_SLOTS} 个。
+          </p>
+          <div className="plugin-slots">
+            {Array.from({ length: COMPOSER_SLOTS }, (_, index) => {
+              const holder = taken[index];
+              if (!holder)
+                return (
+                  <span className="plugin-slot" key={index}>
+                    空闲
+                  </span>
+                );
+              const states = Object.values(holder.slot!.states);
+              const { icon } = states.find(({ active }) => active) ?? states[0]!;
+              return (
+                <button
+                  type="button"
+                  className="plugin-slot taken"
+                  key={index}
+                  onClick={() => open(holder.name)}
+                >
+                  <i className="slot-icon" style={iconStyle(icon)} />
+                  <span>{titleOf(holder)}</span>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
       {logging && (
         <PluginLog
           client={client}

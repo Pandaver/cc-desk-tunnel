@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { ProxyClient } from './client.ts';
-import { Modal } from './ui.tsx';
+import { Modal, Switch } from './ui.tsx';
 
 export default function PluginLog({
   client,
@@ -30,22 +30,20 @@ export default function PluginLog({
     );
   const shown = records.filter(
     (record) =>
-      !onlyFailures || /→ (退出|超时|没有启动)|失败|没有运行/.test(record.split('\n')[0]!),
+      !onlyFailures || /→ (退出|超时|没有启动)|失败|没有(运行|启用)/.test(record.split('\n')[0]!),
   );
   return (
     <Modal title={`${title}：日志`} onClose={close}>
       <pre className="plugin-log">
-        {text === null ? '正在读取…' : shown.join('\n') || '没有记录'}
+        {text === null
+          ? '正在读取…'
+          : shown.join('\n') || (onlyFailures ? '没有失败的记录' : '没有记录')}
       </pre>
       <div className="plugin-foot">
-        <label className="plugin-only">
-          <input
-            type="checkbox"
-            checked={onlyFailures}
-            onChange={({ target }) => setOnlyFailures(target.checked)}
-          />
+        <span className="plugin-only">
+          <Switch label="只看失败" checked={onlyFailures} onChange={setOnlyFailures} />
           只看失败
-        </label>
+        </span>
         <button
           type="button"
           className="button"

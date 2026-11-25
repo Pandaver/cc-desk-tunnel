@@ -13,7 +13,7 @@ export const slotsOf = (plugins: Plugin[], session: Session): ShownSlot[] =>
       : [],
   );
 // Drawn as a mask, so that the icon takes the colour of the text and nothing in it runs.
-const icon = (svg: string) =>
+export const iconStyle = (svg: string) =>
   ({ '--icon': `url("data:image/svg+xml,${encodeURIComponent(svg)}")` }) as CSSProperties;
 
 export function SlotMarks({ plugins, session }: { plugins: Plugin[]; session: Session }) {
@@ -25,7 +25,7 @@ export function SlotMarks({ plugins, session }: { plugins: Plugin[]; session: Se
         className="slot-icon slot-mark"
         role="img"
         aria-label={`${slot.title}：${title}`}
-        style={icon(svg)}
+        style={iconStyle(svg)}
       />
     ) : null;
   });
@@ -134,7 +134,7 @@ export default function PluginSlotButton({
         <i
           key={moves}
           className={`slot-icon ${drawn.pivot ?? 'center'} ${effect ?? ''}`}
-          style={icon(drawn.icon)}
+          style={iconStyle(drawn.icon)}
         />
         {holding && slot.hold.ring && (
           <svg
